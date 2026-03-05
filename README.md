@@ -1,4 +1,6 @@
-# React + TypeScript + Vite
+# chart-trader
+
+React + TypeScript + Vite 기반 프로젝트입니다.
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
