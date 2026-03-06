@@ -22,6 +22,7 @@ interface Props {
   onOpenBoard: () => void;
   onOpenUserBoard?: () => void;
   onOpenSecurityFaq?: () => void;
+  onOpenAltScanner?: () => void;
   isMobile?: boolean;
   mobilePanel?: 'none' | 'tickers' | 'settings';
   onToggleMobilePanel?: (panel: 'tickers' | 'settings') => void;
@@ -37,7 +38,7 @@ export function Toolbar({
   fontSize, onFontSizeChange, activeColor, onActiveColorChange,
   isMultiMode, onToggleMultiMode, isPaperMode, onTogglePaperMode,
   indicators, onToggleIndicator,
-  onOpenBoard, onOpenUserBoard, onOpenSecurityFaq,
+  onOpenBoard, onOpenUserBoard, onOpenSecurityFaq, onOpenAltScanner,
   isMobile, mobilePanel, onToggleMobilePanel,
 }: Props) {
   const toggleMode = (m: DrawingMode) => {
@@ -214,6 +215,15 @@ export function Toolbar({
         title="도형 게시판"
       >
         📋 도형게시판
+      </button>
+
+      {/* Alt scanner button */}
+      <button
+        style={styles.altScannerBtn}
+        onClick={onOpenAltScanner}
+        title="알트추천 (돌파 스캐너)"
+      >
+        🔍 알트추천
       </button>
 
       {/* User board button */}
@@ -424,6 +434,22 @@ const styles: Record<string, React.CSSProperties> = {
     borderColor: '#f0b90b',
     color: '#f0b90b',
     background: 'rgba(240,185,11,0.12)',
+  },
+  // ── Alt scanner button ───────────────────────────────────────────────────
+  altScannerBtn: {
+    background: 'none',
+    border: '1px solid rgba(240,185,11,0.45)',
+    borderRadius: 4,
+    color: '#f0b90b',
+    cursor: 'pointer',
+    fontSize: '0.85rem',
+    fontWeight: 500,
+    padding: '4px 10px',
+    transition: 'all 0.1s',
+    fontFamily: 'inherit',
+    flexShrink: 0,
+    whiteSpace: 'nowrap',
+    opacity: 0.85,
   },
   // ── Board button ──────────────────────────────────────────────────────────
   boardBtn: {

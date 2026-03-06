@@ -738,11 +738,14 @@ function renderTrendline(
     if (d.memo?.trim()) {
       ctx.save();
       ctx.font = 'bold 11px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif';
-      ctx.fillStyle = hexToRgba(baseColor, 0.95);
       ctx.textAlign = 'left';
       const textX = Math.max(area.x + 4, startPx.x + 4);
       const textY = startPx.y - 8;
       if (textY > area.y + 4 && textY < area.y + area.h) {
+        const tw = ctx.measureText(d.memo).width;
+        ctx.fillStyle = 'rgba(13,17,28,0.78)';
+        ctx.fillRect(textX - 2, textY - 12, tw + 6, 15);
+        ctx.fillStyle = 'rgba(255,255,255,0.92)';
         ctx.fillText(d.memo, textX, textY);
       }
       ctx.restore();
@@ -807,11 +810,14 @@ function renderBox(
     if (d.memo?.trim()) {
       ctx.save();
       ctx.font = 'bold 11px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif';
-      ctx.fillStyle = hexToRgba(baseColor, 0.95);
       ctx.textAlign = 'left';
       const textX = left + 6;
       const textY = top + 22;
       if (textY > area.y && textY < area.y + area.h && textX < right - 4) {
+        const tw = Math.min(ctx.measureText(d.memo).width, right - textX - 4);
+        ctx.fillStyle = 'rgba(13,17,28,0.78)';
+        ctx.fillRect(textX - 2, textY - 12, tw + 6, 15);
+        ctx.fillStyle = 'rgba(255,255,255,0.92)';
         ctx.fillText(d.memo, textX, textY);
       }
       ctx.restore();
@@ -895,10 +901,13 @@ function renderHline(
     if (d.memo?.trim()) {
       ctx.save();
       ctx.font = 'bold 11px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif';
-      ctx.fillStyle = hexToRgba(baseColor, 0.95);
       ctx.textAlign = 'left';
       const textY = py - 8;
       if (textY > area.y + 4) {
+        const tw = ctx.measureText(d.memo).width;
+        ctx.fillStyle = 'rgba(13,17,28,0.78)';
+        ctx.fillRect(area.x + 6, textY - 12, tw + 6, 15);
+        ctx.fillStyle = 'rgba(255,255,255,0.92)';
         ctx.fillText(d.memo, area.x + 8, textY);
       }
       ctx.restore();

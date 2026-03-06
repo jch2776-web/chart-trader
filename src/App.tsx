@@ -34,6 +34,9 @@ import { BoardModal } from './components/Board/BoardModal';
 import { UserBoardModal } from './components/Board/UserBoardModal';
 import { DisclaimerModal, hasAgreedDisclaimer } from './components/Disclaimer/DisclaimerModal';
 import { SecurityFaqModal } from './components/Security/SecurityFaqModal';
+import { AltScannerModal } from './components/AltScanner/AltScannerModal';
+import type { AltTradeParams } from './components/AltScanner/AltScannerModal';
+import type { ScanCandidate } from './components/AltScanner/breakoutScanner';
 
 export interface BreakoutFlash {
   id: string;
@@ -153,6 +156,8 @@ function AppInner() {
   const [showBoard, setShowBoard] = useState(false);
   const [showUserBoard, setShowUserBoard] = useState(false);
   const [showSecurityFaq, setShowSecurityFaq] = useState(false);
+  const [showAltScanner, setShowAltScanner] = useState(false);
+  const [altScanCandidates, setAltScanCandidates] = useState<ScanCandidate[]>([]);
   const [showDisclaimer, setShowDisclaimer] = useState(() => !hasAgreedDisclaimer());
   const [multiPanelTickers, setMultiPanelTickers] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem(uk('multi-panels')) ?? '["BTCUSDT","ETHUSDT"]'); }
@@ -606,7 +611,7 @@ function AppInner() {
         const raw = paperTradingRef.current.positions.find(
           p => p.symbol === tickerRef.current && p.positionSide === posSide,
         );
-        if (raw) paperTradingRef.current.closePosition(raw.id, curPrice, 'manual');
+        if (raw) paperTradingRef.current.partialClosePosition(raw.id, curPrice, 'manual', qty);
       } else {
         paperTradingRef.current.openPosition(
           tickerRef.current, side === 'BUY' ? 'LONG' : 'SHORT',
@@ -786,6 +791,37 @@ function AppInner() {
       />
     ));
 
+  // ── AltScanner trade handlers ─────────────────────────────────────────
+  const handleAltPaperTrade = useCallback((params: AltTradeParams) => {
+    const balance = paperTradingRef.current.balance;
+    const leverage = params.leverage ?? 10;
+    const riskAmount = balance * 0.02;
+    const slDistance = Math.abs(params.entryPrice - params.slPrice);
+    const qty = slDistance > 0
+      ? parseFloat((riskAmount / slDistance).toFixed(6))
+      : parseFloat(((riskAmount * leverage) / params.entryPrice).toFixed(6));
+    if (qty <= 0) return;
+    paperTradingRef.current.openPosition(
+      params.symbol,
+      params.direction === 'long' ? 'LONG' : 'SHORT',
+      qty,
+      params.entryPrice,
+      leverage,
+      'isolated',
+      params.tpPrice,
+      params.slPrice,
+    );
+    handleTickerSelect(params.symbol);
+    setIsPaperMode(true);
+    setShowAltScanner(false);
+  }, [handleTickerSelect]);
+
+  const handleAltLiveTrade = useCallback((params: AltTradeParams) => {
+    handleTickerSelect(params.symbol);
+    setIsPaperMode(false);
+    setShowAltScanner(false);
+  }, [handleTickerSelect]);
+
   // ── Mobile panel close helper ─────────────────────────────────────────
   const handleTickerSelectMobile = useCallback((symbol: string) => {
     handleTickerSelect(symbol);
@@ -885,6 +921,7 @@ function AppInner() {
         onOpenBoard={() => setShowBoard(true)}
         onOpenUserBoard={() => setShowUserBoard(true)}
         onOpenSecurityFaq={() => setShowSecurityFaq(true)}
+        onOpenAltScanner={() => setShowAltScanner(true)}
         isMobile={isMobile}
         mobilePanel={mobilePanel}
         onToggleMobilePanel={(panel) => setMobilePanel(p => p === panel ? 'none' : panel)}
@@ -911,6 +948,18 @@ function AppInner() {
 
       {showSecurityFaq && (
         <SecurityFaqModal onClose={() => setShowSecurityFaq(false)} />
+      )}
+
+      {showAltScanner && (
+        <AltScannerModal
+          symbols={tickers.map(t => t.symbol)}
+          initialCandidates={altScanCandidates}
+          onCandidatesChange={setAltScanCandidates}
+          onClose={() => setShowAltScanner(false)}
+          onOpenInMain={handleTickerSelect}
+          onPaperTrade={handleAltPaperTrade}
+          onLiveTrade={handleAltLiveTrade}
+        />
       )}
 
       {/* Risk warning ticker banner */}

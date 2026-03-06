@@ -60,12 +60,6 @@ function getViewedPosts(): Set<string> {
   try { return new Set(JSON.parse(sessionStorage.getItem('board_viewed') ?? '[]') as string[]); }
   catch { return new Set(); }
 }
-function markPostViewed(id: string) {
-  try {
-    const s = getViewedPosts(); s.add(id);
-    sessionStorage.setItem('board_viewed', JSON.stringify([...s]));
-  } catch {}
-}
 
 // ── Sub-component: Comments section ──────────────────────────────────────────
 
@@ -359,18 +353,24 @@ export function BoardModal({ currentUser, onImport, onClose }: Props) {
     }
   }, [title, content, parsed, submitting, currentUser]);
 
-  // ── Toggle comments + increment views ────────────────────────────────────────
+  // ── Increment views for newly-loaded posts (once per browser session) ────────
+  useEffect(() => {
+    if (posts.length === 0) return;
+    const viewed = getViewedPosts();
+    const unviewed = posts.filter(p => !viewed.has(p.id));
+    if (unviewed.length === 0) return;
+    const next = new Set(viewed);
+    unviewed.forEach(p => next.add(p.id));
+    sessionStorage.setItem('board_viewed', JSON.stringify([...next]));
+    unviewed.forEach(p => {
+      updateDoc(doc(db, 'board_posts', p.id), { views: increment(1) }).catch(() => {});
+    });
+  }, [posts]);
+
+  // ── Toggle comments ───────────────────────────────────────────────────────────
   const handleToggleComments = useCallback((postId: string) => {
-    const isOpening = expandedId !== postId;
-    setExpandedId(isOpening ? postId : null);
-    if (isOpening) {
-      const viewed = getViewedPosts();
-      if (!viewed.has(postId)) {
-        markPostViewed(postId);
-        updateDoc(doc(db, 'board_posts', postId), { views: increment(1) }).catch(() => {});
-      }
-    }
-  }, [expandedId]);
+    setExpandedId(prev => prev === postId ? null : postId);
+  }, []);
 
   // ── Like / Dislike ─────────────────────────────────────────────────────────
   const handleVote = useCallback(async (post: BoardPost, action: 'like' | 'dislike') => {

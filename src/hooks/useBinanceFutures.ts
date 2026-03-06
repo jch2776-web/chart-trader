@@ -123,8 +123,10 @@ async function fetchSigned<T>(
     throw new Error(msg);
   }
   const text = await res.text();
-  // orderId는 JS Number 범위(2^53-1)를 초과할 수 있어 문자열로 보존
-  const safeText = text.replace(/"orderId"\s*:\s*(\d+)/g, '"orderId":"$1"');
+  // orderId/algoId는 JS Number 범위(2^53-1)를 초과할 수 있어 문자열로 보존
+  const safeText = text
+    .replace(/"orderId"\s*:\s*(\d+)/g, '"orderId":"$1"')
+    .replace(/"algoId"\s*:\s*(\d+)/g, '"algoId":"$1"');
   return JSON.parse(safeText) as T;
 }
 
@@ -255,9 +257,11 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
       // Only show loading spinner on the very first fetch to avoid layout flicker
       if (isFirst) setLoading(true);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const [posRes, ordRes, tradeRes, balRes, allPosRes, allOrdRes] = (await Promise.all([
+      const [posRes, ordRes, algoOrdRes, tradeRes, balRes, allPosRes, allOrdRes] = (await Promise.all([
         fetchSigned('/fapi/v2/positionRisk', apiKeyRef.current, apiSecretRef.current, { symbol: tickerRef.current }),
         fetchSigned('/fapi/v1/openOrders',   apiKeyRef.current, apiSecretRef.current, { symbol: tickerRef.current }),
+        // 조건부(Algo) 주문은 별도 엔드포인트에서 조회
+        fetchSigned('/fapi/v1/openAlgoOrders', apiKeyRef.current, apiSecretRef.current, { symbol: tickerRef.current }),
         // 최근 500건 거래 내역으로 실제 진입 시각 계산
         fetchSigned('/fapi/v1/userTrades',   apiKeyRef.current, apiSecretRef.current, { symbol: tickerRef.current, limit: 500 }),
         // USDT 가용 잔고
@@ -301,6 +305,19 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
         stopPrice: parseFloat(o.stopPrice),
         status:    o.status,
       }));
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const mappedAlgoOrders: FuturesOrder[] = algoOrdRes.map((o: any) => ({
+        symbol:    o.symbol,
+        orderId:   String(o.algoId),
+        side:      o.side as 'BUY' | 'SELL',
+        type:      o.type,
+        price:     parseFloat(o.price ?? '0'),
+        origQty:   parseFloat(o.totalQty ?? o.origQty ?? o.quantity ?? '0'),
+        stopPrice: parseFloat(o.triggerPrice ?? o.stopPrice ?? '0'),
+        status:    o.algoStatus ?? o.status ?? 'NEW',
+        algoType:  o.algoType ?? 'CONDITIONAL',
+        isAlgo:    true,
+      }));
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const usdtBal = (balRes as any[]).find((b: any) => b.asset === 'USDT');
@@ -335,9 +352,10 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
       }));
 
       setPositions(mapped);
-      setOrders(mappedOrders);
+      setOrders([...mappedOrders, ...mappedAlgoOrders]);
       setAllPositions(mappedAllPositions);
-      setAllOrders(mappedAllOrders);
+      // allOrders에는 전심볼 일반 주문 + 현재 심볼 Algo 주문을 함께 노출
+      setAllOrders([...mappedAllOrders, ...mappedAlgoOrders]);
       setError(null);
       firstFetchDone.current = true;
 
@@ -480,7 +498,20 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
     const secret = apiSecretRef.current;
     const sym = symbol ?? tickerRef.current;
     if (!key || !secret) throw new Error('API 키가 설정되지 않았습니다');
-    await fetchSigned('/fapi/v1/order', key, secret, { symbol: sym, orderId, recvWindow: 10000 }, 'DELETE');
+    try {
+      await fetchSigned('/fapi/v1/order', key, secret, { symbol: sym, orderId, recvWindow: 10000 }, 'DELETE');
+    } catch (e) {
+      const msg = e instanceof Error ? e.message.toLowerCase() : '';
+      const unknownOrder = msg.includes('-2011') || msg.includes('unknown order');
+      if (!unknownOrder) throw e;
+      // 일반 주문이 아니면 Algo 주문 취소로 재시도
+      await fetchSigned('/fapi/v1/algoOrder', key, secret, {
+        symbol: sym,
+        algoId: orderId,
+        algoType: 'CONDITIONAL',
+        recvWindow: 10000,
+      }, 'DELETE');
+    }
     await new Promise(resolve => setTimeout(resolve, 400));
     await fetchData();
   }, [fetchData]);
@@ -511,19 +542,20 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
       ...(isHedge ? { positionSide } : { reduceOnly: 'true' }),
     };
 
-    // -4120/-4135 "Algo Order" 에러 판별
-    const isAlgoErr = (e: unknown) => {
+    // -4120 "STOP_ORDER_SWITCH_ALGO" 에러 판별
+    const isSwitchToAlgoErr = (e: unknown) => {
       const msg = e instanceof Error ? e.message : '';
-      return msg.includes('-4120') || msg.includes('-4135') || msg.toLowerCase().includes('algo order');
+      return msg.includes('-4120') || msg.includes('STOP_ORDER_SWITCH_ALGO');
     };
 
-    // 조건부 주문 시도: 성공 시 true, -4120/-4135 에러 시 false, 그 외 에러는 throw
+    // 기존 /fapi/v1/order 조건부 주문 시도:
+    // 성공 시 true, -4120 전환 에러 시 false, 그 외 에러는 throw
     const tryOrder = async (params: Record<string, string | number>): Promise<boolean> => {
       try {
         await fetchSigned('/fapi/v1/order', key, secret, params, 'POST');
         return true;
       } catch (e) {
-        if (!isAlgoErr(e)) throw e;
+        if (!isSwitchToAlgoErr(e)) throw e;
         return false;
       }
     };
@@ -535,20 +567,39 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
       if (await tryOrder({ ...closingParams, type: 'TAKE_PROFIT_MARKET', stopPrice: priceStr })) return;
       if (await tryOrder({ ...closingParams, type: 'TAKE_PROFIT', stopPrice: priceStr, price: priceStr, timeInForce: 'GTC' })) return;
       if (await tryOrder({ ...closingParams, type: 'TAKE_PROFIT_MARKET', stopPrice: priceStr, workingType: 'MARK_PRICE' })) return;
-      // 최후 수단: 일반 LIMIT 주문 (익절가에 GTC 청산 주문)
-      await fetchSigned('/fapi/v1/order', key, secret, {
-        ...closingParams, type: 'LIMIT', price: priceStr, timeInForce: 'GTC',
-      }, 'POST');
+      // 신규 정책(-4120) 계정: Algo 조건부 주문으로 재시도
+      try {
+        await fetchSigned('/fapi/v1/algoOrder', key, secret, {
+          ...closingParams,
+          algoType: 'CONDITIONAL',
+          type: 'TAKE_PROFIT_MARKET',
+          triggerPrice: priceStr,
+        }, 'POST');
+      } catch {
+        // 최후 수단: 일반 LIMIT 주문 (익절가에 GTC 청산 주문)
+        await fetchSigned('/fapi/v1/order', key, secret, {
+          ...closingParams, type: 'LIMIT', price: priceStr, timeInForce: 'GTC',
+        }, 'POST');
+      }
     };
 
     // ── 손절가(SL) 주문 ────────────────────────────────────────────────────────
-    // 조건부 주문 실패 시 → 앱 감시 SL (5초 폴링으로 markPrice 감시 후 MARKET 청산)
+    // 조건부 주문 실패 시: Algo 주문 재시도 → 마지막으로 앱 감시 SL fallback
     const placeSL = async (priceStr: string): Promise<void> => {
       if (await tryOrder({ ...closingParams, type: 'STOP_MARKET', stopPrice: priceStr })) return;
       if (await tryOrder({ ...closingParams, type: 'STOP', stopPrice: priceStr, price: priceStr, timeInForce: 'GTC' })) return;
       if (await tryOrder({ ...closingParams, type: 'STOP_MARKET', stopPrice: priceStr, workingType: 'MARK_PRICE' })) return;
-      // 조건부 주문 미지원 → 앱 감시 SL로 저장
-      setClientSL(symbol, positionSide, parseFloat(priceStr), closeSide);
+      try {
+        await fetchSigned('/fapi/v1/algoOrder', key, secret, {
+          ...closingParams,
+          algoType: 'CONDITIONAL',
+          type: 'STOP_MARKET',
+          triggerPrice: priceStr,
+        }, 'POST');
+      } catch {
+        // Algo 주문도 실패하면 앱 감시 SL로 저장
+        setClientSL(symbol, positionSide, parseFloat(priceStr), closeSide);
+      }
     };
 
     const promises: Promise<void>[] = [];

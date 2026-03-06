@@ -59,6 +59,8 @@ export function usePaperTrading(storageKey: string) {
     price: number,
     leverage: number,
     marginType: 'isolated' | 'cross',
+    tpPrice?: number,
+    slPrice?: number,
   ) => {
     const margin = (price * qty) / leverage;
     const entryFee = parseFloat((price * qty * FEE_RATE).toFixed(8));
@@ -67,6 +69,28 @@ export function usePaperTrading(storageKey: string) {
       // Cap fee to remaining balance so rounding/price-improvement never silently blocks the order
       const actualFee = Math.min(entryFee, parseFloat((prev.balance - margin).toFixed(8)));
       const actualCost = parseFloat((margin + actualFee).toFixed(8));
+
+      // If same symbol + same side already open → average into existing position (물타기)
+      const existing = prev.positions.find(p => p.symbol === symbol && p.positionSide === side);
+      if (existing) {
+        const existingQty = Math.abs(existing.positionAmt);
+        const newTotalQty = existingQty + qty;
+        const avgEntryPrice = parseFloat(
+          ((existingQty * existing.entryPrice + qty * price) / newTotalQty).toFixed(8)
+        );
+        return {
+          ...prev,
+          balance: parseFloat((prev.balance - actualCost).toFixed(8)),
+          positions: prev.positions.map(p => p.id !== existing.id ? p : {
+            ...p,
+            positionAmt: parseFloat((side === 'LONG' ? newTotalQty : -newTotalQty).toFixed(8)),
+            entryPrice: avgEntryPrice,
+            isolatedMargin: parseFloat((existing.isolatedMargin + margin).toFixed(8)),
+            entryFee: parseFloat((existing.entryFee + actualFee).toFixed(8)),
+          }),
+        };
+      }
+
       const pos: PaperPosition = {
         id: uid(),
         symbol,
@@ -78,6 +102,8 @@ export function usePaperTrading(storageKey: string) {
         marginType,
         isolatedMargin: margin,
         entryFee: actualFee,
+        tpPrice,
+        slPrice,
       };
       return {
         ...prev,
@@ -119,6 +145,58 @@ export function usePaperTrading(storageKey: string) {
         ...prev,
         balance: parseFloat((prev.balance + Math.max(0, returned)).toFixed(8)),
         positions: prev.positions.filter(p => p.id !== id),
+        history: [entry, ...prev.history].slice(0, 500),
+      };
+    });
+  }, []);
+
+  // Partial close — closes `closeQty` units (full close if closeQty >= position size)
+  const partialClosePosition = useCallback((
+    id: string,
+    closePrice: number,
+    reason: PaperHistoryEntry['closeReason'],
+    closeQty: number,
+  ) => {
+    setState(prev => {
+      const pos = prev.positions.find(p => p.id === id);
+      if (!pos) return prev;
+      const totalQty = Math.abs(pos.positionAmt);
+      const qty = Math.min(Math.max(closeQty, 0), totalQty);
+      if (qty <= 0) return prev;
+      const isLong = pos.positionSide === 'LONG';
+      const qtyRatio = qty / totalQty;
+      const partialMargin = pos.isolatedMargin * qtyRatio;
+      const partialEntryFee = pos.entryFee * qtyRatio;
+      const rawPnl = (isLong ? closePrice - pos.entryPrice : pos.entryPrice - closePrice) * qty;
+      const exitFee = parseFloat((closePrice * qty * FEE_RATE).toFixed(8));
+      const netPnl = rawPnl - partialEntryFee - exitFee;
+      const returned = partialMargin + netPnl;
+      const entry: PaperHistoryEntry = {
+        id: uid(),
+        symbol: pos.symbol,
+        positionSide: pos.positionSide,
+        entryPrice: pos.entryPrice,
+        exitPrice: closePrice,
+        qty,
+        leverage: pos.leverage,
+        pnl: parseFloat(netPnl.toFixed(8)),
+        fees: parseFloat((partialEntryFee + exitFee).toFixed(8)),
+        entryTime: pos.entryTime,
+        exitTime: Date.now(),
+        closeReason: reason,
+      };
+      const isFull = qty >= totalQty;
+      return {
+        ...prev,
+        balance: parseFloat((prev.balance + Math.max(0, returned)).toFixed(8)),
+        positions: isFull
+          ? prev.positions.filter(p => p.id !== id)
+          : prev.positions.map(p => p.id !== id ? p : {
+              ...p,
+              positionAmt: parseFloat((isLong ? totalQty - qty : -(totalQty - qty)).toFixed(8)),
+              isolatedMargin: parseFloat((pos.isolatedMargin - partialMargin).toFixed(8)),
+              entryFee: parseFloat((pos.entryFee - partialEntryFee).toFixed(8)),
+            }),
         history: [entry, ...prev.history].slice(0, 500),
       };
     });
@@ -196,7 +274,7 @@ export function usePaperTrading(storageKey: string) {
         const pos = stateRef.current.positions.find(
           p => p.symbol === order.symbol && p.positionSide === posSide,
         );
-        if (pos) closePosition(pos.id, fillPrice, 'manual');
+        if (pos) partialClosePosition(pos.id, fillPrice, 'manual', order.qty);
       } else {
         openPosition(order.symbol, order.side === 'BUY' ? 'LONG' : 'SHORT',
           order.qty, fillPrice, order.leverage, order.marginType);
@@ -250,6 +328,7 @@ export function usePaperTrading(storageKey: string) {
     history: state.history,
     openPosition,
     closePosition,
+    partialClosePosition,
     setTPSL,
     placeLimitOrder,
     cancelOrder,

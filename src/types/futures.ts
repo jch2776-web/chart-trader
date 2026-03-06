@@ -21,4 +21,6 @@ export interface FuturesOrder {
   origQty: number;
   stopPrice: number;
   status: string;
+  algoType?: string;          // CONDITIONAL, OCO
+  isAlgo?: boolean;           // true when sourced from /fapi/v1/openAlgoOrders
 }

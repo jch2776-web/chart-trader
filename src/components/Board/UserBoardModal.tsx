@@ -19,6 +19,9 @@ interface UserPost {
   updatedAt?: number;
   commentCount: number;
   pinned?: boolean;      // admin-pinned, always stays at top
+  views: number;
+  likes: number;
+  dislikes: number;
 }
 
 interface UserComment {
@@ -60,7 +63,30 @@ function mapPost(d: QueryDocumentSnapshot<DocumentData>): UserPost {
     updatedAt:    d.data().updatedAt?.toMillis?.() as number | undefined,
     commentCount: (d.data().commentCount as number) ?? 0,
     pinned:       (d.data().pinned as boolean) ?? false,
+    views:        (d.data().views as number) ?? 0,
+    likes:        (d.data().likes as number) ?? 0,
+    dislikes:     (d.data().dislikes as number) ?? 0,
   };
+}
+
+// ── Vote/view helpers (use separate keys from board_posts) ─────────────────────
+
+function getUserVotes(): Record<string, 'like' | 'dislike'> {
+  try { return JSON.parse(localStorage.getItem('user_board_votes') ?? '{}') as Record<string, 'like' | 'dislike'>; }
+  catch { return {}; }
+}
+function saveUserVotes(v: Record<string, 'like' | 'dislike'>) {
+  try { localStorage.setItem('user_board_votes', JSON.stringify(v)); } catch {}
+}
+function getUserViewedPosts(): Set<string> {
+  try { return new Set(JSON.parse(sessionStorage.getItem('user_board_viewed') ?? '[]') as string[]); }
+  catch { return new Set(); }
+}
+function markUserPostViewed(id: string) {
+  try {
+    const s = getUserViewedPosts(); s.add(id);
+    sessionStorage.setItem('user_board_viewed', JSON.stringify([...s]));
+  } catch {}
 }
 
 function stripHtml(html: string): string {
@@ -359,6 +385,7 @@ export function UserBoardModal({ currentUser, onClose }: Props) {
 
   // Expanded post
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [votes, setVotes] = useState<Record<string, 'like' | 'dislike'>>(() => getUserVotes());
 
   // Compose state
   const [composeTitle, setComposeTitle] = useState('');
@@ -478,6 +505,7 @@ export function UserBoardModal({ currentUser, onClose }: Props) {
         content: composeContent,
         passwordHash,
         commentCount: 0,
+        views: 0, likes: 0, dislikes: 0,
         createdAt: serverTimestamp(),
         ...(isAdmin ? { pinned: true } : {}),
       });
@@ -530,6 +558,23 @@ export function UserBoardModal({ currentUser, onClose }: Props) {
     }
     setPwDialog(null);
   }, [pwDialog, expandedId]);
+
+  const handleVoteUser = useCallback(async (post: UserPost, action: 'like' | 'dislike') => {
+    const current = votes[post.id];
+    const newVotes = { ...votes };
+    const updates: Record<string, unknown> = {};
+    if (current === action) {
+      delete newVotes[post.id];
+      updates[action === 'like' ? 'likes' : 'dislikes'] = increment(-1);
+    } else {
+      if (current) updates[current === 'like' ? 'likes' : 'dislikes'] = increment(-1);
+      newVotes[post.id] = action;
+      updates[action === 'like' ? 'likes' : 'dislikes'] = increment(1);
+    }
+    setVotes(newVotes);
+    saveUserVotes(newVotes);
+    await updateDoc(doc(db, COLLECTION, post.id), updates);
+  }, [votes]);
 
   const handleSaveEdit = useCallback(async () => {
     if (!editPost) return;
@@ -631,7 +676,17 @@ export function UserBoardModal({ currentUser, onClose }: Props) {
                     {/* Post header row */}
                     <div
                       style={s.postHeader}
-                      onClick={() => setExpandedId(id => id === post.id ? null : post.id)}
+                      onClick={() => {
+                        const isOpening = expandedId !== post.id;
+                        setExpandedId(id => id === post.id ? null : post.id);
+                        if (isOpening) {
+                          const viewed = getUserViewedPosts();
+                          if (!viewed.has(post.id)) {
+                            markUserPostViewed(post.id);
+                            updateDoc(doc(db, COLLECTION, post.id), { views: increment(1) }).catch(() => {});
+                          }
+                        }
+                      }}
                     >
                       <div style={{ flex: 1, minWidth: 0 }}>
                         {post.pinned && (
@@ -648,6 +703,9 @@ export function UserBoardModal({ currentUser, onClose }: Props) {
                       <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
                         <span style={s.postMeta}>{post.author}</span>
                         <span style={s.postMeta}>{formatDate(post.createdAt)}</span>
+                        <span style={s.postMeta}>조회 {post.views ?? 0}</span>
+                        <span style={s.postMeta}>👍 {post.likes ?? 0}</span>
+                        <span style={s.postMeta}>👎 {post.dislikes ?? 0}</span>
                         <button
                           onClick={e => { e.stopPropagation(); handleEditRequest(post); }}
                           style={s.actionBtn}
@@ -670,6 +728,30 @@ export function UserBoardModal({ currentUser, onClose }: Props) {
                           style={{ color: '#c9d1d9', fontSize: '0.9rem', lineHeight: 1.7 }}
                           dangerouslySetInnerHTML={{ __html: post.content }}
                         />
+                        <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+                          <button
+                            style={{
+                              background: votes[post.id] === 'like' ? 'rgba(14,203,129,0.12)' : 'none',
+                              border: votes[post.id] === 'like' ? '1px solid rgba(14,203,129,0.4)' : '1px solid #3a3e4a',
+                              borderRadius: 4, color: votes[post.id] === 'like' ? '#0ecb81' : '#848e9c',
+                              cursor: 'pointer', fontSize: '0.85rem', padding: '5px 14px',
+                            }}
+                            onClick={e => { e.stopPropagation(); handleVoteUser(post, 'like'); }}
+                          >
+                            👍 추천 {post.likes ?? 0}
+                          </button>
+                          <button
+                            style={{
+                              background: votes[post.id] === 'dislike' ? 'rgba(246,70,93,0.1)' : 'none',
+                              border: votes[post.id] === 'dislike' ? '1px solid rgba(246,70,93,0.35)' : '1px solid #3a3e4a',
+                              borderRadius: 4, color: votes[post.id] === 'dislike' ? '#f6465d' : '#848e9c',
+                              cursor: 'pointer', fontSize: '0.85rem', padding: '5px 14px',
+                            }}
+                            onClick={e => { e.stopPropagation(); handleVoteUser(post, 'dislike'); }}
+                          >
+                            👎 비추천 {post.dislikes ?? 0}
+                          </button>
+                        </div>
                         <CommentSection postId={post.id} currentUser={currentUser} />
                       </div>
                     )}

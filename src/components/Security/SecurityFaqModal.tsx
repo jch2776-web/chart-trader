@@ -106,10 +106,13 @@ const ITEMS: FaqItem[] = [
     id: 'sl-limitation',
     category: 'sl',
     risk: 'high',
-    q: '클라이언트 SL(앱 내부 손절)은 언제 작동하지 않나요?',
+    q: '앱 감시 SL(클라이언트 손절)은 언제 작동하지 않나요?',
     a: (
       <>
-        클라이언트 SL은 <strong>이 앱(브라우저 탭)이 열려 있는 동안에만</strong> 감시합니다.
+        앱은 SL 설정 시 바이낸스 거래소 Algo 주문을 우선 시도합니다.
+        Algo 주문이 성공하면 거래소 서버에서 직접 처리되므로 이 항목의 제약이 없습니다.<br /><br />
+        <strong>앱 감시 SL</strong>(Algo 주문 실패 시 최후 수단)은
+        <strong> 이 앱(브라우저 탭)이 열려 있는 동안에만</strong> 감시합니다.
         다음 상황에서는 손절이 실행되지 않습니다:<br /><br />
         <ul style={{ margin: '4px 0 0 16px', padding: 0, lineHeight: 1.8 }}>
           <li>브라우저 탭 또는 창을 닫은 경우</li>
@@ -119,7 +122,7 @@ const ITEMS: FaqItem[] = [
         </ul>
         <br />
         <strong style={{ color: '#ef5350' }}>
-          중요한 포지션은 반드시 바이낸스 앱/웹에서 직접 손절가를 설정하세요.
+          포지션 카드에 "앱 감시" 표시가 보이면 반드시 바이낸스 앱/웹에서 직접 SL을 재설정하세요.
         </strong>
       </>
     ),
@@ -128,15 +131,33 @@ const ITEMS: FaqItem[] = [
     id: 'sl-vs-exchange',
     category: 'sl',
     risk: 'info',
-    q: '클라이언트 SL과 바이낸스 거래소 SL의 차이는 무엇인가요?',
+    q: 'SL 설정 시 거래소 주문과 앱 감시 중 어떤 방식으로 동작하나요?',
     a: (
       <>
-        <strong>바이낸스 거래소 SL</strong>은 거래소 서버에 주문이 등록되어
+        앱은 SL 설정 시 다음 순서로 자동 처리합니다:<br /><br />
+        <ol style={{ margin: '4px 0 0 18px', padding: 0, lineHeight: 1.9 }}>
+          <li>
+            <strong>바이낸스 Algo 조건부 주문</strong> 시도
+            (<code>/fapi/v1/algoOrder</code> · STOP_MARKET)<br />
+            <span style={{ fontSize: '0.85em', color: '#848e9c' }}>
+              ※ 2026년 2월 바이낸스 정책 변경으로 STOP 계열 주문은 Algo 주문 방식으로 전환됩니다.
+              앱이 이를 자동 감지해 올바른 엔드포인트로 전송합니다.
+            </span>
+          </li>
+          <li>
+            Algo 주문도 실패할 경우에만 <strong>앱 감시 SL</strong>(클라이언트 감시)로 저장됩니다.
+          </li>
+        </ol>
+        <br />
+        <strong>바이낸스 거래소(Algo) SL</strong>은 주문이 거래소 서버에 등록되어
         브라우저를 닫아도 24시간 작동합니다.<br /><br />
-        <strong>클라이언트 SL</strong>은 이 앱이 실시간 가격을 감시하다가
-        손절 조건 도달 시 API로 시장가 주문을 전송하는 방식입니다.
-        브라우저 종료 시 모니터링이 중단됩니다.<br /><br />
-        클라이언트 SL은 거래소 SL 설정이 불편한 상황에서 보조 수단으로만 활용하세요.
+        <strong>앱 감시 SL</strong>은 이 앱이 실시간 가격을 감시하다가
+        손절 조건 도달 시 시장가 주문을 전송하는 방식으로,
+        브라우저 종료 시 작동하지 않습니다.<br /><br />
+        <strong style={{ color: '#ef5350' }}>
+          앱 감시 SL로 저장된 경우 반드시 브라우저를 유지하거나,
+          바이낸스 앱/웹에서 직접 재설정하세요.
+        </strong>
       </>
     ),
   },
