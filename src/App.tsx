@@ -40,6 +40,7 @@ import type { ScanCandidate } from './components/AltScanner/breakoutScanner';
 import type { LiveHistoryEntry } from './types/futures';
 import { AltPositionMonitor } from './components/AltScanner/AltPositionMonitor';
 import type { AltMeta } from './types/paperTrading';
+import { useAltAutoTrade } from './hooks/useAltAutoTrade';
 
 export interface BreakoutFlash {
   id: string;
@@ -883,6 +884,18 @@ function AppInner() {
         : parseFloat(((riskAmount * leverage) / effectiveEntryPrice).toFixed(6));
     }
     if (qty <= 0) return;
+    // Warn if SL is beyond estimated liquidation price (isolated margin only)
+    if (params.marginType === 'ISOLATED') {
+      const isLong = params.direction === 'long';
+      const mmr = 0.005;
+      const liqPrice = isLong
+        ? params.entryPrice * (1 - 1 / leverage + mmr)
+        : params.entryPrice * (1 + 1 / leverage - mmr);
+      const slBeyondLiq = isLong ? params.slPrice <= liqPrice : params.slPrice >= liqPrice;
+      if (slBeyondLiq) {
+        addLog('error', `[ALT모의] ${params.symbol} 주의: ${leverage}x 격리 기준 예상 청산가(${liqPrice.toFixed(4)})가 SL(${params.slPrice.toFixed(4)})보다 진입가에 가깝습니다 — 청산이 SL보다 먼저 발생할 수 있습니다`);
+      }
+    }
     // Reject if current mark price has already blown past the SL (setup invalidated)
     const mark = markPricesMapRef.current[params.symbol] ?? 0;
     if (mark > 0) {
@@ -935,6 +948,46 @@ function AppInner() {
     setIsPaperMode(true);
     setShowAltScanner(false);
   }, [handleTickerSelect]);
+
+  // ── AltScanner auto-trade: convert ScanCandidate → AltTradeParams and paper-trade ──
+  const handleAutoTradeScan = useCallback((c: ScanCandidate) => {
+    const drawingsSnapshot = [
+      ...c.drawingGroups.breakout,
+      ...c.drawingGroups.topSR,
+      ...c.drawingGroups.hvn,
+      ...c.drawingGroups.entryLines,
+    ];
+    const params: AltTradeParams = {
+      symbol:    c.symbol,
+      direction: c.direction,
+      entryPrice: c.entryPrice,
+      slPrice:    c.slPrice,
+      tpPrice:    c.tpPrice,
+      tp1Price:   c.tp1Price,
+      leverage:   3,
+      marginType: 'ISOLATED',
+      riskPct:    2,
+      candidateId: `${c.symbol}_${c.direction}_${c.asOfCloseTime}`,
+      scanInterval: c.interval,
+      validUntilTime: c.validUntilTime,
+      drawingsSnapshot,
+      breakoutType:    c.breakoutType,
+      candidateStatus: c.status,
+      triggerPriceAtNextClose: c.triggerPriceAtNextClose,
+      sizeMode:   'margin',
+      marginUsdt: 100,
+    };
+    handleAltPaperTrade(params);
+  }, [handleAltPaperTrade]);
+
+  const altAutoTrade = useAltAutoTrade({
+    symbols: tickers.map(t => t.symbol),
+    onEnterTrade: handleAutoTradeScan,
+    onLog: (msg, type) => {
+      const mappedType: ActivityLog['type'] = type === 'error' ? 'error' : type === 'success' ? 'order' : 'info';
+      addLog(mappedType, `[자동매매] ${msg}`);
+    },
+  });
 
   // Called whenever AltScanner updates its candidates (auto-scan result)
   // → also syncs TP/SL on existing matching paper orders/positions
@@ -1149,6 +1202,10 @@ function AppInner() {
         onOpenUserBoard={() => setShowUserBoard(true)}
         onOpenSecurityFaq={() => setShowSecurityFaq(true)}
         onOpenAltScanner={() => { setAltScannerSnapshotMeta(undefined); setShowAltScanner(true); }}
+        isAutoTradeActive={altAutoTrade.isActive}
+        autoTradeScanning={altAutoTrade.scanning}
+        onToggleAutoTrade={() => altAutoTrade.setActive(!altAutoTrade.isActive)}
+        onTriggerAutoTradeNow={altAutoTrade.triggerNow}
         isMobile={isMobile}
         mobilePanel={mobilePanel}
         onToggleMobilePanel={(panel) => setMobilePanel(p => p === panel ? 'none' : panel)}

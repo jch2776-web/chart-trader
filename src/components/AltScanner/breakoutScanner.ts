@@ -550,6 +550,25 @@ async function scanSymbol(
   };
 }
 
+// ── Rate-limit budget ──────────────────────────────────────────────────────
+// Each symbol scan fetches 2 kline batches:
+//   limit=202  → weight 2  (100–499 range)
+//   limit=502  → weight 5  (500–999 range)
+//   total per symbol = 7 weight
+//
+// Binance Futures IP weight limit: 2400 / minute = 40 weight/sec (rolling)
+// Safe symbol throughput: 40 / 7 ≈ 5.7 symbols/sec
+//
+// Default (manual scan):  concurrency=3, delayMs=350 → ~3/(350+avg_http≈250)ms ≈ 5 sym/s ≈ 35 wt/s ✓
+// Auto-trade (scheduled): concurrency=2, delayMs=600 → ~2/(600+250)ms ≈ 2.4 sym/s ≈ 17 wt/s ✓✓
+
+export interface ScanOptions {
+  /** Number of parallel workers (default 3). Keep low to avoid rate limits. */
+  concurrency?: number;
+  /** Milliseconds to wait after each symbol completes before starting the next (default 350). */
+  delayMs?: number;
+}
+
 // ── Public API ─────────────────────────────────────────────────────────────
 export async function runBreakoutScan(
   symbols: string[],
@@ -558,11 +577,13 @@ export async function runBreakoutScan(
   onProgress: (done: number, total: number) => void,
   onResult: (candidate: ScanCandidate) => void,
   signal?: AbortSignal,
+  options?: ScanOptions,
 ): Promise<void> {
+  const concurrency = Math.max(1, options?.concurrency ?? 3);
+  const delayMs     = Math.max(0, options?.delayMs     ?? 350);
   const total = symbols.length;
   let done = 0;
   const queue = [...symbols];
-  const CONCURRENCY = 6;
 
   async function worker() {
     while (queue.length > 0) {
@@ -576,9 +597,9 @@ export async function runBreakoutScan(
         done++;
         onProgress(done, total);
       }
-      if (!signal?.aborted) await new Promise(r => setTimeout(r, 120));
+      if (!signal?.aborted) await new Promise(r => setTimeout(r, delayMs));
     }
   }
 
-  await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
 }

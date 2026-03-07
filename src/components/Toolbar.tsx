@@ -23,6 +23,10 @@ interface Props {
   onOpenUserBoard?: () => void;
   onOpenSecurityFaq?: () => void;
   onOpenAltScanner?: () => void;
+  isAutoTradeActive?: boolean;
+  autoTradeScanning?: boolean;
+  onToggleAutoTrade?: () => void;
+  onTriggerAutoTradeNow?: () => void;
   isMobile?: boolean;
   mobilePanel?: 'none' | 'tickers' | 'settings';
   onToggleMobilePanel?: (panel: 'tickers' | 'settings') => void;
@@ -39,6 +43,7 @@ export function Toolbar({
   isMultiMode, onToggleMultiMode, isPaperMode, onTogglePaperMode,
   indicators, onToggleIndicator,
   onOpenBoard, onOpenUserBoard, onOpenSecurityFaq, onOpenAltScanner,
+  isAutoTradeActive, autoTradeScanning, onToggleAutoTrade, onTriggerAutoTradeNow,
   isMobile, mobilePanel, onToggleMobilePanel,
 }: Props) {
   const toggleMode = (m: DrawingMode) => {
@@ -225,6 +230,49 @@ export function Toolbar({
       >
         🔍 알트추천
       </button>
+
+      {/* Auto trade toggle */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 2 }}>
+        <button
+          onClick={onToggleAutoTrade}
+          title={isAutoTradeActive ? '자동 모의거래 끄기' : '자동 모의거래 켜기 (매 정각 1h→4h→1d 스캔, 90점+ 상위 2개 자동 진입)'}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 5,
+            padding: '3px 9px', borderRadius: 4, cursor: 'pointer',
+            fontSize: '0.76rem', fontWeight: 700, transition: 'all 0.15s',
+            border: isAutoTradeActive ? '1px solid rgba(14,203,129,0.6)' : '1px solid rgba(132,142,156,0.35)',
+            background: isAutoTradeActive ? 'rgba(14,203,129,0.14)' : 'rgba(132,142,156,0.08)',
+            color: isAutoTradeActive ? '#0ecb81' : '#5d6776',
+          }}
+        >
+          {/* Toggle pill */}
+          <span style={{
+            display: 'inline-block', width: 28, height: 14, borderRadius: 7, position: 'relative',
+            background: isAutoTradeActive ? '#0ecb81' : '#2a3545', transition: 'background 0.2s',
+            flexShrink: 0,
+          }}>
+            <span style={{
+              display: 'block', width: 10, height: 10, borderRadius: '50%', background: '#fff',
+              position: 'absolute', top: 2,
+              left: isAutoTradeActive ? 16 : 2,
+              transition: 'left 0.2s',
+            }} />
+          </span>
+          {autoTradeScanning ? '⟳ 스캔 중...' : '⚡ 자동매매'}
+        </button>
+        {isAutoTradeActive && !autoTradeScanning && (
+          <button
+            onClick={onTriggerAutoTradeNow}
+            title="지금 즉시 스캔 실행"
+            style={{
+              padding: '3px 7px', borderRadius: 4, cursor: 'pointer',
+              fontSize: '0.72rem', fontWeight: 600,
+              border: '1px solid rgba(240,185,11,0.4)',
+              background: 'rgba(240,185,11,0.1)', color: '#f0b90b',
+            }}
+          >▶ 즉시실행</button>
+        )}
+      </div>
 
       {/* User board button */}
       <button

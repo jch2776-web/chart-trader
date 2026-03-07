@@ -174,6 +174,13 @@ const RISK_PRESETS = [1, 2, 3, 5];
 
 // ── Info panel ─────────────────────────────────────────────────────────────
 const MARGIN_PRESETS = [50, 100, 200, 500];
+const MMR = 0.005; // 0.5% maintenance margin rate (Binance Futures default)
+
+function calcLiqPrice(entry: number, isLong: boolean, leverage: number): number {
+  return isLong
+    ? entry * (1 - 1 / leverage + MMR)
+    : entry * (1 + 1 / leverage - MMR);
+}
 
 function TradingInfoPanel({
   c, onPaperTrade, onLiveTrade,
@@ -217,6 +224,16 @@ function TradingInfoPanel({
     : c.breakoutType === 'hline' ? '수평 레벨 돌파' : '박스권 돌파';
   const opinion  = buildOpinion(c);
   const topLevel = c.topLevels[0];
+
+  // Liquidation price estimates (isolated margin only)
+  const paperLiqPrice = paperMarginType === 'ISOLATED' ? calcLiqPrice(c.entryPrice, isLong, paperLeverage) : null;
+  const paperSlBeyondLiq = paperLiqPrice != null
+    ? (isLong ? c.slPrice <= paperLiqPrice : c.slPrice >= paperLiqPrice)
+    : false;
+  const liveLiqPrice = liveMarginType === 'ISOLATED' ? calcLiqPrice(c.entryPrice, isLong, liveLeverage) : null;
+  const liveSlBeyondLiq = liveLiqPrice != null
+    ? (isLong ? c.slPrice <= liveLiqPrice : c.slPrice >= liveLiqPrice)
+    : false;
 
   const drawingsSnapshot: Drawing[] = [
     ...c.drawingGroups.breakout,
@@ -335,6 +352,22 @@ function TradingInfoPanel({
           </>
         )}
       </div>
+
+      {/* Liquidation warning row */}
+      {(paperSlBeyondLiq || liveSlBeyondLiq) && (
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' as const, padding: '5px 8px', background: 'rgba(246,70,93,0.10)', border: '1px solid rgba(246,70,93,0.35)', borderRadius: 5 }}>
+          {paperSlBeyondLiq && paperLiqPrice != null && (
+            <span style={{ fontSize: '0.76rem', color: '#f6465d' }}>
+              ⚠️ 모의 {paperLeverage}x 격리: 예상 청산가 <b>{paperLiqPrice >= 1 ? paperLiqPrice.toFixed(2) : paperLiqPrice.toFixed(6)}</b> ({((paperLiqPrice - c.entryPrice) / c.entryPrice * 100).toFixed(1)}%) — SL이 청산가 {isLong ? '아래' : '위'}에 있어 청산이 먼저 발생합니다
+            </span>
+          )}
+          {liveSlBeyondLiq && liveLiqPrice != null && (
+            <span style={{ fontSize: '0.76rem', color: '#f6465d' }}>
+              ⚠️ 실전 {liveLeverage}x 격리: 예상 청산가 <b>{liveLiqPrice >= 1 ? liveLiqPrice.toFixed(2) : liveLiqPrice.toFixed(6)}</b> ({((liveLiqPrice - c.entryPrice) / c.entryPrice * 100).toFixed(1)}%) — SL이 청산가 {isLong ? '아래' : '위'}에 있어 청산이 먼저 발생합니다
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Paper settings panel */}
       {showPaperSettings && (

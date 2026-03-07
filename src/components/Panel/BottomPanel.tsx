@@ -2,6 +2,8 @@ import React, { useRef, useState, useEffect, useMemo } from 'react';
 import type { FuturesPosition, FuturesOrder, LiveHistoryEntry } from '../../types/futures';
 import type { ClientSlMap } from '../../hooks/useBinanceFutures';
 import type { PaperHistoryEntry, PaperPosition, PaperOrder, AltMeta } from '../../types/paperTrading';
+import { downloadExcel } from '../../utils/exportExcel';
+import type { ExcelCell } from '../../utils/exportExcel';
 
 interface Props {
   allPositions: FuturesPosition[];
@@ -525,15 +527,6 @@ function PaperAssetChart({ history, initialBalance }: { history: PaperHistoryEnt
   );
 }
 
-// ── CSV export helper ─────────────────────────────────────────────────────────
-function downloadCsv(filename: string, rows: string[][]): void {
-  const bom = '\uFEFF';
-  const csv = bom + rows.map(r => r.map(c => `"${c.replace(/"/g, '""')}"`).join(',')).join('\r\n');
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
-  a.download = filename;
-  a.click();
-}
 
 // ── Live Asset Chart ──────────────────────────────────────────────────────────
 function LiveAssetChart({ history }: { history: LiveHistoryEntry[] }) {
@@ -1213,15 +1206,38 @@ export function BottomPanel({
                 onClick={() => {
                   const from = dateFrom ? new Date(dateFrom).getTime() : 0;
                   const to   = dateTo   ? new Date(dateTo).getTime() + 86399999 : Infinity;
-                  const rows = [['심볼','방향','수량','레버리지','투입마진(USDT)','진입가','청산가','실현손익(USDT)','ROI(%)','수수료(USDT)','사유','진입시간','종료시간']];
-                  (paperHistory ?? []).filter(h => h.exitTime >= from && h.exitTime <= to).forEach(h => {
-                    const margin = h.entryPrice * h.qty / h.leverage;
-                    const roi    = margin > 0 ? (h.pnl / margin * 100).toFixed(2) : '0';
-                    const reason = h.closeReason === 'tp' ? '익절' : h.closeReason === 'sl' ? '손절' : h.closeReason === 'liq' ? '청산' : '수동';
-                    const fmtT   = (ts: number) => new Date(ts).toLocaleString('ko-KR');
-                    rows.push([h.symbol, h.positionSide, String(h.qty), `${h.leverage}x`, margin.toFixed(2), String(h.entryPrice), String(h.exitPrice), h.pnl.toFixed(4), roi, h.fees.toFixed(4), reason, fmtT(h.entryTime), fmtT(h.exitTime)]);
-                  });
-                  downloadCsv(`paper_history_${dateFrom||'all'}_${dateTo||'all'}.csv`, rows);
+                  const fmtT = (ts: number) => new Date(ts).toLocaleString('ko-KR');
+                  const dataRows: ExcelCell[][] = (paperHistory ?? [])
+                    .filter(h => h.exitTime >= from && h.exitTime <= to)
+                    .map(h => {
+                      const margin = h.entryPrice * h.qty / h.leverage;
+                      const roi    = margin > 0 ? (h.pnl / margin * 100).toFixed(2) : '0';
+                      const reason = h.closeReason === 'tp' ? '익절' : h.closeReason === 'sl' ? '손절' : h.closeReason === 'liq' ? '청산' : '수동';
+                      const pnlClr = h.pnl >= 0 ? 'green' : 'red';
+                      return [
+                        { value: h.symbol },
+                        { value: h.positionSide, color: h.positionSide === 'LONG' ? 'green' : 'red' },
+                        { value: h.qty, align: 'right' },
+                        { value: `${h.leverage}x`, align: 'center' },
+                        { value: margin.toFixed(2), align: 'right' },
+                        { value: h.entryPrice, align: 'right' },
+                        { value: h.exitPrice, align: 'right' },
+                        { value: `${h.pnl >= 0 ? '+' : ''}${h.pnl.toFixed(4)}`, color: pnlClr, bold: true, align: 'right' },
+                        { value: `${Number(roi) >= 0 ? '+' : ''}${roi}%`, color: pnlClr, align: 'right' },
+                        { value: `-${h.fees.toFixed(4)}`, color: 'orange', align: 'right' },
+                        { value: reason, color: h.closeReason === 'tp' ? 'green' : 'red' },
+                        { value: fmtT(h.entryTime) },
+                        { value: fmtT(h.exitTime) },
+                      ] as ExcelCell[];
+                    });
+                  downloadExcel(`모의거래_히스토리_${dateFrom||'전체'}_${dateTo||'전체'}.xls`, [
+                    { label: '심볼', width: 14 }, { label: '방향', width: 8 }, { label: '수량', width: 12 },
+                    { label: '레버리지', width: 8 }, { label: '투입마진(USDT)', width: 14 },
+                    { label: '진입가(USDT)', width: 14 }, { label: '청산가(USDT)', width: 14 },
+                    { label: '실현손익(USDT)', width: 16, }, { label: 'ROI(%)', width: 10 },
+                    { label: '수수료(USDT)', width: 14 }, { label: '사유', width: 8 },
+                    { label: '진입시간', width: 20 }, { label: '종료시간', width: 20 },
+                  ], dataRows);
                 }}>엑셀 내보내기</button>
               <div style={{ flex: 1 }} />
               {(paperHistory?.length ?? 0) > 0 && (
@@ -1318,13 +1334,22 @@ export function BottomPanel({
                 }}>{histFetching ? '조회 중...' : '조회'}</button>
               <button style={{ ...s.cancelBtn, color: '#f0b90b', borderColor: 'rgba(240,185,11,0.35)' }}
                 onClick={() => {
-                  const rows = [['심볼','실현손익(USDT)','자산','시간','거래ID']];
-                  (liveHistory ?? []).forEach(h => {
-                    rows.push([h.symbol, h.income.toFixed(4), h.asset, new Date(h.time).toLocaleString('ko-KR'), h.tradeId]);
-                  });
-                  const from = dateFrom || 'all';
-                  const to   = dateTo   || 'all';
-                  downloadCsv(`live_history_${from}_${to}.csv`, rows);
+                  const dataRows: ExcelCell[][] = [...(liveHistory ?? [])]
+                    .sort((a, b) => b.time - a.time)
+                    .map(h => [
+                      { value: h.symbol },
+                      { value: `${h.income >= 0 ? '+' : ''}${h.income.toFixed(4)}`, color: h.income >= 0 ? 'green' : 'red', bold: true, align: 'right' },
+                      { value: h.asset, align: 'center' },
+                      { value: h.tradeId, color: 'gray' },
+                      { value: new Date(h.time).toLocaleString('ko-KR') },
+                    ] as ExcelCell[]);
+                  downloadExcel(`실전거래_히스토리_${dateFrom||'전체'}_${dateTo||'전체'}.xls`, [
+                    { label: '심볼', width: 14 },
+                    { label: '실현손익 (USDT)', width: 18 },
+                    { label: '자산', width: 8 },
+                    { label: '거래 ID', width: 16 },
+                    { label: '시간', width: 22 },
+                  ], dataRows);
                 }}>엑셀 내보내기</button>
             </div>
             <table style={s.table}>
