@@ -90,7 +90,12 @@ export function revalidateCandidate(
     }
 
     // ── 3. TRIGGERED ──────────────────────────────────────────────────────
-    if (lastClosed.close > triggerLast && prevClosed.close <= triggerPrev) {
+    // crossed = fresh crossover this candle
+    // For PENDING status: crossover already happened at scan time (vol wasn't met).
+    // Allow TRIGGERED on any later candle where price is still above trigger + vol is now met.
+    const priceOkL = lastClosed.close > triggerLast;
+    const crossedL = priceOkL && prevClosed.close <= triggerPrev;
+    if (crossedL || (c.status === 'PENDING' && priceOkL)) {
       const sma20vol = calcSMA20Volume(closedCandles);
       if (
         lastClosed.volume >= sma20vol * c.volFactor &&
@@ -136,7 +141,9 @@ export function revalidateCandidate(
       };
     }
 
-    if (lastClosed.close < triggerLast && prevClosed.close >= triggerPrev) {
+    const priceOkS = lastClosed.close < triggerLast;
+    const crossedS = priceOkS && prevClosed.close >= triggerPrev;
+    if (crossedS || (c.status === 'PENDING' && priceOkS)) {
       const sma20vol = calcSMA20Volume(closedCandles);
       if (
         lastClosed.volume >= sma20vol * c.volFactor &&

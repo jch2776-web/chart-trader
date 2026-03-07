@@ -37,6 +37,8 @@ import { SecurityFaqModal } from './components/Security/SecurityFaqModal';
 import { AltScannerModal } from './components/AltScanner/AltScannerModal';
 import type { AltTradeParams } from './components/AltScanner/AltScannerModal';
 import type { ScanCandidate } from './components/AltScanner/breakoutScanner';
+import { AltPositionMonitor } from './components/AltScanner/AltPositionMonitor';
+import type { AltMeta } from './types/paperTrading';
 
 export interface BreakoutFlash {
   id: string;
@@ -158,6 +160,15 @@ function AppInner() {
   const [showSecurityFaq, setShowSecurityFaq] = useState(false);
   const [showAltScanner, setShowAltScanner] = useState(false);
   const [altScanCandidates, setAltScanCandidates] = useState<ScanCandidate[]>([]);
+  const [altScannerSnapshotMeta, setAltScannerSnapshotMeta] = useState<AltMeta | undefined>();
+
+  // Live position AltMeta map: key = `${symbol}_${direction}` (persisted)
+  const [liveAltMetaMap, setLiveAltMetaMap] = useState<Record<string, AltMeta>>(() => {
+    try { return JSON.parse(localStorage.getItem(uk('live-alt-meta')) ?? '{}'); } catch { return {}; }
+  });
+  React.useEffect(() => {
+    try { localStorage.setItem(uk('live-alt-meta'), JSON.stringify(liveAltMetaMap)); } catch {}
+  }, [liveAltMetaMap]);
   const [showDisclaimer, setShowDisclaimer] = useState(() => !hasAgreedDisclaimer());
   const [multiPanelTickers, setMultiPanelTickers] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem(uk('multi-panels')) ?? '["BTCUSDT","ETHUSDT"]'); }
@@ -562,6 +573,54 @@ function AppInner() {
     paperTradingRef.current.cancelOrder(orderId);
   }, []);
 
+  // ── Global WS monitor for conditional (close_above / close_below) paper orders ──
+  // Opens a native WS for each unique (symbol, interval) pair among pending conditional orders.
+  // On candle close (k.x === true), fires checkCandleClose so orders trigger even when
+  // the AltScannerModal is closed or a different symbol is selected.
+  React.useEffect(() => {
+    const conditionalOrders = paperTrading.orders.filter(
+      o => o.triggerType === 'close_above' || o.triggerType === 'close_below',
+    );
+
+    // Build unique (symbol, interval) pairs
+    const pairs = [
+      ...new Map(conditionalOrders.map(o => {
+        const interval = o.altMeta?.scanInterval ?? '1h';
+        return [`${o.symbol}_${interval}`, { symbol: o.symbol, interval }];
+      })).values(),
+    ];
+
+    if (pairs.length === 0) return;
+
+    const wsBase = 'wss://fstream.binance.com/ws';
+    const sockets: WebSocket[] = [];
+
+    for (const { symbol, interval } of pairs) {
+      const ws = new WebSocket(`${wsBase}/${symbol.toLowerCase()}@kline_${interval}`);
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data) as { k: { c: string; x: boolean } };
+          if (msg.k.x) {
+            paperTradingRef.current.checkCandleClose({ [symbol]: parseFloat(msg.k.c) });
+          }
+        } catch (_) {}
+      };
+      sockets.push(ws);
+    }
+
+    return () => {
+      sockets.forEach(ws => ws.close());
+    };
+  // Re-run when the set of conditional order (symbol+interval) keys changes
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    paperTrading.orders
+      .filter(o => o.triggerType === 'close_above' || o.triggerType === 'close_below')
+      .map(o => `${o.symbol}_${o.altMeta?.scanInterval ?? '1h'}`)
+      .sort()
+      .join(','),
+  ]);
+
   // Mark prices map: accumulated as the user browses charts; also refreshed via REST for paper positions
   const markPricesMapRef = useRef<Record<string, number>>({});
 
@@ -795,32 +854,163 @@ function AppInner() {
   const handleAltPaperTrade = useCallback((params: AltTradeParams) => {
     const balance = paperTradingRef.current.balance;
     const leverage = params.leverage ?? 10;
-    const riskAmount = balance * 0.02;
-    const slDistance = Math.abs(params.entryPrice - params.slPrice);
+    const marginType = params.marginType === 'CROSSED' ? 'cross' : 'isolated';
+    const riskAmount = balance * ((params.riskPct ?? 2) / 100);
+    // For conditional trendline entry use triggerPriceAtNextClose as the effective entry for risk calc
+    const isTrendlinePending =
+      params.breakoutType === 'trendline' &&
+      params.candidateStatus === 'PENDING' &&
+      params.triggerPriceAtNextClose != null;
+    const effectiveEntryPrice = isTrendlinePending ? params.triggerPriceAtNextClose! : params.entryPrice;
+    const slDistance = Math.abs(effectiveEntryPrice - params.slPrice);
     const qty = slDistance > 0
       ? parseFloat((riskAmount / slDistance).toFixed(6))
-      : parseFloat(((riskAmount * leverage) / params.entryPrice).toFixed(6));
+      : parseFloat(((riskAmount * leverage) / effectiveEntryPrice).toFixed(6));
     if (qty <= 0) return;
-    paperTradingRef.current.openPosition(
+    // Reject if current mark price has already blown past the SL (setup invalidated)
+    const mark = markPricesMapRef.current[params.symbol] ?? 0;
+    if (mark > 0) {
+      const isLong = params.direction === 'long';
+      if (isLong && mark <= params.slPrice) {
+        addLog('error', `[ALT모의] ${params.symbol} 현재가(${mark.toFixed(4)})가 SL(${params.slPrice.toFixed(4)}) 이하 — SL 이탈로 진입 불가`);
+        return;
+      }
+      if (!isLong && mark >= params.slPrice) {
+        addLog('error', `[ALT모의] ${params.symbol} 현재가(${mark.toFixed(4)})가 SL(${params.slPrice.toFixed(4)}) 이상 — SL 이탈로 진입 불가`);
+        return;
+      }
+    }
+    const altMeta: AltMeta = {
+      source: 'altscanner',
+      candidateId: params.candidateId,
+      symbol: params.symbol,
+      direction: params.direction,
+      scanInterval: params.scanInterval,
+      validUntilTime: params.validUntilTime,
+      slPrice: params.slPrice,
+      drawingsSnapshot: params.drawingsSnapshot,
+    };
+    const side: 'BUY' | 'SELL' = params.direction === 'long' ? 'BUY' : 'SELL';
+    type TriggerType = 'limit' | 'close_above' | 'close_below';
+    const triggerType: TriggerType = isTrendlinePending
+      ? (params.direction === 'long' ? 'close_above' : 'close_below')
+      : 'limit';
+    const limitPrice = isTrendlinePending
+      ? params.triggerPriceAtNextClose!
+      : params.entryPrice;
+
+    paperTradingRef.current.placeLimitOrder(
       params.symbol,
-      params.direction === 'long' ? 'LONG' : 'SHORT',
+      side,
       qty,
-      params.entryPrice,
+      limitPrice,
       leverage,
-      'isolated',
+      marginType,
+      false,
       params.tpPrice,
       params.slPrice,
+      altMeta,
+      triggerType,
     );
+    if (isTrendlinePending) {
+      addLog('info', `[ALT모의] ${params.symbol} 조건부 진입 대기 — 다음 봉 종가 ${params.direction === 'long' ? '≥' : '≤'} ${limitPrice.toFixed(4)} 시 체결`);
+    }
     handleTickerSelect(params.symbol);
     setIsPaperMode(true);
     setShowAltScanner(false);
   }, [handleTickerSelect]);
 
-  const handleAltLiveTrade = useCallback((params: AltTradeParams) => {
+  // Called whenever AltScanner updates its candidates (auto-scan result)
+  // → also syncs TP/SL on existing matching paper orders/positions
+  const handleAltCandidatesChange = useCallback((candidates: ScanCandidate[]) => {
+    setAltScanCandidates(candidates);
+    for (const c of candidates) {
+      // Update matching pending paper orders
+      const orders = paperTradingRef.current.orders.filter(
+        o => o.altMeta?.source === 'altscanner' &&
+             o.symbol === c.symbol &&
+             o.altMeta?.direction === c.direction,
+      );
+      for (const o of orders) {
+        paperTradingRef.current.updateOrder(o.id, { tpPrice: c.tpPrice, slPrice: c.slPrice });
+      }
+      // Update matching open paper positions
+      const positions = paperTradingRef.current.positions.filter(
+        p => p.altMeta?.source === 'altscanner' &&
+             p.symbol === c.symbol &&
+             p.altMeta?.direction === c.direction,
+      );
+      for (const p of positions) {
+        paperTradingRef.current.setTPSL(p.id, c.tpPrice, c.slPrice);
+      }
+    }
+  }, []);
+
+  const handleAltLiveTrade = useCallback(async (params: AltTradeParams) => {
+    if (!binanceApiKey || !binanceApiSecret) {
+      addLog('error', '[ALT실전] API 키가 설정되지 않았습니다');
+      return;
+    }
+    const side: 'BUY' | 'SELL' = params.direction === 'long' ? 'BUY' : 'SELL';
+    const closeSide: 'BUY' | 'SELL' = side === 'BUY' ? 'SELL' : 'BUY';
+    const leverage = params.leverage ?? 10;
+    const liveMarginType: 'CROSSED' | 'ISOLATED' = params.marginType ?? 'ISOLATED';
+    const balance = futuresBalanceRef.current;
+    const riskAmount = balance * ((params.riskPct ?? 2) / 100);
+    // For trendline PENDING: use triggerPriceAtNextClose as effective entry (binance can't do candle-close conditional)
+    const isTrendlinePending =
+      params.breakoutType === 'trendline' &&
+      params.candidateStatus === 'PENDING' &&
+      params.triggerPriceAtNextClose != null;
+    const effectiveEntryPrice = isTrendlinePending ? params.triggerPriceAtNextClose! : params.entryPrice;
+    const slDistance = Math.abs(effectiveEntryPrice - params.slPrice);
+    const qty = slDistance > 0
+      ? parseFloat((riskAmount / slDistance).toFixed(6))
+      : parseFloat(((riskAmount * leverage) / effectiveEntryPrice).toFixed(6));
+    if (qty <= 0) {
+      addLog('error', '[ALT실전] 수량 계산 실패: 잔고 또는 SL 거리를 확인하세요');
+      return;
+    }
+
+    const liveMeta: AltMeta = {
+      source: 'altscanner',
+      candidateId: params.candidateId,
+      symbol: params.symbol,
+      direction: params.direction,
+      scanInterval: params.scanInterval,
+      validUntilTime: params.validUntilTime,
+      slPrice: params.slPrice,
+      drawingsSnapshot: params.drawingsSnapshot,
+    };
+
+    if (isTrendlinePending) {
+      addLog('info', `[ALT실전] ${params.symbol} 추세선 PENDING — 바이낸스 지정가 @ ${effectiveEntryPrice.toFixed(4)} (봉마감 조건부 불가, 지정가로 대체)`);
+    }
+
     handleTickerSelect(params.symbol);
     setIsPaperMode(false);
     setShowAltScanner(false);
-  }, [handleTickerSelect]);
+
+    try {
+      await futuresPlaceOrder(side, effectiveEntryPrice, qty, leverage, liveMarginType, false, params.symbol);
+      addLog('info', `[ALT실전] 진입 주문 — ${side} ${qty} ${params.symbol} @ ${effectiveEntryPrice}`);
+      setLiveAltMetaMap(prev => ({ ...prev, [`${params.symbol}_${params.direction}`]: liveMeta }));
+      try {
+        await futuresPlaceTPSL(params.symbol, closeSide, qty, params.tpPrice, params.slPrice);
+        addLog('info', `[ALT실전] TP/SL 설정 — TP:${params.tpPrice} SL:${params.slPrice}`);
+      } catch (e) {
+        addLog('error', `[ALT실전] TP/SL 실패: ${e instanceof Error ? e.message : 'unknown'}`);
+      }
+    } catch (e) {
+      addLog('error', `[ALT실전] 진입 실패: ${e instanceof Error ? e.message : 'unknown'}`);
+    }
+  }, [handleTickerSelect, addLog, futuresPlaceOrder, futuresPlaceTPSL, binanceApiKey, binanceApiSecret]);
+
+  // ── ALT position badge click: open AltScanner modal in snapshot view ─
+  const handleOpenAltPosition = useCallback((meta: AltMeta) => {
+    setAltScannerSnapshotMeta(meta);
+    setShowAltScanner(true);
+  }, []);
 
   // ── Mobile panel close helper ─────────────────────────────────────────
   const handleTickerSelectMobile = useCallback((symbol: string) => {
@@ -828,9 +1018,26 @@ function AppInner() {
     setMobilePanel('none');
   }, [handleTickerSelect]);
 
+  // ── AltPositionMonitor: auto-close on time-stop / structural break ────
+  const altMonitors = isPaperMode
+    ? paperTrading.positions
+        .filter(p => p.altMeta)
+        .map(p => (
+          <AltPositionMonitor
+            key={p.id}
+            meta={p.altMeta!}
+            onClose={(price, reason) => {
+              setDrawingsByTicker(prev => ({ ...prev, [p.symbol]: [] }));
+              paperTrading.closePosition(p.id, price, reason);
+            }}
+          />
+        ))
+    : null;
+
   return (
     <div style={styles.root}>
       {backgroundMonitors}
+      {altMonitors}
 
       {/* ── Mobile overlays ─────────────────────────────────────────── */}
       {isMobile && mobilePanel !== 'none' && (
@@ -921,7 +1128,7 @@ function AppInner() {
         onOpenBoard={() => setShowBoard(true)}
         onOpenUserBoard={() => setShowUserBoard(true)}
         onOpenSecurityFaq={() => setShowSecurityFaq(true)}
-        onOpenAltScanner={() => setShowAltScanner(true)}
+        onOpenAltScanner={() => { setAltScannerSnapshotMeta(undefined); setShowAltScanner(true); }}
         isMobile={isMobile}
         mobilePanel={mobilePanel}
         onToggleMobilePanel={(panel) => setMobilePanel(p => p === panel ? 'none' : panel)}
@@ -954,11 +1161,18 @@ function AppInner() {
         <AltScannerModal
           symbols={tickers.map(t => t.symbol)}
           initialCandidates={altScanCandidates}
-          onCandidatesChange={setAltScanCandidates}
+          onCandidatesChange={handleAltCandidatesChange}
           onClose={() => setShowAltScanner(false)}
-          onOpenInMain={handleTickerSelect}
+          onOpenInMain={(symbol) => {
+            handleTickerSelect(symbol);
+            if (altScannerSnapshotMeta?.symbol === symbol) {
+              setDrawingsByTicker(prev => ({ ...prev, [symbol]: altScannerSnapshotMeta.drawingsSnapshot }));
+            }
+          }}
           onPaperTrade={handleAltPaperTrade}
           onLiveTrade={handleAltLiveTrade}
+          snapshotMeta={altScannerSnapshotMeta}
+          paperBalance={paperTrading.balance}
         />
       )}
 
@@ -1117,7 +1331,10 @@ function AppInner() {
           onPaperCancelOrder={paperTrading.cancelOrder}
           onPaperClosePosition={(entryTime) => {
             const raw = paperTrading.positions.find(p => p.entryTime === entryTime);
-            if (raw) paperTrading.closePosition(raw.id, markPricesMapRef.current[raw.symbol] ?? currentPrice ?? 0, 'manual');
+            if (raw) {
+              if (raw.altMeta) setDrawingsByTicker(prev => ({ ...prev, [raw.symbol]: [] }));
+              paperTrading.closePosition(raw.id, markPricesMapRef.current[raw.symbol] ?? currentPrice ?? 0, 'manual');
+            }
           }}
           onPaperSetTPSL={(entryTime, tp, sl) => {
             const raw = paperTrading.positions.find(p => p.entryTime === entryTime);
@@ -1125,6 +1342,8 @@ function AppInner() {
           }}
           onPaperResetBalance={paperTrading.resetBalance}
           onPaperClearHistory={paperTrading.clearHistory}
+          onOpenAltPosition={handleOpenAltPosition}
+          liveAltMetaMap={liveAltMetaMap}
         />
       )}
     </div>

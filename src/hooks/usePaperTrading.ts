@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type { FuturesPosition } from '../types/futures';
-import type { PaperPosition, PaperOrder, PaperHistoryEntry, PaperState } from '../types/paperTrading';
+import type { PaperPosition, PaperOrder, PaperHistoryEntry, PaperState, AltMeta } from '../types/paperTrading';
 
 const DEFAULT_BALANCE = 10000;
 const FEE_RATE = 0.0004; // Binance Futures taker fee 0.04%
@@ -20,6 +20,8 @@ function load(key: string): PaperState | null {
     const parsed = JSON.parse(raw) as PaperState;
     // Migrate old state without orders field
     if (!parsed.orders) parsed.orders = [];
+    // Migrate old orders without triggerType
+    parsed.orders = parsed.orders.map(o => (o.triggerType ? o : { ...o, triggerType: 'limit' as const }));
     return parsed;
   } catch {
     return null;
@@ -61,6 +63,7 @@ export function usePaperTrading(storageKey: string) {
     marginType: 'isolated' | 'cross',
     tpPrice?: number,
     slPrice?: number,
+    altMeta?: AltMeta,
   ) => {
     const margin = (price * qty) / leverage;
     const entryFee = parseFloat((price * qty * FEE_RATE).toFixed(8));
@@ -104,6 +107,7 @@ export function usePaperTrading(storageKey: string) {
         entryFee: actualFee,
         tpPrice,
         slPrice,
+        altMeta,
       };
       return {
         ...prev,
@@ -220,10 +224,14 @@ export function usePaperTrading(storageKey: string) {
     leverage: number,
     marginType: 'isolated' | 'cross',
     reduceOnly: boolean,
+    tpPrice?: number,
+    slPrice?: number,
+    altMeta?: AltMeta,
+    triggerType: PaperOrder['triggerType'] = 'limit',
   ) => {
     const order: PaperOrder = {
-      id: uid(), symbol, side, qty, limitPrice, leverage, marginType, reduceOnly,
-      placedAt: Date.now(),
+      id: uid(), symbol, side, qty, limitPrice, triggerType, leverage, marginType, reduceOnly,
+      placedAt: Date.now(), tpPrice, slPrice, altMeta,
     };
     setState(prev => ({ ...prev, orders: [...prev.orders, order] }));
   }, []);
@@ -253,9 +261,10 @@ export function usePaperTrading(storageKey: string) {
       }
     }
 
-    // Check pending limit orders
+    // Check pending limit orders (only intrabar 'limit' type; candle-close orders handled in checkCandleClose)
     const triggeredIds: string[] = [];
     for (const order of orders) {
+      if (order.triggerType !== 'limit') continue;
       const mark = markPrices[order.symbol];
       if (mark === undefined || mark <= 0) continue; // skip invalid/zero prices
       // BUY limit: trigger when price drops to or below limitPrice
@@ -277,7 +286,8 @@ export function usePaperTrading(storageKey: string) {
         if (pos) partialClosePosition(pos.id, fillPrice, 'manual', order.qty);
       } else {
         openPosition(order.symbol, order.side === 'BUY' ? 'LONG' : 'SHORT',
-          order.qty, fillPrice, order.leverage, order.marginType);
+          order.qty, fillPrice, order.leverage, order.marginType,
+          order.tpPrice, order.slPrice, order.altMeta);
       }
     }
     if (triggeredIds.length > 0) {
@@ -287,6 +297,43 @@ export function usePaperTrading(storageKey: string) {
 
   const checkPrices = useCallback((markPrices: Record<string, number>) => {
     checkPricesRef.current(markPrices);
+  }, []);
+
+  // Called when a candle closes — checks close_above / close_below orders
+  const checkCandleCloseRef = useRef<(closedPrices: Record<string, number>) => void>(() => {});
+  checkCandleCloseRef.current = (closedPrices: Record<string, number>) => {
+    const { orders } = stateRef.current;
+    const triggeredIds: string[] = [];
+    for (const order of orders) {
+      if (order.triggerType === 'limit') continue;
+      const closePrice = closedPrices[order.symbol];
+      if (closePrice === undefined || closePrice <= 0) continue;
+      const triggered =
+        (order.triggerType === 'close_above' && closePrice >= order.limitPrice) ||
+        (order.triggerType === 'close_below' && closePrice <= order.limitPrice);
+      if (!triggered) continue;
+      triggeredIds.push(order.id);
+      // Open position at the candle's close price
+      openPosition(
+        order.symbol, order.side === 'BUY' ? 'LONG' : 'SHORT',
+        order.qty, closePrice, order.leverage, order.marginType,
+        order.tpPrice, order.slPrice, order.altMeta,
+      );
+    }
+    if (triggeredIds.length > 0) {
+      setState(prev => ({ ...prev, orders: prev.orders.filter(o => !triggeredIds.includes(o.id)) }));
+    }
+  };
+
+  const checkCandleClose = useCallback((closedPrices: Record<string, number>) => {
+    checkCandleCloseRef.current(closedPrices);
+  }, []);
+
+  const updateOrder = useCallback((id: string, updates: Partial<Pick<PaperOrder, 'limitPrice' | 'tpPrice' | 'slPrice'>>) => {
+    setState(prev => ({
+      ...prev,
+      orders: prev.orders.map(o => o.id === id ? { ...o, ...updates } : o),
+    }));
   }, []);
 
   const toFuturesPositions = useCallback((markPrices: Record<string, number>): FuturesPosition[] => {
@@ -333,6 +380,8 @@ export function usePaperTrading(storageKey: string) {
     placeLimitOrder,
     cancelOrder,
     checkPrices,
+    checkCandleClose,
+    updateOrder,
     toFuturesPositions,
     resetBalance,
     clearHistory,

@@ -1,3 +1,16 @@
+import type { Drawing } from './drawing';
+
+export interface AltMeta {
+  source: 'altscanner';
+  candidateId: string;
+  symbol: string;
+  direction: 'long' | 'short';
+  scanInterval: string;
+  validUntilTime: number;
+  slPrice: number;            // invalidation threshold (used by AltPositionMonitor)
+  drawingsSnapshot: Drawing[];
+}
+
 export interface PaperPosition {
   id: string;
   symbol: string;
@@ -11,6 +24,7 @@ export interface PaperPosition {
   entryFee: number;           // taker fee paid at entry (already deducted from balance)
   tpPrice?: number;
   slPrice?: number;
+  altMeta?: AltMeta;          // present when opened from AltScanner
 }
 
 export interface PaperOrder {
@@ -19,10 +33,17 @@ export interface PaperOrder {
   side: 'BUY' | 'SELL';
   qty: number;
   limitPrice: number;
+  /** 'limit': fire when mark touches limitPrice intrabar (default)
+   *  'close_above': fire when candle CLOSES >= limitPrice (trendline LONG pending)
+   *  'close_below': fire when candle CLOSES <= limitPrice (trendline SHORT pending) */
+  triggerType: 'limit' | 'close_above' | 'close_below';
   leverage: number;
   marginType: 'isolated' | 'cross';
   reduceOnly: boolean;
   placedAt: number;
+  tpPrice?: number;
+  slPrice?: number;
+  altMeta?: AltMeta;
 }
 
 export interface PaperHistoryEntry {

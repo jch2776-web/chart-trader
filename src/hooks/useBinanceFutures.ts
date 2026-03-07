@@ -439,10 +439,11 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
     leverage: number,
     marginType: 'CROSSED' | 'ISOLATED',
     reduceOnly = false,
+    symbolOverride?: string,
   ): Promise<void> => {
     const key = apiKeyRef.current;
     const secret = apiSecretRef.current;
-    const sym = tickerRef.current;
+    const sym = symbolOverride ?? tickerRef.current;
     if (!key || !secret) throw new Error('API 키가 설정되지 않았습니다');
 
     if (!reduceOnly) {

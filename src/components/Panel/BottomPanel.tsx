@@ -1,7 +1,7 @@
 import React, { useRef, useState, useEffect, useMemo } from 'react';
 import type { FuturesPosition, FuturesOrder } from '../../types/futures';
 import type { ClientSlMap } from '../../hooks/useBinanceFutures';
-import type { PaperHistoryEntry, PaperPosition, PaperOrder } from '../../types/paperTrading';
+import type { PaperHistoryEntry, PaperPosition, PaperOrder, AltMeta } from '../../types/paperTrading';
 
 interface Props {
   allPositions: FuturesPosition[];
@@ -26,6 +26,8 @@ interface Props {
   onPaperCancelOrder?: (id: string) => void;
   onPaperClearHistory?: () => void;
   paperInitialBalance?: number;
+  onOpenAltPosition?: (meta: AltMeta) => void;
+  liveAltMetaMap?: Record<string, AltMeta>;
 }
 
 type Tab = 'positions' | 'orders' | 'paper-orders' | 'paper-history' | 'paper-asset';
@@ -886,12 +888,18 @@ export function BottomPanel({
   isPaperMode, paperPositions, paperRawPositions, paperBalance,
   paperOrders, paperHistory, paperInitialBalance,
   onPaperClosePosition, onPaperSetTPSL, onPaperResetBalance,
-  onPaperCancelOrder, onPaperClearHistory,
+  onPaperCancelOrder, onPaperClearHistory, onOpenAltPosition, liveAltMetaMap,
 }: Props) {
   const [tab, setTab] = useState<Tab>('positions');
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [tpslModal, setTpslModal] = useState<TPSLModal | null>(null);
   const lastY = useRef(0);
+  // 1-second tick for ALT meta countdown
+  const [nowMs, setNowMs] = useState(Date.now());
+  useEffect(() => {
+    const tid = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(tid);
+  }, []);
 
   // Balance reset state (shown in tab bar)
   const [resetBalInput, setResetBalInput] = useState('');
@@ -1035,18 +1043,40 @@ export function BottomPanel({
                 const isBuy = o.side === 'BUY';
                 const label = o.reduceOnly ? (isBuy ? '숏 청산' : '롱 청산') : (isBuy ? '롱 매수' : '숏 매도');
                 const col = o.reduceOnly ? '#f59e42' : isBuy ? '#0ecb81' : '#f6465d';
+                const isConditional = o.triggerType === 'close_above' || o.triggerType === 'close_below';
+                const triggerLabel = isConditional
+                  ? (o.triggerType === 'close_above' ? '종가≥ 조건부' : '종가≤ 조건부')
+                  : '지정가';
                 return (
                   <tr key={o.id} style={s.tr}>
                     <td style={s.td}>
                       <div style={s.symbolCell}>
                         <CoinLogo symbol={o.symbol} />
-                        <span style={s.symbolName}>{extractCoin(o.symbol)}<span style={{ fontSize: '0.68rem', color: '#5d6776', marginLeft: 3 }}>{o.symbol}</span></span>
+                        <div style={{ ...s.symbolText, ...s.symbolClickable }}
+                          onClick={() => onSelectTicker(o.symbol)} title={`${o.symbol} 차트로 이동`}>
+                          <span style={s.symbolName}>{extractCoin(o.symbol)}</span>
+                          <span style={s.symbolFull}>{o.symbol}</span>
+                        </div>
+                        <span style={{ fontSize: '0.6rem', background: 'rgba(240,185,11,0.15)', color: '#f0b90b', borderRadius: 3, padding: '1px 4px', fontWeight: 700, marginLeft: 2 }}>모의</span>
+                        {o.altMeta && (
+                          <button
+                            style={{ fontSize: '0.58rem', background: 'rgba(59,139,235,0.18)', color: '#3b8beb', borderRadius: 3, padding: '1px 5px', fontWeight: 700, border: '1px solid rgba(59,139,235,0.4)', cursor: 'pointer', lineHeight: 1.3, marginLeft: 4 }}
+                            onClick={() => onOpenAltPosition?.(o.altMeta!)}
+                            title="ALT추천 스냅샷 보기"
+                          >ALT추천</button>
+                        )}
                       </div>
                     </td>
                     <td style={s.td}><span style={{ ...s.sideBadge, background: isBuy ? 'rgba(14,203,129,0.12)' : 'rgba(246,70,93,0.12)', color: isBuy ? '#0ecb81' : '#f6465d' }}>{o.side}</span></td>
                     <td style={s.td}>{o.qty}</td>
                     <td style={s.td}>{o.leverage}x</td>
-                    <td style={s.td}><div style={s.priceCell}><span>{o.limitPrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 8 })}</span><span style={s.priceUnit}>USDT</span></div></td>
+                    <td style={s.td}>
+                      <div style={s.priceCell}>
+                        <span>{o.limitPrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 8 })}</span>
+                        <span style={s.priceUnit}>USDT</span>
+                      </div>
+                      <div style={{ fontSize: '0.64rem', color: isConditional ? '#f0b90b' : '#848e9c', marginTop: 1 }}>{triggerLabel}</div>
+                    </td>
                     <td style={{ ...s.td, color: col, fontWeight: 600, fontSize: '0.8rem' }}>{label}</td>
                     <td style={{ ...s.td, color: '#5d6776', fontSize: '0.74rem', whiteSpace: 'nowrap' }}>{new Date(o.placedAt).toLocaleTimeString()}</td>
                     <td style={s.td}>
@@ -1158,19 +1188,29 @@ export function BottomPanel({
                   <th style={s.th}>마진</th>
                   <th style={s.th}>미실현 손익 (ROI)</th>
                   <th style={s.th}>TP / SL</th>
+                  <th style={s.th}>유효 시간</th>
                   {isPaperMode && <th style={s.th}>청산</th>}
                 </tr>
               </thead>
               <tbody>
                 {isPaperMode ? (
                   (paperPositions?.length ?? 0) === 0 ? (
-                    <tr><td colSpan={10} style={s.empty}>모의 포지션 없음 — 위 폼에서 주문을 넣어보세요</td></tr>
+                    <tr><td colSpan={11} style={s.empty}>모의 포지션 없음 — 위 폼에서 주문을 넣어보세요</td></tr>
                   ) : paperPositions!.map(pos => {
                     const side = pos.positionAmt > 0 ? 'LONG' : 'SHORT';
                     const absAmt = Math.abs(pos.positionAmt);
                     const notionalUsdt = absAmt * pos.markPrice;
                     const margin = pos.entryPrice > 0 ? absAmt * pos.entryPrice / pos.leverage : 0;
                     const roi = margin > 0 ? (pos.unrealizedProfit / margin) * 100 : 0;
+                    const rawForBadge = paperRawPositions?.find(p => p.entryTime === pos.updateTime);
+                    const altMeta = rawForBadge?.altMeta;
+                    const remMs = altMeta ? Math.max(0, altMeta.validUntilTime - nowMs) : 0;
+                    const remH = Math.floor(remMs / 3600000);
+                    const remM = Math.floor((remMs % 3600000) / 60000);
+                    const remS = Math.floor((remMs % 60000) / 1000);
+                    const remStr = remMs > 0
+                      ? `${String(remH).padStart(2,'0')}:${String(remM).padStart(2,'0')}:${String(remS).padStart(2,'0')}`
+                      : '만료';
                     return (
                       <tr key={`paper-${pos.symbol}-${pos.positionSide}-${pos.updateTime}`} style={s.tr}>
                         <td style={s.td}>
@@ -1182,6 +1222,13 @@ export function BottomPanel({
                               <span style={s.symbolFull}>{pos.symbol}</span>
                             </div>
                             <span style={{ fontSize: '0.6rem', background: 'rgba(240,185,11,0.15)', color: '#f0b90b', borderRadius: 3, padding: '1px 4px', fontWeight: 700, marginLeft: 2 }}>모의</span>
+                            {altMeta && (
+                              <button
+                                style={{ fontSize: '0.58rem', background: 'rgba(59,139,235,0.18)', color: '#3b8beb', borderRadius: 3, padding: '1px 5px', fontWeight: 700, border: '1px solid rgba(59,139,235,0.4)', cursor: 'pointer', lineHeight: 1.3, marginLeft: 4 }}
+                                onClick={() => onOpenAltPosition?.(altMeta)}
+                                title="ALT추천 스냅샷 보기"
+                              >ALT추천</button>
+                            )}
                           </div>
                         </td>
                         <td style={s.td}>
@@ -1223,6 +1270,10 @@ export function BottomPanel({
                             );
                           })()}
                         </td>
+                        {/* 유효 시간 column (paper) */}
+                        <td style={{ ...s.td, fontFamily: 'monospace', fontSize: '0.74rem', color: remMs > 0 ? '#848e9c' : '#f6465d', whiteSpace: 'nowrap' }}>
+                          {altMeta ? remStr : '—'}
+                        </td>
                         <td style={s.td}>
                           <button
                             style={{ ...s.cancelBtn, color: '#f6465d', borderColor: 'rgba(246,70,93,0.3)' }}
@@ -1234,9 +1285,18 @@ export function BottomPanel({
                   })
                 ) : (
                   allPositions.length === 0 ? (
-                    <tr><td colSpan={9} style={s.empty}>포지션 없음</td></tr>
+                    <tr><td colSpan={10} style={s.empty}>포지션 없음</td></tr>
                   ) : allPositions.map(pos => {
                     const side = pos.positionAmt > 0 ? 'LONG' : 'SHORT';
+                    const liveDir = side === 'LONG' ? 'long' : 'short';
+                    const liveMeta = liveAltMetaMap?.[`${pos.symbol}_${liveDir}`];
+                    const liveRemMs = liveMeta ? Math.max(0, liveMeta.validUntilTime - nowMs) : 0;
+                    const liveRemH = Math.floor(liveRemMs / 3600000);
+                    const liveRemM = Math.floor((liveRemMs % 3600000) / 60000);
+                    const liveRemS = Math.floor((liveRemMs % 60000) / 1000);
+                    const liveRemStr = liveRemMs > 0
+                      ? `${String(liveRemH).padStart(2,'0')}:${String(liveRemM).padStart(2,'0')}:${String(liveRemS).padStart(2,'0')}`
+                      : '만료';
                     const absAmt = Math.abs(pos.positionAmt);
                     const notionalUsdt = absAmt * pos.markPrice;
                     const margin = pos.entryPrice > 0 ? absAmt * pos.entryPrice / pos.leverage : 0;
@@ -1263,6 +1323,13 @@ export function BottomPanel({
                               <span style={s.symbolName}>{extractCoin(pos.symbol)}</span>
                               <span style={s.symbolFull}>{pos.symbol}</span>
                             </div>
+                            {liveMeta && (
+                              <button
+                                style={{ fontSize: '0.58rem', background: 'rgba(59,139,235,0.18)', color: '#3b8beb', borderRadius: 3, padding: '1px 5px', fontWeight: 700, border: '1px solid rgba(59,139,235,0.4)', cursor: 'pointer', lineHeight: 1.3, marginLeft: 4 }}
+                                onClick={() => onOpenAltPosition?.(liveMeta)}
+                                title="ALT추천 스냅샷 보기"
+                              >ALT추천</button>
+                            )}
                           </div>
                         </td>
                         <td style={s.td}>
@@ -1306,6 +1373,10 @@ export function BottomPanel({
                             </div>
                             <button style={s.tpslBtn} onClick={() => openTPSL(pos)}>설정</button>
                           </div>
+                        </td>
+                        {/* 유효 시간 column (live) */}
+                        <td style={{ ...s.td, fontFamily: 'monospace', fontSize: '0.74rem', color: liveMeta ? (liveRemMs > 0 ? '#848e9c' : '#f6465d') : '#3a3f4b', whiteSpace: 'nowrap' }}>
+                          {liveMeta ? liveRemStr : '—'}
                         </td>
                       </tr>
                     );

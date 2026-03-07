@@ -374,7 +374,8 @@ function buildDrawingGroups(
   symbol: string, direction: 'long' | 'short',
   breakoutResult: BreakoutResult, candles: Candle[],
   srLevels: LevelZone[], hvnZones: HVNZone[], topLevels: LevelZone[],
-  entryPrice: number, sl: number, tp1: number | undefined, tp2: number, atr: number,
+  entryPrice: number, sl: number, tp1: number | undefined, tp2: number,
+  volFactor: number,
 ): DrawingGroups {
   const n = candles.length;
   const boxT1 = candles[Math.floor(n * 0.5)].time;
@@ -421,8 +422,7 @@ function buildDrawingGroups(
   const isLong = direction === 'long';
   const R  = Math.abs(entryPrice - sl);
   const rr = R > 0 ? Math.abs(tp2 - entryPrice) / R : 0;
-  const volFactor = (atr / entryPrice) > 0.015 ? 1.5 : 1.3;
-  const entryMemo = `${isLong ? '▲ 롱' : '▼ 숏'} 진입 · 종가 기준 ${isLong ? '돌파' : '이탈'} 시 진입 · 거래량≥SMA20×${volFactor} · RR≈${rr.toFixed(1)}`;
+  const entryMemo = `${isLong ? '▲ 롱' : '▼ 숏'} 진입 · 종가 기준 ${isLong ? '돌파' : '이탈'} 시 진입 · 거래량≥SMA20(20봉)×${volFactor} · RR≈${rr.toFixed(1)}`;
 
   const entryLines: Drawing[] = [
     {
@@ -497,20 +497,20 @@ async function scanSymbol(
     ...srLevels.filter(z => z.kind === 'resistance').sort((a, b) => b.score - a.score).slice(0, 1),
   ];
 
-  const drawingGroups = buildDrawingGroups(
-    symbol, foundDir, found, candles500, srLevels, hvnZones, topLevels,
-    entryPrice, sl, tp1, tp2, atr,
-  );
-
   // ── TTL / trigger spec ────────────────────────────────────────────────────
+  const vf      = getVolFactor(interval);
   const spec = found.triggerSpec;
   const validBars             = getTtlBars(interval);
   const nextCandleCloseTime   = lastClosedCloseTime + iMs;
   const validUntilTime        = lastClosedCloseTime + validBars * iMs;
   const triggerAtNextClose    = triggerPrice(spec, nextCandleCloseTime);
 
+  const drawingGroups = buildDrawingGroups(
+    symbol, foundDir, found, candles500, srLevels, hvnZones, topLevels,
+    entryPrice, sl, tp1, tp2, vf,
+  );
+
   // ── Initial status (volume check on lastClosed) ───────────────────────────
-  const vf      = getVolFactor(interval);
   const sma20v  = calcSMA20Volume(candles200);
   const volMet  = lastClosed.volume >= sma20v * vf && lastClosed.volume >= prevClosed.volume;
 

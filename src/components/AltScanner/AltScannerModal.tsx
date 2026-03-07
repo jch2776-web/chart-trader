@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import type { Candle, Interval } from '../../types/candle';
 import type { Drawing, HlineDrawing } from '../../types/drawing';
+import type { AltMeta } from '../../types/paperTrading';
 import { CandleChart } from '../Chart/CandleChart';
 import { runBreakoutScan } from './breakoutScanner';
 import type { ScanCandidate, ScanInterval, ScanDirection, CandidateStatus } from './breakoutScanner';
@@ -19,6 +20,17 @@ export interface AltTradeParams {
   tpPrice: number;
   tp1Price?: number;
   leverage: number;
+  marginType: 'ISOLATED' | 'CROSSED';
+  riskPct: number;              // e.g. 2 = 2% of balance at risk
+  // AltScanner meta — attached to the paper/live position for monitoring
+  candidateId: string;
+  scanInterval: string;
+  validUntilTime: number;
+  drawingsSnapshot: Drawing[];
+  // Signal classification — used for conditional entry logic
+  breakoutType: 'trendline' | 'hline' | 'box';
+  candidateStatus: CandidateStatus;
+  triggerPriceAtNextClose?: number; // only for trendline signals
 }
 
 interface Props {
@@ -29,6 +41,8 @@ interface Props {
   onOpenInMain?: (symbol: string) => void;
   onPaperTrade?: (params: AltTradeParams) => void;
   onLiveTrade?: (params: AltTradeParams) => void;
+  snapshotMeta?: AltMeta;
+  paperBalance?: number;
 }
 
 type LevelMode = 'core' | 'all';
@@ -53,6 +67,11 @@ const GLOSSARY = [
   { term: 'TP ②③ (익절)', def: 'Take Profit — 수익 실현 목표가. TP1=1차, TP2=최종(RR=2)' },
   { term: 'ST/MT/LT', def: '단기(60봉)/중기(150봉)/장기(300봉) 시간대 분석 결과' },
   { term: 'Pivot', def: '주변 봉보다 고가/저가인 전환점. 지지/저항 레벨 산출에 사용' },
+  { term: 'TRG (트리거가)', def: '추세선 돌파 신호의 기준가. 다음 봉 마감 시점에 이 가격을 돌파하면 신호 발동' },
+  { term: '대기 (PENDING)', def: '아직 진입 조건 미충족 — 신호가 유효한 상태로 트리거를 기다리는 중' },
+  { term: '발생 (TRIGGERED)', def: '트리거 조건 충족 — 진입 가격에 도달하여 신호가 활성화됨' },
+  { term: '무효 (INVALID)', def: '시그널이 깨짐 — SL 터치 또는 구조 붕괴로 신호 무효화' },
+  { term: '만료 (EXPIRED)', def: '유효 기간 초과 — 지정된 시간 내 트리거되지 않아 신호 소멸' },
 ];
 
 const SCAN_DELAY_MS = 3000; // fire this many ms after candle close
@@ -146,15 +165,31 @@ function LegendBar({ levelMode, showHVN, hasTP1 }: { levelMode: LevelMode; showH
   );
 }
 
+const LEVERAGE_PRESETS = [3, 5, 10, 20, 50];
+const RISK_PRESETS = [1, 2, 3, 5];
+
 // ── Info panel ─────────────────────────────────────────────────────────────
 function TradingInfoPanel({
   c, onPaperTrade, onLiveTrade,
+  paperLeverage, setPaperLeverage, paperMarginType, setPaperMarginType, paperRiskPct, setPaperRiskPct,
+  liveLeverage, setLiveLeverage, liveMarginType, setLiveMarginType, liveRiskPct, setLiveRiskPct,
+  paperBalance,
 }: {
   c: ScanCandidate;
   onPaperTrade?: (p: AltTradeParams) => void;
   onLiveTrade?: (p: AltTradeParams) => void;
+  paperLeverage: number; setPaperLeverage: (v: number) => void;
+  paperMarginType: 'ISOLATED' | 'CROSSED'; setPaperMarginType: (v: 'ISOLATED' | 'CROSSED') => void;
+  paperRiskPct: number; setPaperRiskPct: (v: number) => void;
+  liveLeverage: number; setLiveLeverage: (v: number) => void;
+  liveMarginType: 'ISOLATED' | 'CROSSED'; setLiveMarginType: (v: 'ISOLATED' | 'CROSSED') => void;
+  liveRiskPct: number; setLiveRiskPct: (v: number) => void;
+  paperBalance?: number;
 }) {
   const [showGlossary, setShowGlossary] = useState(false);
+  const [showLiveTip, setShowLiveTip] = useState(false);
+  const [showPaperSettings, setShowPaperSettings] = useState(false);
+  const [showLiveSettings, setShowLiveSettings] = useState(false);
   const isLong = c.direction === 'long';
   const slPct  = (c.slPrice  - c.entryPrice) / c.entryPrice * 100;
   const tpPct  = (c.tpPrice  - c.entryPrice) / c.entryPrice * 100;
@@ -174,11 +209,35 @@ function TradingInfoPanel({
   const opinion  = buildOpinion(c);
   const topLevel = c.topLevels[0];
 
-  const tradeParams: AltTradeParams = {
+  const drawingsSnapshot: Drawing[] = [
+    ...c.drawingGroups.breakout,
+    ...c.drawingGroups.topSR,
+    ...c.drawingGroups.hvn,
+    ...c.drawingGroups.entryLines,
+  ];
+  const baseParams = {
     symbol: c.symbol, direction: c.direction,
     entryPrice: c.entryPrice, slPrice: c.slPrice,
     tpPrice: c.tpPrice, tp1Price: c.tp1Price,
-    leverage: 10,
+    candidateId: `${c.symbol}_${c.direction}_${c.asOfCloseTime}`,
+    scanInterval: c.interval,
+    validUntilTime: c.validUntilTime,
+    drawingsSnapshot,
+    breakoutType: c.breakoutType,
+    candidateStatus: c.status,
+    triggerPriceAtNextClose: c.triggerPriceAtNextClose,
+  };
+  const paperTradeParams: AltTradeParams = {
+    ...baseParams,
+    leverage: paperLeverage,
+    marginType: paperMarginType,
+    riskPct: paperRiskPct,
+  };
+  const liveTradeParams: AltTradeParams = {
+    ...baseParams,
+    leverage: liveLeverage,
+    marginType: liveMarginType,
+    riskPct: liveRiskPct,
   };
 
   return (
@@ -208,10 +267,16 @@ function TradingInfoPanel({
         {c.breakoutType === 'trendline' && (
           <>
             <div style={S.msep} />
-            <div style={S.mbadge}>
+            <div style={{ ...S.mbadge, cursor: 'help' }}
+              title={isLong
+                ? `TRG: 추세선 돌파 기준가입니다.\n다음 봉이 완전히 마감(종가 확정)될 때,\n종가 ≥ ${pf(c.triggerPriceAtNextClose)} 이면 롱 진입 신호가 발동됩니다.`
+                : `TRG: 추세선 돌파 기준가입니다.\n다음 봉이 완전히 마감(종가 확정)될 때,\n종가 ≤ ${pf(c.triggerPriceAtNextClose)} 이면 숏 진입 신호가 발동됩니다.`
+              }>
               <span style={{ ...S.mbadgeNum, color: '#f0b90b' }}>TRG</span>
               <div style={S.mbadgeInner}>
-                <span style={S.mbadgeLabel}>다음봉 기준</span>
+                <span style={{ ...S.mbadgeLabel, textTransform: 'none' as const }}>
+                  {isLong ? '다음봉 종가 ≥ 이면 롱 신호 발동 ❓' : '다음봉 종가 ≤ 이면 숏 신호 발동 ❓'}
+                </span>
                 <span style={{ ...S.mbadgeValue, color: '#f0b90b' }}>{pf(c.triggerPriceAtNextClose)}</span>
               </div>
             </div>
@@ -226,24 +291,160 @@ function TradingInfoPanel({
         </div>
 
         {onPaperTrade && (
-          <button style={S.paperTradeBtn} onClick={() => onPaperTrade(tradeParams)}
-            title="잔고 2% 리스크 기준 모의 포지션 자동 개설">
-            📄 모의진입
-          </button>
+          <>
+            <button style={S.paperTradeBtn} onClick={() => onPaperTrade(paperTradeParams)}
+              title="모의 포지션 자동 개설 (지정가 예약)">
+              📄 모의진입
+            </button>
+            <button
+              style={{ ...S.paperTradeBtn,
+                ...(showPaperSettings ? { borderColor: '#f0b90b', background: 'rgba(240,185,11,0.20)' } : { opacity: 0.8 }),
+              }}
+              onClick={() => { setShowPaperSettings(v => !v); setShowLiveSettings(false); }}
+              title="모의 진입 레버리지·마진·비율 설정">
+              ⚙ 모의 설정 {showPaperSettings ? '▲' : '▼'}
+            </button>
+          </>
         )}
         {onLiveTrade && (
-          <button style={S.liveTradeBtn} onClick={() => onLiveTrade(tradeParams)}
-            title="실전 모드 — 아래 설정을 참고하여 직접 주문하세요">
-            ⚡ 실전진입
-          </button>
+          <>
+            <button style={S.liveTradeBtn} onClick={() => onLiveTrade(liveTradeParams)}
+              title="실전 모드 — 지정가 주문 자동 접수">
+              ⚡ 실전진입
+            </button>
+            <button
+              style={{ ...S.liveTradeBtn,
+                ...(showLiveSettings ? { borderColor: '#0ecb81', background: 'rgba(14,203,129,0.20)' } : { opacity: 0.8 }),
+              }}
+              onClick={() => { setShowLiveSettings(v => !v); setShowPaperSettings(false); }}
+              title="실전 투입 레버리지·마진·비율 설정">
+              ⚙ 실전 설정 {showLiveSettings ? '▲' : '▼'}
+            </button>
+          </>
         )}
       </div>
+
+      {/* Paper settings panel */}
+      {showPaperSettings && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 12px', background: 'rgba(0,0,0,0.30)', borderRadius: 6, border: '1px solid rgba(240,185,11,0.25)', flexWrap: 'wrap' as const }}>
+          <span style={{ color: '#f0b90b', fontSize: '0.75rem', fontWeight: 600, whiteSpace: 'nowrap' as const }}>📄 모의 설정</span>
+          <div style={{ width: 1, height: 22, background: '#2a2e39', flexShrink: 0 }} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+            <span style={{ color: '#5e6673', fontSize: '0.75rem', whiteSpace: 'nowrap' as const }}>레버리지</span>
+            {LEVERAGE_PRESETS.map(lv => (
+              <button key={lv}
+                style={{ ...S.glossaryBtn, padding: '2px 9px', fontSize: '0.78rem',
+                  ...(paperLeverage === lv ? { borderColor: '#f0b90b', color: '#f0b90b', background: 'rgba(240,185,11,0.12)' } : {}),
+                }}
+                onClick={() => setPaperLeverage(lv)}>
+                {lv}x
+              </button>
+            ))}
+          </div>
+          <div style={{ width: 1, height: 22, background: '#2a2e39', flexShrink: 0 }} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+            <span style={{ color: '#5e6673', fontSize: '0.75rem', whiteSpace: 'nowrap' as const }}>마진</span>
+            {(['ISOLATED', 'CROSSED'] as const).map(mt => (
+              <button key={mt}
+                style={{ ...S.glossaryBtn, padding: '2px 9px', fontSize: '0.78rem',
+                  ...(paperMarginType === mt ? { borderColor: '#3b8beb', color: '#3b8beb', background: 'rgba(59,139,235,0.12)' } : {}),
+                }}
+                onClick={() => setPaperMarginType(mt)}>
+                {mt === 'ISOLATED' ? '격리' : '교차'}
+              </button>
+            ))}
+          </div>
+          <div style={{ width: 1, height: 22, background: '#2a2e39', flexShrink: 0 }} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+            <span style={{ color: '#5e6673', fontSize: '0.75rem', whiteSpace: 'nowrap' as const }}>리스크</span>
+            {RISK_PRESETS.map(r => (
+              <button key={r}
+                style={{ ...S.glossaryBtn, padding: '2px 9px', fontSize: '0.78rem',
+                  ...(paperRiskPct === r ? { borderColor: '#0ecb81', color: '#0ecb81', background: 'rgba(14,203,129,0.12)' } : {}),
+                }}
+                onClick={() => setPaperRiskPct(r)}>
+                {r}%
+              </button>
+            ))}
+          </div>
+          <span style={{ color: '#5e6673', fontSize: '0.72rem', marginLeft: 2 }}>
+            <b style={{ color: '#f0b90b' }}>{paperLeverage}x</b> · <b style={{ color: '#3b8beb' }}>{paperMarginType === 'ISOLATED' ? '격리' : '교차'}</b>
+            {' · '}<b style={{ color: '#0ecb81' }}>{paperRiskPct}%</b> 리스크
+            {paperBalance != null && paperBalance > 0 && (
+              <> = <b style={{ color: '#0ecb81' }}>${(paperBalance * paperRiskPct / 100).toFixed(2)}</b></>
+            )}
+          </span>
+        </div>
+      )}
+
+      {/* Live settings panel */}
+      {showLiveSettings && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 12px', background: 'rgba(0,0,0,0.30)', borderRadius: 6, border: '1px solid rgba(14,203,129,0.25)', flexWrap: 'wrap' as const }}>
+          <span style={{ color: '#0ecb81', fontSize: '0.75rem', fontWeight: 600, whiteSpace: 'nowrap' as const }}>⚡ 실전 설정</span>
+          <div style={{ width: 1, height: 22, background: '#2a2e39', flexShrink: 0 }} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+            <span style={{ color: '#5e6673', fontSize: '0.75rem', whiteSpace: 'nowrap' as const }}>레버리지</span>
+            {LEVERAGE_PRESETS.map(lv => (
+              <button key={lv}
+                style={{ ...S.glossaryBtn, padding: '2px 9px', fontSize: '0.78rem',
+                  ...(liveLeverage === lv ? { borderColor: '#f0b90b', color: '#f0b90b', background: 'rgba(240,185,11,0.12)' } : {}),
+                }}
+                onClick={() => setLiveLeverage(lv)}>
+                {lv}x
+              </button>
+            ))}
+          </div>
+          <div style={{ width: 1, height: 22, background: '#2a2e39', flexShrink: 0 }} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+            <span style={{ color: '#5e6673', fontSize: '0.75rem', whiteSpace: 'nowrap' as const }}>마진</span>
+            {(['ISOLATED', 'CROSSED'] as const).map(mt => (
+              <button key={mt}
+                style={{ ...S.glossaryBtn, padding: '2px 9px', fontSize: '0.78rem',
+                  ...(liveMarginType === mt ? { borderColor: '#3b8beb', color: '#3b8beb', background: 'rgba(59,139,235,0.12)' } : {}),
+                }}
+                onClick={() => setLiveMarginType(mt)}>
+                {mt === 'ISOLATED' ? '격리' : '교차'}
+              </button>
+            ))}
+          </div>
+          <div style={{ width: 1, height: 22, background: '#2a2e39', flexShrink: 0 }} />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+            <span style={{ color: '#5e6673', fontSize: '0.75rem', whiteSpace: 'nowrap' as const }}>리스크</span>
+            {RISK_PRESETS.map(r => (
+              <button key={r}
+                style={{ ...S.glossaryBtn, padding: '2px 9px', fontSize: '0.78rem',
+                  ...(liveRiskPct === r ? { borderColor: '#0ecb81', color: '#0ecb81', background: 'rgba(14,203,129,0.12)' } : {}),
+                }}
+                onClick={() => setLiveRiskPct(r)}>
+                {r}%
+              </button>
+            ))}
+          </div>
+          <span style={{ color: '#5e6673', fontSize: '0.72rem', marginLeft: 2 }}>
+            <b style={{ color: '#f0b90b' }}>{liveLeverage}x</b> · <b style={{ color: '#3b8beb' }}>{liveMarginType === 'ISOLATED' ? '격리' : '교차'}</b> · 잔고 <b style={{ color: '#0ecb81' }}>{liveRiskPct}%</b> 리스크
+          </span>
+        </div>
+      )}
+
+      {/* Conditional entry notice (trendline PENDING only) */}
+      {c.breakoutType === 'trendline' && c.status === 'PENDING' && c.triggerPriceAtNextClose != null && (
+        <div style={{ display: 'flex', gap: 12, padding: '6px 12px', background: 'rgba(240,185,11,0.06)', borderRadius: 6, border: '1px solid rgba(240,185,11,0.22)', flexWrap: 'wrap' as const, fontSize: '0.74rem' }}>
+          <span style={{ color: '#f0b90b', fontWeight: 700, whiteSpace: 'nowrap' as const }}>⚡ 조건부 진입 안내</span>
+          <span style={{ color: '#ccc' }}>
+            📄 <b style={{ color: '#f0b90b' }}>모의</b>: 다음 봉 종가 {isLong ? '≥' : '≤'} <b style={{ color: '#f0b90b' }}>{pf(c.triggerPriceAtNextClose)}</b> 확정 시 자동 체결 (봉마감 감시 중)
+          </span>
+          <span style={{ color: '#848e9c' }}>|</span>
+          <span style={{ color: '#ccc' }}>
+            ⚡ <b style={{ color: '#0ecb81' }}>실전</b>: 바이낸스 지정가 @ <b style={{ color: '#0ecb81' }}>{pf(c.triggerPriceAtNextClose)}</b> 즉시 접수 <span style={{ color: '#f6465d' }}>(봉마감 확인 불가)</span>
+          </span>
+        </div>
+      )}
 
       {/* Row 2: 4 explanation blocks */}
       <div style={S.blockRow}>
         <InfoBlock icon="📌" title="진입 조건">
           <div>종가 기준 <b>{breakoutKo}</b> 확인 후 진입</div>
-          <div>거래량 ≥ 20일 평균의 <b>{volFactor}배</b> 이상</div>
+          <div>거래량 ≥ SMA20(20봉) × <b>{volFactor}배</b> 이상</div>
         </InfoBlock>
         <InfoBlock icon="🛡" title="손절 기준">
           <div><b>{slBasisText}</b></div>
@@ -269,9 +470,17 @@ function TradingInfoPanel({
         <span style={S.tipText}>
           💡 RR={rr.toFixed(1)} → 승률 <b>{breakEvenPct}%</b> 이상이면 수익 ({nTrials}번 중 1번만 성공해도 손익분기)
         </span>
-        <button style={S.glossaryBtn} onClick={() => setShowGlossary(v => !v)}>
-          📖 용어 사전 {showGlossary ? '▲' : '▼'}
-        </button>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button style={S.glossaryBtn} onClick={() => { setShowLiveTip(false); setShowGlossary(v => !v); }}>
+            📖 용어 사전 {showGlossary ? '▲' : '▼'}
+          </button>
+          {onLiveTrade && (
+            <button style={{ ...S.liveTradeBtn, opacity: 0.9 }}
+              onClick={() => { setShowGlossary(false); setShowLiveTip(v => !v); }}>
+              ⚡ 실전진입 안내 {showLiveTip ? '▲' : '▼'}
+            </button>
+          )}
+        </div>
       </div>
 
       {showGlossary && (
@@ -280,6 +489,28 @@ function TradingInfoPanel({
             <div key={term} style={S.glossaryItem}>
               <span style={S.glossaryTerm}>{term}</span>
               <span style={S.glossaryDef}>{def}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {showLiveTip && (
+        <div style={{ ...S.glossaryGrid, gridTemplateColumns: '1fr', gap: 6, borderTop: '1px solid rgba(240,185,11,0.2)', paddingTop: 8 }}>
+          {[
+            { icon: '📋', title: '주문 방식', desc: '진입가 기준 지정가(Limit) 주문으로 자동 접수됩니다. 가격에 도달하지 않으면 미체결 상태로 남습니다.' },
+            { icon: '💰', title: '수량 계산', desc: `잔고의 ${liveRiskPct}% 리스크 기준으로 수량이 자동 산출됩니다. (수량 = 잔고 × ${liveRiskPct}% ÷ SL 거리)` },
+            { icon: '⚙️', title: '레버리지 · 마진', desc: `현재 설정: 레버리지 ${liveLeverage}x · ${liveMarginType === 'ISOLATED' ? '격리 마진(Isolated)' : '교차 마진(Cross)'}. ⚙ 실전 설정 버튼으로 변경 가능합니다.` },
+            { icon: '🎯', title: 'TP/SL 자동 설정', desc: '진입 주문 체결 직후 TP(익절)와 SL(손절) 조건부 주문이 자동으로 등록됩니다.' },
+            { icon: '⚠️', title: '헤지 모드 필수', desc: '바이낸스 선물 계정이 반드시 헤지 모드(Hedge Mode)로 설정되어 있어야 합니다. 단방향 모드에서는 오류가 발생합니다.' },
+            { icon: '🔑', title: 'API 키 필요', desc: '설정 > API 키에 바이낸스 Futures API Key / Secret이 입력되어 있어야 실전 주문이 가능합니다.' },
+            { icon: '📌', title: '알아두세요', desc: '실전 주문 접수 후 바이낸스 앱에서 체결 여부를 반드시 확인하세요. 미체결 주문은 수동으로 취소 가능합니다.' },
+          ].map(({ icon, title, desc }) => (
+            <div key={title} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+              <span style={{ fontSize: 13, flexShrink: 0, marginTop: 1 }}>{icon}</span>
+              <div>
+                <span style={{ color: '#f0b90b', fontWeight: 600, fontSize: 11 }}>{title}　</span>
+                <span style={{ color: '#c9cfd8', fontSize: 11 }}>{desc}</span>
+              </div>
             </div>
           ))}
         </div>
@@ -315,22 +546,45 @@ function InfoBlock({ icon, title, children }: { icon: string; title: string; chi
 // ── Main modal ─────────────────────────────────────────────────────────────
 export function AltScannerModal({
   symbols, initialCandidates, onCandidatesChange, onClose, onOpenInMain,
-  onPaperTrade, onLiveTrade,
+  onPaperTrade, onLiveTrade, snapshotMeta, paperBalance,
 }: Props) {
   const [scanInterval, setScanInterval] = useState<ScanInterval>('1h');
   const [direction, setDirection]       = useState<ScanDirection>('both');
   const [scanning, setScanning]         = useState(false);
   const [progress, setProgress]         = useState({ done: 0, total: 0 });
-  const [candidates, setCandidates]     = useState<ScanCandidate[]>(initialCandidates);
+  // Per-interval candidate cache so switching interval back restores previous results
+  const [candidatesCache, setCandidatesCache] = useState<Record<string, ScanCandidate[]>>(() => {
+    const cache: Record<string, ScanCandidate[]> = {};
+    for (const c of initialCandidates) {
+      cache[c.interval] = [...(cache[c.interval] ?? []), c];
+    }
+    return cache;
+  });
+  const candidates = useMemo(() => candidatesCache[scanInterval] ?? [], [candidatesCache, scanInterval]);
   const [selected, setSelected]         = useState<ScanCandidate | null>(
     initialCandidates.length > 0 ? initialCandidates[0] : null,
   );
   const [chartCandles, setChartCandles] = useState<Candle[]>(
     initialCandidates.length > 0 ? initialCandidates[0].candles : [],
   );
+  // Independent chart view interval (can differ from scanInterval)
+  const [chartViewInterval, setChartViewInterval] = useState<Interval>(
+    initialCandidates.length > 0 ? initialCandidates[0].interval as Interval : '1h',
+  );
+  // Candles fetched for chart view when chartViewInterval !== scanInterval
+  const [chartViewCandles, setChartViewCandles] = useState<Candle[]>([]);
   const [levelMode, setLevelMode]       = useState<LevelMode>('core');
   const [showHVN, setShowHVN]           = useState(true);
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('TRIGGERED');
+  const [paperLeverage, setPaperLeverage]       = useState(10);
+  const [paperMarginType, setPaperMarginType]   = useState<'ISOLATED' | 'CROSSED'>('ISOLATED');
+  const [paperRiskPct, setPaperRiskPct]         = useState(2);
+  const [liveLeverage, setLiveLeverage]         = useState(10);
+  const [liveMarginType, setLiveMarginType]     = useState<'ISOLATED' | 'CROSSED'>('ISOLATED');
+  const [liveRiskPct, setLiveRiskPct]           = useState(2);
+
+  // Snapshot view: candles fetched when snapshotMeta is provided
+  const [snapshotCandles, setSnapshotCandles] = useState<Candle[]>([]);
 
   // Auto-scan
   const [autoScanEnabled, setAutoScanEnabled] = useState<boolean>(() => defaultAutoScan('1h'));
@@ -351,21 +605,28 @@ export function AltScannerModal({
   const scanningRef        = useRef(false);
   const selectedRef        = useRef<ScanCandidate | null>(null);
   const autoScanEnabledRef = useRef(autoScanEnabled);
+  const scanIntervalRef    = useRef(scanInterval);
   useEffect(() => { scanningRef.current = scanning; }, [scanning]);
   useEffect(() => { selectedRef.current = selected; }, [selected]);
   useEffect(() => { autoScanEnabledRef.current = autoScanEnabled; }, [autoScanEnabled]);
+  useEffect(() => { scanIntervalRef.current = scanInterval; }, [scanInterval]);
 
   // ── EXPIRED status sweep (every second) ──────────────────────────────────
   useEffect(() => {
     const now = Date.now();
-    setCandidates(prev => {
-      const needsUpdate = prev.some(c => c.status === 'PENDING' && now > c.validUntilTime);
+    setCandidatesCache(prev => {
+      const iv = scanIntervalRef.current;
+      const cur = prev[iv] ?? [];
+      const needsUpdate = cur.some(c => c.status === 'PENDING' && now > c.validUntilTime);
       if (!needsUpdate) return prev;
-      return prev.map(c =>
-        c.status === 'PENDING' && now > c.validUntilTime
-          ? { ...c, status: 'EXPIRED' as const, expiredReason: 'TTL 만료' }
-          : c,
-      );
+      return {
+        ...prev,
+        [iv]: cur.map(c =>
+          c.status === 'PENDING' && now > c.validUntilTime
+            ? { ...c, status: 'EXPIRED' as const, expiredReason: 'TTL 만료' }
+            : c,
+        ),
+      };
     });
     setSelected(s =>
       s && s.status === 'PENDING' && now > s.validUntilTime
@@ -375,6 +636,60 @@ export function AltScannerModal({
   }, [nowMs]);
 
   useEffect(() => { onCandidatesChange(candidates); }, [candidates, onCandidatesChange]);
+
+  // ── Snapshot: fetch candles when snapshotMeta changes ────────────────────
+  useEffect(() => {
+    if (!snapshotMeta) { setSnapshotCandles([]); return; }
+    // Try to auto-select the matching candidate (if scan was done in this session)
+    const match = candidates.find(c =>
+      `${c.symbol}_${c.direction}_${c.asOfCloseTime}` === snapshotMeta.candidateId,
+    );
+    if (match) {
+      setSelected(match);
+      setChartCandles(match.candles);
+      setChartViewInterval(match.interval as Interval);
+      setChartViewCandles([]);
+      return;
+    }
+    // No matching candidate — fetch candles for snapshot chart
+    setSelected(null);
+    const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${snapshotMeta.symbol}&interval=${snapshotMeta.scanInterval}&limit=300`;
+    fetch(url)
+      .then(r => r.json())
+      .then((raw: unknown[][]) => setSnapshotCandles(raw.map(r => ({
+        time:   r[0] as number,
+        open:   parseFloat(r[1] as string),
+        high:   parseFloat(r[2] as string),
+        low:    parseFloat(r[3] as string),
+        close:  parseFloat(r[4] as string),
+        volume: parseFloat(r[5] as string),
+      }))))
+      .catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snapshotMeta?.candidateId]);
+
+  // ── Fetch candles when chart view interval differs from scan interval ────
+  useEffect(() => {
+    if (!selected) { setChartViewCandles([]); return; }
+    if (chartViewInterval === (selected.interval as Interval)) {
+      setChartViewCandles([]);
+      return;
+    }
+    setChartViewCandles([]);
+    const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${selected.symbol}&interval=${chartViewInterval}&limit=300`;
+    fetch(url)
+      .then(r => r.json())
+      .then((raw: unknown[][]) => setChartViewCandles(raw.map(r => ({
+        time:   r[0] as number,
+        open:   parseFloat(r[1] as string),
+        high:   parseFloat(r[2] as string),
+        low:    parseFloat(r[3] as string),
+        close:  parseFloat(r[4] as string),
+        volume: parseFloat(r[5] as string),
+      }))))
+      .catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.symbol, selected?.direction, chartViewInterval]);
 
   // ── WS: real-time chart + revalidation on candle close ───────────────────
   useBinanceWS(selected?.symbol ?? '', scanInterval as Interval, useCallback((candle: Candle) => {
@@ -386,6 +701,7 @@ export function AltScannerModal({
       // New candle opened → "last" just closed → revalidate selected candidate
       if (isNewCandle && prev.length >= 2) {
         const sel = selectedRef.current;
+
         if (sel && (sel.status === 'PENDING' || sel.status === 'EXPIRED')) {
           const lastClosed = last;
           const prevClosed = prev[prev.length - 2];
@@ -395,9 +711,13 @@ export function AltScannerModal({
           const updates = revalidateCandidate(sel, lastClosed, prevClosed, prev, iMs, now);
           if (Object.keys(updates).length > 0) {
             const next = { ...sel, ...updates } as ScanCandidate;
-            setCandidates(cs => cs.map(c =>
-              c.symbol === sel.symbol && c.direction === sel.direction ? next : c,
-            ));
+            const iv = scanIntervalRef.current;
+            setCandidatesCache(prev => ({
+              ...prev,
+              [iv]: (prev[iv] ?? []).map(c =>
+                c.symbol === sel.symbol && c.direction === sel.direction ? next : c,
+              ),
+            }));
             setSelected(next);
           }
         }
@@ -413,6 +733,8 @@ export function AltScannerModal({
   const handleSelect = useCallback((c: ScanCandidate) => {
     setSelected(c);
     setChartCandles(c.candles);
+    setChartViewInterval(c.interval as Interval);
+    setChartViewCandles([]);
   }, []);
 
   // ── Manual scan ───────────────────────────────────────────────────────────
@@ -420,15 +742,18 @@ export function AltScannerModal({
     if (scanning) { abortRef.current?.abort(); return; }
     abortRef.current = new AbortController();
     setScanning(true);
-    setCandidates([]);
+    setCandidatesCache(prev => ({ ...prev, [scanInterval]: [] }));
     setSelected(null);
     setProgress({ done: 0, total: symbols.length });
     try {
       await runBreakoutScan(symbols, scanInterval, direction,
         (done, total) => setProgress({ done, total }),
-        (c) => setCandidates(prev => [...prev, c].sort((a, b) => {
-          const so = STATUS_ORDER[a.status] - STATUS_ORDER[b.status];
-          return so !== 0 ? so : b.score - a.score;
+        (c) => setCandidatesCache(prev => ({
+          ...prev,
+          [scanInterval]: [...(prev[scanInterval] ?? []), c].sort((a, b) => {
+            const so = STATUS_ORDER[a.status] - STATUS_ORDER[b.status];
+            return so !== 0 ? so : b.score - a.score;
+          }),
         })),
         abortRef.current.signal);
     } finally {
@@ -473,16 +798,19 @@ export function AltScannerModal({
       }
       abortRef.current = new AbortController();
       setScanning(true);
-      setCandidates([]);
+      setCandidatesCache(prev => ({ ...prev, [scanInterval]: [] }));
       setSelected(null);
       setProgress({ done: 0, total: symbols.length });
       try {
         await runBreakoutScan(
           symbols, scanInterval, direction,
           (done, total) => setProgress({ done, total }),
-          (c) => setCandidates(prev => [...prev, c].sort((a, b) => {
-            const so = STATUS_ORDER[a.status] - STATUS_ORDER[b.status];
-            return so !== 0 ? so : b.score - a.score;
+          (c) => setCandidatesCache(prev => ({
+            ...prev,
+            [scanInterval]: [...(prev[scanInterval] ?? []), c].sort((a, b) => {
+              const so = STATUS_ORDER[a.status] - STATUS_ORDER[b.status];
+              return so !== 0 ? so : b.score - a.score;
+            }),
           })),
           abortRef.current.signal,
         );
@@ -618,8 +946,15 @@ export function AltScannerModal({
               <button key={o.value}
                 style={{ ...S.ctrlBtn, ...(scanInterval === o.value ? S.ctrlActive : {}) }}
                 onClick={() => {
+                  const cached = candidatesCache[o.value] ?? [];
                   setScanInterval(o.value);
                   setAutoScanEnabled(defaultAutoScan(o.value));
+                  // Restore cached results for this interval (or clear if none)
+                  const first = cached[0] ?? null;
+                  setSelected(first);
+                  setChartCandles(first?.candles ?? []);
+                  setChartViewInterval(first ? first.interval as Interval : o.value as Interval);
+                  setChartViewCandles([]);
                 }}>{o.label}</button>
             ))}
           </div>
@@ -776,23 +1111,105 @@ export function AltScannerModal({
 
                 <LegendBar levelMode={levelMode} showHVN={showHVN} hasTP1={hasTP1} />
 
+                {/* Chart timeframe selector (independent of scan interval) */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 12px', borderBottom: '1px solid #2a2e39', background: '#181c27' }}>
+                  <span style={{ fontSize: '0.7rem', color: '#5e6673', marginRight: 4 }}>차트 봉:</span>
+                  {(['5m','15m','30m','1h','4h','1d'] as Interval[]).map(iv => (
+                    <button key={iv}
+                      style={{ fontSize: '0.72rem', padding: '2px 8px', borderRadius: 4, border: '1px solid',
+                        borderColor: chartViewInterval === iv ? '#3b8beb' : '#2a2e39',
+                        background: chartViewInterval === iv ? 'rgba(59,139,235,0.18)' : 'rgba(255,255,255,0.04)',
+                        color: chartViewInterval === iv ? '#3b8beb' : '#848e9c',
+                        cursor: 'pointer', fontWeight: chartViewInterval === iv ? 700 : 400,
+                      }}
+                      onClick={() => setChartViewInterval(iv)}
+                    >{iv}</button>
+                  ))}
+                  {chartViewInterval !== (selected.interval as Interval) && (
+                    <span style={{ fontSize: '0.68rem', color: '#5e6673', marginLeft: 4 }}>
+                      (스캔: {selected.interval} · 도형은 스캔 봉 기준)
+                    </span>
+                  )}
+                </div>
+
                 <div style={S.chartArea}>
                   <div style={S.chartCanvasWrap}>
                     <CandleChart
-                      key={selected.symbol + selected.direction + scanInterval}
-                      candles={chartCandles}
-                      interval={scanInterval as Interval}
+                      key={selected.symbol + selected.direction + chartViewInterval}
+                      candles={chartViewInterval === (selected.interval as Interval) ? chartCandles : chartViewCandles}
+                      interval={chartViewInterval}
                       ticker={selected.symbol}
                       drawingMode="none"
                       setDrawingMode={() => {}}
                       onDrawingsChange={() => {}}
-                      initialDrawings={activeDrawings}
+                      initialDrawings={chartViewInterval === (selected.interval as Interval) ? activeDrawings : []}
                     />
                   </div>
                 </div>
 
-                <TradingInfoPanel c={selected} onPaperTrade={onPaperTrade} onLiveTrade={onLiveTrade} />
+                <TradingInfoPanel c={selected} onPaperTrade={onPaperTrade} onLiveTrade={onLiveTrade}
+                  paperLeverage={paperLeverage} setPaperLeverage={setPaperLeverage}
+                  paperMarginType={paperMarginType} setPaperMarginType={setPaperMarginType}
+                  paperRiskPct={paperRiskPct} setPaperRiskPct={setPaperRiskPct}
+                  liveLeverage={liveLeverage} setLiveLeverage={setLiveLeverage}
+                  liveMarginType={liveMarginType} setLiveMarginType={setLiveMarginType}
+                  liveRiskPct={liveRiskPct} setLiveRiskPct={setLiveRiskPct}
+                  paperBalance={paperBalance} />
               </>
+            ) : snapshotMeta && snapshotCandles.length > 0 ? (
+              /* ── Snapshot view (position opened from AltScanner) ── */
+              <>
+                <div style={S.chartHeader}>
+                  <div style={S.chartHeaderLeft}>
+                    <span style={S.chartTitle}>
+                      {snapshotMeta.symbol} · {snapshotMeta.scanInterval} · 포지션 스냅샷
+                    </span>
+                    <span style={{ fontSize: '0.78rem', color: snapshotMeta.direction === 'long' ? '#0ecb81' : '#f6465d',
+                      background: snapshotMeta.direction === 'long' ? 'rgba(14,203,129,0.12)' : 'rgba(246,70,93,0.12)',
+                      border: `1px solid ${snapshotMeta.direction === 'long' ? 'rgba(14,203,129,0.4)' : 'rgba(246,70,93,0.4)'}`,
+                      borderRadius: 4, padding: '1px 7px', fontWeight: 700 }}>
+                      {snapshotMeta.direction === 'long' ? '▲ 롱' : '▼ 숏'}
+                    </span>
+                    <span style={{ fontSize: '0.72rem', color: '#3b8beb', background: 'rgba(59,139,235,0.12)',
+                      border: '1px solid rgba(59,139,235,0.35)', borderRadius: 4, padding: '1px 6px' }}>
+                      ALT추천 진입
+                    </span>
+                  </div>
+                  <div style={S.chartHeaderRight}>
+                    <span style={{ color: '#5e6673', fontSize: '0.72rem' }}>
+                      만료: {fmtDateTime(snapshotMeta.validUntilTime)}
+                    </span>
+                    <span style={{ fontSize: '0.72rem', fontFamily: 'monospace',
+                      color: nowMs < snapshotMeta.validUntilTime ? '#0ecb81' : '#f6465d' }}>
+                      {nowMs < snapshotMeta.validUntilTime
+                        ? `남은시간: ${fmtCountdown(snapshotMeta.validUntilTime - nowMs)}`
+                        : '만료됨'}
+                    </span>
+                    {onOpenInMain && (
+                      <button style={S.openMainBtn}
+                        onClick={() => { onOpenInMain(snapshotMeta.symbol); onClose(); }}>
+                        메인 차트로 열기 →
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div style={S.chartArea}>
+                  <div style={S.chartCanvasWrap}>
+                    <CandleChart
+                      key={`snapshot-${snapshotMeta.candidateId}`}
+                      candles={snapshotCandles}
+                      interval={snapshotMeta.scanInterval as Interval}
+                      ticker={snapshotMeta.symbol}
+                      drawingMode="none"
+                      setDrawingMode={() => {}}
+                      onDrawingsChange={() => {}}
+                      initialDrawings={snapshotMeta.drawingsSnapshot}
+                    />
+                  </div>
+                </div>
+              </>
+            ) : snapshotMeta && snapshotCandles.length === 0 ? (
+              <div style={S.chartPlaceholder}>차트 로딩 중…</div>
             ) : (
               <div style={S.chartPlaceholder}>
                 {candidates.length > 0 ? '← 종목을 선택하세요' : '스캔 후 종목을 선택하면 차트가 표시됩니다'}
@@ -808,7 +1225,7 @@ export function AltScannerModal({
 // ── Styles ─────────────────────────────────────────────────────────────────
 const S: Record<string, React.CSSProperties> = {
   overlay: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.70)', zIndex: 1200, display: 'flex', alignItems: 'center', justifyContent: 'center' },
-  modal: { background: '#1e222d', border: '1px solid #2a2e39', borderRadius: 8, display: 'flex', flexDirection: 'column', width: 'min(1440px, 97vw)', height: 'min(920px, 95vh)', overflow: 'hidden' },
+  modal: { background: '#1e222d', border: '1px solid #2a2e39', borderRadius: 8, display: 'flex', flexDirection: 'column', width: 'min(1440px, 97vw)', height: 'min(960px, 97vh)', overflow: 'hidden' },
   // Header
   header: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 16px', borderBottom: '1px solid #2a2e39', flexShrink: 0 },
   title: { color: '#d1d4dc', fontWeight: 600, fontSize: '0.95rem' },
@@ -857,7 +1274,7 @@ const S: Record<string, React.CSSProperties> = {
   statusBadge: { fontSize: '0.70rem', fontWeight: 700, padding: '1px 6px', borderRadius: 3, border: '1px solid', flexShrink: 0 },
   validityBadge: { display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' as const },
   // Chart panel
-  chartWrap: { flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 },
+  chartWrap: { flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 420 },
   chartHeader: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 12px', borderBottom: '1px solid #2a2e39', flexShrink: 0, gap: 8 },
   chartHeaderLeft: { display: 'flex', alignItems: 'center', gap: 8 },
   chartTitle: { color: '#d1d4dc', fontWeight: 600, fontSize: '0.88rem' },
@@ -869,11 +1286,11 @@ const S: Record<string, React.CSSProperties> = {
   legendItem: { display: 'flex', alignItems: 'center', gap: 4 },
   legendNum: { fontSize: '0.80rem', fontWeight: 700, minWidth: 14, textAlign: 'center' as const },
   legendLabel: { color: '#7a8292', fontSize: '0.72rem', whiteSpace: 'nowrap' as const },
-  chartArea: { flex: 1, position: 'relative', minHeight: 0, overflow: 'hidden' },
+  chartArea: { flex: 1, position: 'relative', minHeight: 300, overflow: 'hidden' },
   chartCanvasWrap: { position: 'absolute', inset: 0, opacity: 0.80 },
   chartPlaceholder: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#5e6673', fontSize: '0.88rem' },
   // Info panel
-  infoPanel: { flexShrink: 0, background: 'linear-gradient(180deg, #161a24 0%, #1a1e2a 100%)', borderTop: '1px solid #2a2e39', padding: '9px 14px 8px', display: 'flex', flexDirection: 'column', gap: 7 },
+  infoPanel: { flexShrink: 0, background: 'linear-gradient(180deg, #161a24 0%, #1a1e2a 100%)', borderTop: '1px solid #2a2e39', padding: '9px 14px 8px', display: 'flex', flexDirection: 'column', gap: 7, maxHeight: 280, overflowY: 'auto' as const },
   metricRow: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const },
   dirBadge: { fontSize: '0.82rem', fontWeight: 700, padding: '4px 10px', borderRadius: 5, border: '1px solid', flexShrink: 0 },
   mbadge: { display: 'flex', alignItems: 'center', gap: 4 },
