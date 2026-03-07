@@ -4,23 +4,28 @@ import { calcSRLevels } from './supportResistance';
 import type { LevelZone } from './supportResistance';
 import { calcHVN } from './volumeProfile';
 import type { HVNZone } from './volumeProfile';
+import {
+  intervalToMs, getTtlBars, getVolFactor, triggerPrice,
+  type TriggerSpec,
+} from './timeUtils';
 
 export type ScanInterval = '15m' | '1h' | '4h' | '1d';
 export type ScanDirection = 'both' | 'long' | 'short';
+export type CandidateStatus = 'PENDING' | 'TRIGGERED' | 'INVALID' | 'EXPIRED';
 
 export interface DrawingGroups {
-  breakout: Drawing[];  // detected pattern (trendline / hline / box)
-  dimSR: Drawing[];     // all SR hlines dimmed (for "전체" mode)
-  topSR: Drawing[];     // top 1-2 SR hlines bright
-  hvn: Drawing[];       // HVN box drawings
-  entryLines: Drawing[];// Entry / SL / TP hlines
+  breakout: Drawing[];
+  dimSR: Drawing[];
+  topSR: Drawing[];
+  hvn: Drawing[];
+  entryLines: Drawing[];
 }
 
 export interface ScanCandidate {
   symbol: string;
   direction: 'long' | 'short';
   score: number;
-  entryPrice: number;
+  entryPrice: number;       // lastClosed.close at scan time (SL/TP reference)
   slPrice: number;
   tpPrice: number;
   tp1Price?: number;
@@ -31,11 +36,34 @@ export interface ScanCandidate {
   topLevels: LevelZone[];
   drawingGroups: DrawingGroups;
   candles: Candle[];
+
+  // ── new fields ────────────────────────────────────────────────────────────
+  interval: ScanInterval;
+  volFactor: number;
+
+  // TTL / validity
+  status: CandidateStatus;
+  asOfCloseTime: number;      // ms — close time of last confirmed candle at scan
+  validBars: number;
+  validUntilTime: number;     // ms — asOfCloseTime + validBars * intervalMs
+  nextCandleCloseTime: number;// ms — next expected candle close
+  triggerPriceAtNextClose: number; // trigger level projected to nextCandleCloseTime
+
+  // Trigger spec (for future price evaluation)
+  triggerSpec: TriggerSpec;
+
+  // Mutable status fields (updated by revalidation)
+  triggeredAt?: number;
+  invalidReason?: string;
+  expiredReason?: string;
+  distanceNowPct?: number;
 }
 
 // ── Utilities ──────────────────────────────────────────────────────────────
 function uid() { return Math.random().toString(36).slice(2, 10); }
 function fmt(p: number) { return p >= 1 ? p.toFixed(2) : p.toFixed(6); }
+
+const SAFETY_MS = 4000; // buffer to treat a candle as "closed"
 
 async function fetchKlines(
   symbol: string,
@@ -48,13 +76,26 @@ async function fetchKlines(
   if (!res.ok) throw new Error(`klines ${symbol} ${res.status}`);
   const raw = await res.json() as unknown[][];
   return raw.map(r => ({
-    time: r[0] as number,
-    open: parseFloat(r[1] as string),
-    high: parseFloat(r[2] as string),
-    low: parseFloat(r[3] as string),
-    close: parseFloat(r[4] as string),
+    time:   r[0] as number,
+    open:   parseFloat(r[1] as string),
+    high:   parseFloat(r[2] as string),
+    low:    parseFloat(r[3] as string),
+    close:  parseFloat(r[4] as string),
     volume: parseFloat(r[5] as string),
   }));
+}
+
+// ── Closed-candle filtering ────────────────────────────────────────────────
+
+/**
+ * Strip the in-progress (current) candle if it hasn't closed yet.
+ * Returns only confirmed closed candles.
+ */
+function closedOnly(candles: Candle[], intervalMs: number): Candle[] {
+  if (candles.length === 0) return candles;
+  const last = candles[candles.length - 1];
+  const isClosed = (last.time + intervalMs) <= (Date.now() - SAFETY_MS);
+  return isClosed ? candles : candles.slice(0, -1);
 }
 
 // ── Indicators ─────────────────────────────────────────────────────────────
@@ -82,6 +123,9 @@ function calcBBWidth(candles: Candle[], period = 20): number {
   return mean > 0 ? (4 * std) / mean : 0;
 }
 
+/**
+ * Volume ratio: lastClosed.volume / SMA20(volume, excluding lastClosed)
+ */
 function calcVolRatio(candles: Candle[], period = 20): number {
   if (candles.length < period + 1) return 1;
   const recent = candles[candles.length - 1].volume;
@@ -89,10 +133,16 @@ function calcVolRatio(candles: Candle[], period = 20): number {
   return sma > 0 ? recent / sma : 1;
 }
 
+/** SMA20 of volume for the 20 candles before the last element */
+function calcSMA20Volume(candles: Candle[], period = 20): number {
+  if (candles.length < period + 1) return 0;
+  return candles.slice(-period - 1, -1).reduce((a, c) => a + c.volume, 0) / period;
+}
+
 function calcScore(volRatio: number, bbWidth: number, atr: number, entryPrice: number): number {
   const volScore = Math.min(40, (volRatio / 2) * 40);
-  const bbScore = bbWidth < 0.04 ? 30 : bbWidth < 0.08 ? 20 : bbWidth < 0.15 ? 10 : 5;
-  const atrPct = entryPrice > 0 ? (atr / entryPrice) * 100 : 0;
+  const bbScore  = bbWidth < 0.04 ? 30 : bbWidth < 0.08 ? 20 : bbWidth < 0.15 ? 10 : 5;
+  const atrPct   = entryPrice > 0 ? (atr / entryPrice) * 100 : 0;
   const atrScore = atrPct > 2 ? 30 : atrPct > 1 ? 20 : atrPct > 0.5 ? 10 : 5;
   return Math.round(Math.min(100, volScore + bbScore + atrScore));
 }
@@ -126,19 +176,25 @@ function pivotLows(candles: Candle[], w = 2): PivotPt[] {
   return result;
 }
 
-// ── Breakout detection (stage 1 — 200 candles) ────────────────────────────
+// ── Breakout detection (works on confirmed closed candles only) ─────────────
 interface BreakoutResult {
   type: 'trendline' | 'hline' | 'box';
   drawing: TrendlineDrawing | HlineDrawing | BoxDrawing;
   breakoutPrice: number;
+  triggerSpec: TriggerSpec;
 }
 
-function detectTrendline(symbol: string, candles: Candle[], dir: 'long' | 'short'): BreakoutResult | null {
-  const last = candles[candles.length - 1];
-  const prev = candles[candles.length - 2];
+/**
+ * All detect functions receive `closed` — an array of confirmed closed candles
+ * where [last] = lastClosed, [last-1] = prevClosed.
+ * pivot detection intentionally excludes lastClosed (slice(0,-1)).
+ */
+function detectTrendline(symbol: string, closed: Candle[], dir: 'long' | 'short'): BreakoutResult | null {
+  const last = closed[closed.length - 1];
+  const prev = closed[closed.length - 2];
 
   if (dir === 'long') {
-    const highs = pivotHighs(candles.slice(0, -1)).slice(-5);
+    const highs = pivotHighs(closed.slice(0, -1)).slice(-5);
     if (highs.length < 2) return null;
     for (let i = highs.length - 1; i >= 1; i--) {
       const h2 = highs[i], h1 = highs[i - 1];
@@ -146,19 +202,23 @@ function detectTrendline(symbol: string, candles: Candle[], dir: 'long' | 'short
       const dt = h2.time - h1.time;
       if (dt <= 0) continue;
       const slope = (h2.price - h1.price) / dt;
-      if (prev.close < h2.price + slope * (prev.time - h2.time) &&
-          last.close > h2.price + slope * (last.time - h2.time)) {
+      const trendAtPrev = h2.price + slope * (prev.time - h2.time);
+      const trendAtLast = h2.price + slope * (last.time - h2.time);
+      if (prev.close < trendAtPrev && last.close > trendAtLast) {
         return {
           type: 'trendline',
-          drawing: { id: uid(), type: 'trendline', ticker: symbol, slope, color: '#f6465d',
+          drawing: {
+            id: uid(), type: 'trendline', ticker: symbol, slope, color: '#f6465d',
             p1: { time: h1.time, price: h1.price }, p2: { time: h2.time, price: h2.price },
-            memo: '⑦ 저항선 돌파 ↑' } satisfies TrendlineDrawing,
+            memo: '⑦ 저항선 돌파 ↑',
+          } satisfies TrendlineDrawing,
           breakoutPrice: last.close,
+          triggerSpec: { type: 'trendline', fixedPrice: last.close, slope, p1Time: h1.time, p1Price: h1.price },
         };
       }
     }
   } else {
-    const lows = pivotLows(candles.slice(0, -1)).slice(-5);
+    const lows = pivotLows(closed.slice(0, -1)).slice(-5);
     if (lows.length < 2) return null;
     for (let i = lows.length - 1; i >= 1; i--) {
       const l2 = lows[i], l1 = lows[i - 1];
@@ -166,14 +226,18 @@ function detectTrendline(symbol: string, candles: Candle[], dir: 'long' | 'short
       const dt = l2.time - l1.time;
       if (dt <= 0) continue;
       const slope = (l2.price - l1.price) / dt;
-      if (prev.close > l2.price + slope * (prev.time - l2.time) &&
-          last.close < l2.price + slope * (last.time - l2.time)) {
+      const trendAtPrev = l2.price + slope * (prev.time - l2.time);
+      const trendAtLast = l2.price + slope * (last.time - l2.time);
+      if (prev.close > trendAtPrev && last.close < trendAtLast) {
         return {
           type: 'trendline',
-          drawing: { id: uid(), type: 'trendline', ticker: symbol, slope, color: '#0ecb81',
+          drawing: {
+            id: uid(), type: 'trendline', ticker: symbol, slope, color: '#0ecb81',
             p1: { time: l1.time, price: l1.price }, p2: { time: l2.time, price: l2.price },
-            memo: '⑦ 지지선 이탈 ↓' } satisfies TrendlineDrawing,
+            memo: '⑦ 지지선 이탈 ↓',
+          } satisfies TrendlineDrawing,
           breakoutPrice: last.close,
+          triggerSpec: { type: 'trendline', fixedPrice: last.close, slope, p1Time: l1.time, p1Price: l1.price },
         };
       }
     }
@@ -181,85 +245,93 @@ function detectTrendline(symbol: string, candles: Candle[], dir: 'long' | 'short
   return null;
 }
 
-function detectHline(symbol: string, candles: Candle[], dir: 'long' | 'short', atr: number): BreakoutResult | null {
-  const last = candles[candles.length - 1];
-  const prev = candles[candles.length - 2];
-  const tol = atr * 0.5;
+function detectHline(symbol: string, closed: Candle[], dir: 'long' | 'short', atr: number): BreakoutResult | null {
+  const last = closed[closed.length - 1];
+  const prev = closed[closed.length - 2];
+  const tol  = atr * 0.5;
 
   const pivots = dir === 'long'
-    ? [...pivotHighs(candles.slice(0, -1)).slice(-10)].reverse()
-    : [...pivotLows(candles.slice(0, -1)).slice(-10)].reverse();
+    ? [...pivotHighs(closed.slice(0, -1)).slice(-10)].reverse()
+    : [...pivotLows(closed.slice(0, -1)).slice(-10)].reverse();
 
   for (const pt of pivots) {
     if (dir === 'long' && prev.close < pt.price - tol && last.close > pt.price + tol) {
       return {
         type: 'hline',
-        drawing: { id: uid(), type: 'hline', ticker: symbol, price: pt.price,
-          color: '#f6465d', memo: `⑦ 수평 저항 돌파 ↑ ${fmt(pt.price)}` } satisfies HlineDrawing,
+        drawing: {
+          id: uid(), type: 'hline', ticker: symbol, price: pt.price,
+          color: '#f6465d', memo: `⑦ 수평 저항 돌파 ↑ ${fmt(pt.price)}`,
+        } satisfies HlineDrawing,
         breakoutPrice: last.close,
+        triggerSpec: { type: 'hline', fixedPrice: pt.price, slope: 0, p1Time: 0, p1Price: 0 },
       };
     }
     if (dir === 'short' && prev.close > pt.price + tol && last.close < pt.price - tol) {
       return {
         type: 'hline',
-        drawing: { id: uid(), type: 'hline', ticker: symbol, price: pt.price,
-          color: '#0ecb81', memo: `⑦ 수평 지지 이탈 ↓ ${fmt(pt.price)}` } satisfies HlineDrawing,
+        drawing: {
+          id: uid(), type: 'hline', ticker: symbol, price: pt.price,
+          color: '#0ecb81', memo: `⑦ 수평 지지 이탈 ↓ ${fmt(pt.price)}`,
+        } satisfies HlineDrawing,
         breakoutPrice: last.close,
+        triggerSpec: { type: 'hline', fixedPrice: pt.price, slope: 0, p1Time: 0, p1Price: 0 },
       };
     }
   }
   return null;
 }
 
-function detectBox(symbol: string, candles: Candle[], dir: 'long' | 'short', atr: number): BreakoutResult | null {
-  if (candles.length < 30) return null;
-  const last = candles[candles.length - 1];
-  const prev = candles[candles.length - 2];
-  const lb = candles.slice(-31, -1);
+function detectBox(symbol: string, closed: Candle[], dir: 'long' | 'short', atr: number): BreakoutResult | null {
+  if (closed.length < 30) return null;
+  const last = closed[closed.length - 1];
+  const prev = closed[closed.length - 2];
+  const lb   = closed.slice(-31, -1);
   const highP = Math.max(...lb.map(c => c.high));
-  const lowP = Math.min(...lb.map(c => c.low));
+  const lowP  = Math.min(...lb.map(c => c.low));
   if (highP - lowP > atr * 3) return null;
 
   const t1 = lb[0].time, t2 = lb[lb.length - 1].time;
   const makeCorners = (): BoxCorner[] => [
     { pos: 'TL', time: t1, price: highP }, { pos: 'TR', time: t2, price: highP },
-    { pos: 'BR', time: t2, price: lowP },  { pos: 'BL', time: t1, price: lowP },
+    { pos: 'BR', time: t2, price: lowP  }, { pos: 'BL', time: t1, price: lowP  },
   ];
 
   if (dir === 'long' && prev.close <= highP && last.close > highP + atr * 0.2) {
     return {
       type: 'box',
-      drawing: { id: uid(), type: 'box', ticker: symbol, color: '#f6465d',
+      drawing: {
+        id: uid(), type: 'box', ticker: symbol, color: '#f6465d',
         p1: { time: t1, price: highP }, p2: { time: t2, price: lowP },
         corners: makeCorners(), topPrice: highP, bottomPrice: lowP,
-        memo: '⑦ 박스 상단 돌파 ↑' } satisfies BoxDrawing,
+        memo: '⑦ 박스 상단 돌파 ↑',
+      } satisfies BoxDrawing,
       breakoutPrice: last.close,
+      triggerSpec: { type: 'box', fixedPrice: highP, slope: 0, p1Time: 0, p1Price: 0 },
     };
   }
   if (dir === 'short' && prev.close >= lowP && last.close < lowP - atr * 0.2) {
     return {
       type: 'box',
-      drawing: { id: uid(), type: 'box', ticker: symbol, color: '#0ecb81',
+      drawing: {
+        id: uid(), type: 'box', ticker: symbol, color: '#0ecb81',
         p1: { time: t1, price: highP }, p2: { time: t2, price: lowP },
         corners: makeCorners(), topPrice: highP, bottomPrice: lowP,
-        memo: '⑦ 박스 하단 이탈 ↓' } satisfies BoxDrawing,
+        memo: '⑦ 박스 하단 이탈 ↓',
+      } satisfies BoxDrawing,
       breakoutPrice: last.close,
+      triggerSpec: { type: 'box', fixedPrice: lowP, slope: 0, p1Time: 0, p1Price: 0 },
     };
   }
   return null;
 }
 
-// ── Level-based SL / TP ────────────────────────────────────────────────────
+// ── SL / TP calculation ────────────────────────────────────────────────────
 function calcSLTP(
-  entryPrice: number,
-  direction: 'long' | 'short',
-  srLevels: LevelZone[],
-  hvnZones: HVNZone[],
-  atr: number,
-  candles: Candle[],
+  entryPrice: number, direction: 'long' | 'short',
+  srLevels: LevelZone[], hvnZones: HVNZone[], atr: number, candles: Candle[],
 ): { sl: number; tp1: number | undefined; tp2: number } {
-  const slice50 = candles.slice(-51, -1);
-  const swingLow = Math.min(...slice50.map(c => c.low));
+  const slice50  = candles.slice(-51, -1);
+  const swingLow  = Math.min(...slice50.map(c => c.low));
   const swingHigh = Math.max(...slice50.map(c => c.high));
 
   if (direction === 'long') {
@@ -267,9 +339,8 @@ function calcSLTP(
       .filter(z => z.kind === 'support' && z.centerPrice < entryPrice)
       .sort((a, b) => b.score - a.score)[0];
     const sl1 = bestSup && (entryPrice - bestSup.zoneBottom) <= 3 * atr ? bestSup.zoneBottom : undefined;
-    const sl = sl1 ?? Math.min(entryPrice - atr, swingLow);
-    const R = entryPrice - sl;
-
+    const sl  = sl1 ?? Math.min(entryPrice - atr, swingLow);
+    const R   = entryPrice - sl;
     const tp1Cands = [
       srLevels.filter(z => z.kind === 'resistance' && z.centerPrice > entryPrice)
         .sort((a, b) => a.centerPrice - b.centerPrice)[0]?.centerPrice,
@@ -284,9 +355,8 @@ function calcSLTP(
       .filter(z => z.kind === 'resistance' && z.centerPrice > entryPrice)
       .sort((a, b) => b.score - a.score)[0];
     const sl1 = bestRes && (bestRes.zoneTop - entryPrice) <= 3 * atr ? bestRes.zoneTop : undefined;
-    const sl = sl1 ?? Math.max(entryPrice + atr, swingHigh);
-    const R = sl - entryPrice;
-
+    const sl  = sl1 ?? Math.max(entryPrice + atr, swingHigh);
+    const R   = sl - entryPrice;
     const tp1Cands = [
       srLevels.filter(z => z.kind === 'support' && z.centerPrice < entryPrice)
         .sort((a, b) => b.centerPrice - a.centerPrice)[0]?.centerPrice,
@@ -299,31 +369,19 @@ function calcSLTP(
   }
 }
 
-// ── Build drawing groups ───────────────────────────────────────────────────
+// ── Drawing groups ─────────────────────────────────────────────────────────
 function buildDrawingGroups(
-  symbol: string,
-  direction: 'long' | 'short',
-  breakoutResult: BreakoutResult,
-  candles: Candle[],
-  srLevels: LevelZone[],
-  hvnZones: HVNZone[],
-  topLevels: LevelZone[],
-  entryPrice: number,
-  sl: number,
-  tp1: number | undefined,
-  tp2: number,
-  atr: number,
+  symbol: string, direction: 'long' | 'short',
+  breakoutResult: BreakoutResult, candles: Candle[],
+  srLevels: LevelZone[], hvnZones: HVNZone[], topLevels: LevelZone[],
+  entryPrice: number, sl: number, tp1: number | undefined, tp2: number, atr: number,
 ): DrawingGroups {
   const n = candles.length;
   const boxT1 = candles[Math.floor(n * 0.5)].time;
   const boxT2 = candles[n - 1].time;
 
-  // dim color helpers
-  const dimClr = (kind: string) =>
-    kind === 'support' ? 'rgba(14,203,129,0.22)' : 'rgba(246,70,93,0.22)';
-  const brightClr = (kind: string) =>
-    kind === 'support' ? 'rgba(14,203,129,0.90)' : 'rgba(246,70,93,0.90)';
-
+  const dimClr    = (kind: string) => kind === 'support' ? 'rgba(14,203,129,0.22)' : 'rgba(246,70,93,0.22)';
+  const brightClr = (kind: string) => kind === 'support' ? 'rgba(14,203,129,0.90)' : 'rgba(246,70,93,0.90)';
   const topSet = new Set(topLevels.map(z => z.centerPrice));
   const sorted = [...srLevels].sort((a, b) => b.score - a.score);
 
@@ -334,19 +392,16 @@ function buildDrawingGroups(
     .filter(z => !topSet.has(z.centerPrice))
     .map(z => ({
       id: uid(), type: 'hline' as const, ticker: symbol,
-      price: z.centerPrice,
-      color: dimClr(z.kind),
+      price: z.centerPrice, color: dimClr(z.kind),
       memo: `${z.horizon} ${z.kind} · touches=${z.touches} · score=${z.score}`,
     } satisfies HlineDrawing));
 
   const topSR: Drawing[] = topLevels.map(z => ({
     id: uid(), type: 'hline' as const, ticker: symbol,
-    price: z.centerPrice,
-    color: brightClr(z.kind),
+    price: z.centerPrice, color: brightClr(z.kind),
     memo: `${z.kind === 'support' ? '⑤' : '⑥'} ★ ${z.horizon} ${z.kind === 'support' ? '지지' : '저항'} · ${z.touches}회 터치 · score=${z.score}`,
   } satisfies HlineDrawing));
 
-  // HVN boxes near entry ±3%
   const makeBoxCorners = (t1: number, t2: number, hi: number, lo: number): BoxCorner[] => [
     { pos: 'TL', time: t1, price: hi }, { pos: 'TR', time: t2, price: hi },
     { pos: 'BR', time: t2, price: lo }, { pos: 'BL', time: t1, price: lo },
@@ -363,13 +418,11 @@ function buildDrawingGroups(
       memo: `⑧ HVN 매물대 · ${fmt(z.priceLow)}~${fmt(z.priceHigh)}`,
     } satisfies BoxDrawing));
 
-  // Entry / SL / TP lines
   const isLong = direction === 'long';
-  const R = Math.abs(entryPrice - sl);
+  const R  = Math.abs(entryPrice - sl);
   const rr = R > 0 ? Math.abs(tp2 - entryPrice) / R : 0;
   const volFactor = (atr / entryPrice) > 0.015 ? 1.5 : 1.3;
-  const entryMemo =
-    `${isLong ? '▲ 롱' : '▼ 숏'} 진입 · 종가 기준 ${isLong ? '돌파' : '이탈'} 시 진입 · 거래량≥SMA20×${volFactor} · RR≈${rr.toFixed(1)}`;
+  const entryMemo = `${isLong ? '▲ 롱' : '▼ 숏'} 진입 · 종가 기준 ${isLong ? '돌파' : '이탈'} 시 진입 · 거래량≥SMA20×${volFactor} · RR≈${rr.toFixed(1)}`;
 
   const entryLines: Drawing[] = [
     {
@@ -402,13 +455,21 @@ async function scanSymbol(
   direction: ScanDirection,
   signal?: AbortSignal,
 ): Promise<ScanCandidate | null> {
-  // Stage 1: 200 candles for fast breakout detection
-  const candles200 = await fetchKlines(symbol, interval, 200, signal);
+  const iMs = intervalToMs(interval);
+
+  // Stage 1: fetch 202 candles, strip the in-progress one
+  const raw200 = await fetchKlines(symbol, interval, 202, signal);
+  if (raw200.length < 52) return null;
+  const candles200 = closedOnly(raw200, iMs);
   if (candles200.length < 50) return null;
 
-  const atr200 = calcATR(candles200);
-  const volRatio = calcVolRatio(candles200);
-  const bbWidth = calcBBWidth(candles200);
+  const lastClosed = candles200[candles200.length - 1];
+  const prevClosed = candles200[candles200.length - 2];
+  const lastClosedCloseTime = lastClosed.time + iMs;
+
+  const atr200    = calcATR(candles200);
+  const volRatio  = calcVolRatio(candles200);
+  const bbWidth   = calcBBWidth(candles200);
   const dirs: ('long' | 'short')[] = direction === 'both' ? ['long', 'short'] : [direction];
 
   let found: BreakoutResult | null = null;
@@ -421,14 +482,14 @@ async function scanSymbol(
   }
   if (!found) return null;
 
-  // Stage 2: 500 candles for deep SR + HVN analysis
-  const candles500 = await fetchKlines(symbol, interval, 500, signal);
+  // Stage 2: 502 candles for SR + HVN (strip in-progress)
+  const raw500 = await fetchKlines(symbol, interval, 502, signal);
+  const candles500 = closedOnly(raw500, iMs);
   const atr = calcATR(candles500);
-  const entryPrice = found.breakoutPrice;
 
-  const srLevels = calcSRLevels(candles500, atr, entryPrice);
-  const hvnZones = calcHVN(candles500.slice(-300), 100, 5, entryPrice);
-
+  const entryPrice = lastClosed.close; // confirmed close price
+  const srLevels   = calcSRLevels(candles500, atr, entryPrice);
+  const hvnZones   = calcHVN(candles500.slice(-300), 100, 5, entryPrice);
   const { sl, tp1, tp2 } = calcSLTP(entryPrice, foundDir, srLevels, hvnZones, atr, candles500);
 
   const topLevels = [
@@ -441,6 +502,32 @@ async function scanSymbol(
     entryPrice, sl, tp1, tp2, atr,
   );
 
+  // ── TTL / trigger spec ────────────────────────────────────────────────────
+  const spec = found.triggerSpec;
+  const validBars             = getTtlBars(interval);
+  const nextCandleCloseTime   = lastClosedCloseTime + iMs;
+  const validUntilTime        = lastClosedCloseTime + validBars * iMs;
+  const triggerAtNextClose    = triggerPrice(spec, nextCandleCloseTime);
+
+  // ── Initial status (volume check on lastClosed) ───────────────────────────
+  const vf      = getVolFactor(interval);
+  const sma20v  = calcSMA20Volume(candles200);
+  const volMet  = lastClosed.volume >= sma20v * vf && lastClosed.volume >= prevClosed.volume;
+
+  // Cross-over already confirmed by detect functions; status depends on volume
+  const triggerAtLast = triggerPrice(spec, lastClosedCloseTime);
+  const triggerAtPrev = triggerPrice(spec, prevClosed.time + iMs);
+  const crossover = foundDir === 'long'
+    ? (lastClosed.close > triggerAtLast && prevClosed.close <= triggerAtPrev)
+    : (lastClosed.close < triggerAtLast && prevClosed.close >= triggerAtPrev);
+
+  const initialStatus: CandidateStatus = (crossover && volMet) ? 'TRIGGERED' : 'PENDING';
+
+  // Initial distance-to-trigger
+  const distanceNowPct = foundDir === 'long'
+    ? ((triggerAtLast - lastClosed.close) / triggerAtLast) * 100
+    : ((lastClosed.close - triggerAtLast) / triggerAtLast) * 100;
+
   return {
     symbol, direction: foundDir,
     score: calcScore(volRatio, bbWidth, atr, entryPrice),
@@ -448,6 +535,18 @@ async function scanSymbol(
     atr, breakoutType: found.type,
     srLevels, hvnZones, topLevels, drawingGroups,
     candles: candles500,
+    // new fields
+    interval,
+    volFactor: vf,
+    status: initialStatus,
+    asOfCloseTime: lastClosedCloseTime,
+    validBars,
+    validUntilTime,
+    nextCandleCloseTime,
+    triggerPriceAtNextClose: triggerAtNextClose,
+    triggerSpec: spec,
+    triggeredAt: initialStatus === 'TRIGGERED' ? lastClosedCloseTime : undefined,
+    distanceNowPct,
   };
 }
 

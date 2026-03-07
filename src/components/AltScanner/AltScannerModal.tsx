@@ -1,10 +1,15 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import type { Candle, Interval } from '../../types/candle';
-import type { Drawing } from '../../types/drawing';
+import type { Drawing, HlineDrawing } from '../../types/drawing';
 import { CandleChart } from '../Chart/CandleChart';
 import { runBreakoutScan } from './breakoutScanner';
-import type { ScanCandidate, ScanInterval, ScanDirection } from './breakoutScanner';
+import type { ScanCandidate, ScanInterval, ScanDirection, CandidateStatus } from './breakoutScanner';
 import { useBinanceWS } from '../../hooks/useBinanceWS';
+import { revalidateCandidate } from './validateSignal';
+import {
+  intervalToMs, getNextAlignedCloseTime, defaultAutoScan,
+  fmtCountdown, fmtDateTime,
+} from './timeUtils';
 
 export interface AltTradeParams {
   symbol: string;
@@ -27,6 +32,7 @@ interface Props {
 }
 
 type LevelMode = 'core' | 'all';
+type StatusFilter = 'all' | 'PENDING' | 'TRIGGERED';
 
 const DIR_OPTS: { value: ScanDirection; label: string }[] = [
   { value: 'both', label: '전체' },
@@ -49,9 +55,23 @@ const GLOSSARY = [
   { term: 'Pivot', def: '주변 봉보다 고가/저가인 전환점. 지지/저항 레벨 산출에 사용' },
 ];
 
+const SCAN_DELAY_MS = 3000; // fire this many ms after candle close
+
+// ── Helpers ────────────────────────────────────────────────────────────────
 function scoreColor(s: number) { return s >= 75 ? '#0ecb81' : s >= 50 ? '#f0b90b' : '#848e9c'; }
 function pf(p: number) { return p >= 1 ? p.toFixed(2) : p.toFixed(6); }
 function pctStr(n: number) { return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`; }
+function fmt(p: number) { return p >= 1 ? p.toFixed(2) : p.toFixed(6); }
+
+const STATUS_LABEL: Record<CandidateStatus, string> = {
+  PENDING: '대기', TRIGGERED: '발생', INVALID: '무효', EXPIRED: '만료',
+};
+const STATUS_COLOR: Record<CandidateStatus, string> = {
+  PENDING: '#f0b90b', TRIGGERED: '#0ecb81', INVALID: '#f6465d', EXPIRED: '#5e6673',
+};
+const STATUS_ORDER: Record<CandidateStatus, number> = {
+  PENDING: 0, TRIGGERED: 1, INVALID: 2, EXPIRED: 3,
+};
 
 // ── Opinion generator ──────────────────────────────────────────────────────
 function buildOpinion(c: ScanCandidate): { text: string; stars: number; color: string } {
@@ -75,14 +95,14 @@ function buildOpinion(c: ScanCandidate): { text: string; stars: number; color: s
   if (nearHVN > 0) { pts += 10; notes.push('HVN 매물대 근접'); }
   pts += c.breakoutType === 'trendline' ? 10 : c.breakoutType === 'hline' ? 7 : 5;
 
-  const stars = pts >= 80 ? 5 : pts >= 65 ? 4 : pts >= 50 ? 3 : pts >= 35 ? 2 : 1;
-  const dirKo = c.direction === 'long' ? '▲ 롱' : '▼ 숏';
-  const color = pts >= 65 ? '#0ecb81' : pts >= 45 ? '#f0b90b' : '#f6465d';
-
-  let text: string;
-  if (pts >= 65)      text = `${dirKo} 강추 — ${notes.slice(0, 2).join(' · ')}`;
-  else if (pts >= 45) text = `${dirKo} 검토 — ${notes.slice(0, 2).join(' · ')}`;
-  else                text = `${dirKo} 신중 — 추가 확인 필요`;
+  const stars  = pts >= 80 ? 5 : pts >= 65 ? 4 : pts >= 50 ? 3 : pts >= 35 ? 2 : 1;
+  const dirKo  = c.direction === 'long' ? '▲ 롱' : '▼ 숏';
+  const color  = pts >= 65 ? '#0ecb81' : pts >= 45 ? '#f0b90b' : '#f6465d';
+  const text   = pts >= 65
+    ? `${dirKo} 강추 — ${notes.slice(0, 2).join(' · ')}`
+    : pts >= 45
+      ? `${dirKo} 검토 — ${notes.slice(0, 2).join(' · ')}`
+      : `${dirKo} 신중 — 추가 확인 필요`;
 
   return { text, stars, color };
 }
@@ -102,8 +122,8 @@ function getLegendItems(levelMode: LevelMode, showHVN: boolean, hasTP1: boolean)
   ];
   if (levelMode === 'all') {
     items.push(
-      { num: '─',  color: 'rgba(14,203,129,0.22)', dash: true, label: '지지 레벨' },
-      { num: '─',  color: 'rgba(246,70,93,0.22)',  dash: true, label: '저항 레벨' },
+      { num: '─', color: 'rgba(14,203,129,0.22)', dash: true, label: '지지 레벨' },
+      { num: '─', color: 'rgba(246,70,93,0.22)',  dash: true, label: '저항 레벨' },
     );
   }
   if (showHVN) {
@@ -113,17 +133,12 @@ function getLegendItems(levelMode: LevelMode, showHVN: boolean, hasTP1: boolean)
 }
 
 function LegendBar({ levelMode, showHVN, hasTP1 }: { levelMode: LevelMode; showHVN: boolean; hasTP1: boolean }) {
-  const items = getLegendItems(levelMode, showHVN, hasTP1);
   return (
     <div style={S.legendBar}>
-      {items.map(({ num, color, dash, label }) => (
+      {getLegendItems(levelMode, showHVN, hasTP1).map(({ num, color, dash, label }) => (
         <div key={label} style={S.legendItem}>
           <span style={{ ...S.legendNum, color }}>{num}</span>
-          <div style={{
-            width: 20, height: 0,
-            borderTop: `2px ${dash ? 'dashed' : 'solid'} ${color}`,
-            flexShrink: 0,
-          }} />
+          <div style={{ width: 20, height: 0, borderTop: `2px ${dash ? 'dashed' : 'solid'} ${color}`, flexShrink: 0 }} />
           <span style={S.legendLabel}>{label}</span>
         </div>
       ))}
@@ -148,7 +163,7 @@ function TradingInfoPanel({
   const rr = R > 0 ? Math.abs(c.tpPrice - c.entryPrice) / R : 0;
   const breakEvenPct = Math.round(100 / (1 + rr));
   const nTrials      = Math.round(1 + rr);
-  const volFactor    = (c.atr / c.entryPrice) > 0.015 ? 1.5 : 1.3;
+  const volFactor    = c.volFactor;
   const supZone = c.topLevels.find(z => z.kind === 'support');
   const resZone = c.topLevels.find(z => z.kind === 'resistance');
   const slBasisText = isLong
@@ -188,6 +203,20 @@ function TradingInfoPanel({
         )}
         <div style={S.msep} />
         <MBadge num="②" label="최종 목표" value={pf(c.tpPrice)} sub={pctStr(tpPct)} color="#0ecb81" />
+
+        {/* Trigger price at next close (for trendlines) */}
+        {c.breakoutType === 'trendline' && (
+          <>
+            <div style={S.msep} />
+            <div style={S.mbadge}>
+              <span style={{ ...S.mbadgeNum, color: '#f0b90b' }}>TRG</span>
+              <div style={S.mbadgeInner}>
+                <span style={S.mbadgeLabel}>다음봉 기준</span>
+                <span style={{ ...S.mbadgeValue, color: '#f0b90b' }}>{pf(c.triggerPriceAtNextClose)}</span>
+              </div>
+            </div>
+          </>
+        )}
 
         <div style={{ flex: 1 }} />
 
@@ -245,7 +274,6 @@ function TradingInfoPanel({
         </button>
       </div>
 
-      {/* Glossary (collapsible) */}
       {showGlossary && (
         <div style={S.glossaryGrid}>
           {GLOSSARY.map(({ term, def }) => (
@@ -260,7 +288,9 @@ function TradingInfoPanel({
   );
 }
 
-function MBadge({ num, label, value, sub, color }: { num: string; label: string; value: string; sub?: string; color: string }) {
+function MBadge({ num, label, value, sub, color }: {
+  num: string; label: string; value: string; sub?: string; color: string;
+}) {
   return (
     <div style={S.mbadge}>
       <span style={{ ...S.mbadgeNum, color }}>{num}</span>
@@ -288,77 +318,249 @@ export function AltScannerModal({
   onPaperTrade, onLiveTrade,
 }: Props) {
   const [scanInterval, setScanInterval] = useState<ScanInterval>('1h');
-  const [direction, setDirection] = useState<ScanDirection>('both');
-  const [scanning, setScanning] = useState(false);
-  const [progress, setProgress] = useState({ done: 0, total: 0 });
-  const [candidates, setCandidates] = useState<ScanCandidate[]>(initialCandidates);
-  const [selected, setSelected] = useState<ScanCandidate | null>(
+  const [direction, setDirection]       = useState<ScanDirection>('both');
+  const [scanning, setScanning]         = useState(false);
+  const [progress, setProgress]         = useState({ done: 0, total: 0 });
+  const [candidates, setCandidates]     = useState<ScanCandidate[]>(initialCandidates);
+  const [selected, setSelected]         = useState<ScanCandidate | null>(
     initialCandidates.length > 0 ? initialCandidates[0] : null,
   );
   const [chartCandles, setChartCandles] = useState<Candle[]>(
     initialCandidates.length > 0 ? initialCandidates[0].candles : [],
   );
-  const [levelMode, setLevelMode] = useState<LevelMode>('core');
-  const [showHVN, setShowHVN] = useState(true);
+  const [levelMode, setLevelMode]       = useState<LevelMode>('core');
+  const [showHVN, setShowHVN]           = useState(true);
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+
+  // Auto-scan
+  const [autoScanEnabled, setAutoScanEnabled] = useState<boolean>(() => defaultAutoScan('1h'));
+  const [nextAutoScanAt, setNextAutoScanAt]   = useState<number | null>(null);
+  const [lastScanAt, setLastScanAt]           = useState<number | null>(null);
+
+  // 1-second ticker for countdown + EXPIRED updates
+  const [nowMs, setNowMs] = useState(Date.now());
+  useEffect(() => {
+    const tid = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(tid);
+  }, []);
+
+  // Abort ref
   const abortRef = useRef<AbortController | null>(null);
+
+  // Stable refs (avoid stale closures in async callbacks)
+  const scanningRef        = useRef(false);
+  const selectedRef        = useRef<ScanCandidate | null>(null);
+  const autoScanEnabledRef = useRef(autoScanEnabled);
+  useEffect(() => { scanningRef.current = scanning; }, [scanning]);
+  useEffect(() => { selectedRef.current = selected; }, [selected]);
+  useEffect(() => { autoScanEnabledRef.current = autoScanEnabled; }, [autoScanEnabled]);
+
+  // ── EXPIRED status sweep (every second) ──────────────────────────────────
+  useEffect(() => {
+    const now = Date.now();
+    setCandidates(prev => {
+      const needsUpdate = prev.some(c => c.status === 'PENDING' && now > c.validUntilTime);
+      if (!needsUpdate) return prev;
+      return prev.map(c =>
+        c.status === 'PENDING' && now > c.validUntilTime
+          ? { ...c, status: 'EXPIRED' as const, expiredReason: 'TTL 만료' }
+          : c,
+      );
+    });
+    setSelected(s =>
+      s && s.status === 'PENDING' && now > s.validUntilTime
+        ? { ...s, status: 'EXPIRED' as const, expiredReason: 'TTL 만료' }
+        : s,
+    );
+  }, [nowMs]);
 
   useEffect(() => { onCandidatesChange(candidates); }, [candidates, onCandidatesChange]);
 
+  // ── WS: real-time chart + revalidation on candle close ───────────────────
   useBinanceWS(selected?.symbol ?? '', scanInterval as Interval, useCallback((candle: Candle) => {
     setChartCandles(prev => {
       if (prev.length === 0) return prev;
       const last = prev[prev.length - 1];
-      if (last.time === candle.time) return [...prev.slice(0, -1), candle];
-      return [...prev, candle];
+      const isNewCandle = last.time !== candle.time;
+
+      // New candle opened → "last" just closed → revalidate selected candidate
+      if (isNewCandle && prev.length >= 2) {
+        const sel = selectedRef.current;
+        if (sel && (sel.status === 'PENDING' || sel.status === 'EXPIRED')) {
+          const lastClosed = last;
+          const prevClosed = prev[prev.length - 2];
+          const iMs  = intervalToMs(sel.interval);
+          const now  = Date.now();
+          // prev is all closed candles (last element = lastClosed)
+          const updates = revalidateCandidate(sel, lastClosed, prevClosed, prev, iMs, now);
+          if (Object.keys(updates).length > 0) {
+            const next = { ...sel, ...updates } as ScanCandidate;
+            setCandidates(cs => cs.map(c =>
+              c.symbol === sel.symbol && c.direction === sel.direction ? next : c,
+            ));
+            setSelected(next);
+          }
+        }
+        return [...prev, candle];
+      }
+
+      // Same candle — update in place
+      return [...prev.slice(0, -1), candle];
     });
   }, []));
 
+  // ── Candidate selection ───────────────────────────────────────────────────
   const handleSelect = useCallback((c: ScanCandidate) => {
-    setSelected(c); setChartCandles(c.candles);
+    setSelected(c);
+    setChartCandles(c.candles);
   }, []);
 
+  // ── Manual scan ───────────────────────────────────────────────────────────
   const handleScan = useCallback(async () => {
     if (scanning) { abortRef.current?.abort(); return; }
     abortRef.current = new AbortController();
-    setScanning(true); setCandidates([]); setSelected(null);
+    setScanning(true);
+    setCandidates([]);
+    setSelected(null);
     setProgress({ done: 0, total: symbols.length });
     try {
       await runBreakoutScan(symbols, scanInterval, direction,
         (done, total) => setProgress({ done, total }),
-        (c) => setCandidates(prev => [...prev, c].sort((a, b) => b.score - a.score)),
+        (c) => setCandidates(prev => [...prev, c].sort((a, b) => {
+          const so = STATUS_ORDER[a.status] - STATUS_ORDER[b.status];
+          return so !== 0 ? so : b.score - a.score;
+        })),
         abortRef.current.signal);
-    } finally { setScanning(false); }
+    } finally {
+      setScanning(false);
+      setLastScanAt(Date.now());
+    }
   }, [scanning, symbols, scanInterval, direction]);
 
-  useEffect(() => () => { abortRef.current?.abort(); }, []);
-
+  // Auto-select first candidate after scan
   useEffect(() => {
     if (!scanning && candidates.length > 0 && !selected) handleSelect(candidates[0]);
   }, [scanning, candidates, selected, handleSelect]);
 
+  // ── Auto-scan: schedule next aligned close time ───────────────────────────
+  useEffect(() => {
+    if (!autoScanEnabled) {
+      setNextAutoScanAt(null);
+      return;
+    }
+    const iMs    = intervalToMs(scanInterval);
+    const fireAt = getNextAlignedCloseTime(Date.now(), iMs) + SCAN_DELAY_MS;
+    setNextAutoScanAt(fireAt);
+  }, [autoScanEnabled, scanInterval]);
+
+  // Auto-scan executor — fires at nextAutoScanAt
+  useEffect(() => {
+    if (!nextAutoScanAt || !autoScanEnabled) return;
+    const delay = nextAutoScanAt - Date.now();
+    if (delay <= 0) {
+      // Already past — jump to next interval
+      const iMs = intervalToMs(scanInterval);
+      setNextAutoScanAt(getNextAlignedCloseTime(Date.now(), iMs) + SCAN_DELAY_MS);
+      return;
+    }
+
+    const tid = setTimeout(async () => {
+      if (scanningRef.current) {
+        // Busy — skip this slot, reschedule
+        const iMs = intervalToMs(scanInterval);
+        setNextAutoScanAt(getNextAlignedCloseTime(Date.now(), iMs) + SCAN_DELAY_MS);
+        return;
+      }
+      abortRef.current = new AbortController();
+      setScanning(true);
+      setCandidates([]);
+      setSelected(null);
+      setProgress({ done: 0, total: symbols.length });
+      try {
+        await runBreakoutScan(
+          symbols, scanInterval, direction,
+          (done, total) => setProgress({ done, total }),
+          (c) => setCandidates(prev => [...prev, c].sort((a, b) => {
+            const so = STATUS_ORDER[a.status] - STATUS_ORDER[b.status];
+            return so !== 0 ? so : b.score - a.score;
+          })),
+          abortRef.current.signal,
+        );
+      } finally {
+        if (!abortRef.current?.signal.aborted) {
+          setScanning(false);
+          setLastScanAt(Date.now());
+          // Use ref to get current value, not stale closure value
+          if (autoScanEnabledRef.current) {
+            const iMs = intervalToMs(scanInterval);
+            setNextAutoScanAt(getNextAlignedCloseTime(Date.now(), iMs) + SCAN_DELAY_MS);
+          }
+        }
+      }
+    }, delay);
+
+    return () => clearTimeout(tid);
+  }, [nextAutoScanAt, autoScanEnabled, symbols, scanInterval, direction]);
+
+  // Cleanup on unmount
+  useEffect(() => () => { abortRef.current?.abort(); }, []);
+
+  // ── Drawing computation ───────────────────────────────────────────────────
   const activeDrawings = useMemo((): Drawing[] => {
     if (!selected) return [];
     const { drawingGroups: g } = selected;
-    if (levelMode === 'core') return [...g.breakout, ...g.topSR, ...g.entryLines];
-    return [...g.breakout, ...g.dimSR, ...g.topSR, ...(showHVN ? g.hvn : []), ...g.entryLines];
+
+    // For trendlines, update the entry hline to reflect triggerPriceAtNextClose
+    const entryLines = g.entryLines.map((d): Drawing => {
+      if (d.type === 'hline' && d.memo?.startsWith('① ') && selected.breakoutType === 'trendline') {
+        const hd = d as HlineDrawing;
+        const updated: HlineDrawing = {
+          ...hd,
+          price: selected.triggerPriceAtNextClose,
+          memo: `${hd.memo} · 다음봉 기준: ${fmt(selected.triggerPriceAtNextClose)}`,
+        };
+        return updated;
+      }
+      return d;
+    });
+
+    if (levelMode === 'core') return [...g.breakout, ...g.topSR, ...entryLines];
+    return [...g.breakout, ...g.dimSR, ...g.topSR, ...(showHVN ? g.hvn : []), ...entryLines];
   }, [selected, levelMode, showHVN]);
 
+  // ── Sorted + filtered candidate list ─────────────────────────────────────
+  const displayCandidates = useMemo(() => {
+    let list = [...candidates];
+    if (statusFilter !== 'all') list = list.filter(c => c.status === statusFilter);
+    return list.sort((a, b) => {
+      const so = STATUS_ORDER[a.status] - STATUS_ORDER[b.status];
+      return so !== 0 ? so : b.score - a.score;
+    });
+  }, [candidates, statusFilter]);
+
   const progressPct = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
-  const hasTP1 = selected?.tp1Price != null;
+  const hasTP1      = selected?.tp1Price != null;
+  const countdown   = nextAutoScanAt ? fmtCountdown(nextAutoScanAt - nowMs) : null;
 
   return (
     <div style={S.overlay}>
       <div style={S.modal}>
-        {/* Header */}
+        {/* ── Header ─────────────────────────────────────────────────────── */}
         <div style={S.header}>
           <span style={S.title}>🔍 알트추천 (돌파 스캐너)</span>
           <div style={S.headerRight}>
             <span style={S.toggleLabel}>레벨 표시</span>
-            <button style={{ ...S.toggleBtn, ...(levelMode === 'core' ? S.toggleActive : {}) }} onClick={() => setLevelMode('core')}>핵심만</button>
-            <button style={{ ...S.toggleBtn, ...(levelMode === 'all' ? S.toggleActive : {}) }} onClick={() => setLevelMode('all')}>전체</button>
+            <button
+              style={{ ...S.toggleBtn, ...(levelMode === 'core' ? S.toggleActive : {}) }}
+              onClick={() => setLevelMode('core')}>핵심만</button>
+            <button
+              style={{ ...S.toggleBtn, ...(levelMode === 'all' ? S.toggleActive : {}) }}
+              onClick={() => setLevelMode('all')}>전체</button>
             <div style={S.sep} />
             <span style={S.toggleLabel}>매물대 ⑧</span>
-            <button style={{ ...S.toggleBtn, ...(showHVN ? S.hvnActive : {}) }} onClick={() => setShowHVN(v => !v)}>
+            <button
+              style={{ ...S.toggleBtn, ...(showHVN ? S.hvnActive : {}) }}
+              onClick={() => setShowHVN(v => !v)}>
               {showHVN ? 'ON' : 'OFF'}
             </button>
             <div style={S.sep} />
@@ -366,53 +568,113 @@ export function AltScannerModal({
           </div>
         </div>
 
-        {/* Controls */}
+        {/* ── Auto-scan status bar ────────────────────────────────────────── */}
+        <div style={S.autoBar}>
+          {/* Left: scan timing info */}
+          <div style={S.autoBarLeft}>
+            {lastScanAt && (
+              <span style={S.autoBarInfo}>
+                최근 스캔: <b>{fmtDateTime(lastScanAt)}</b>
+              </span>
+            )}
+            {autoScanEnabled && countdown && !scanning && (
+              <span style={S.autoBarCountdown}>
+                다음 자동 스캔: <b style={{ color: '#3b8beb', fontFamily: 'monospace' }}>{countdown}</b>
+              </span>
+            )}
+            {autoScanEnabled && scanning && (
+              <span style={{ ...S.autoBarInfo, color: '#f0b90b' }}>자동 스캔 실행 중…</span>
+            )}
+          </div>
+
+          {/* Right: auto-scan toggle */}
+          <div style={S.autoBarRight}>
+            {scanInterval === '15m' && (
+              <span style={S.autoBarNote}>15m은 비용 절감을 위해 기본 OFF</span>
+            )}
+            <span style={S.toggleLabel}>자동 스캔</span>
+            <button
+              style={{ ...S.toggleBtn, ...(autoScanEnabled ? S.autoScanActive : {}) }}
+              onClick={() => setAutoScanEnabled(v => !v)}
+              title={autoScanEnabled ? '봉 마감 직후 자동으로 전수 스캔합니다' : '자동 스캔이 꺼져 있습니다'}>
+              {autoScanEnabled ? 'ON' : 'OFF'}
+            </button>
+          </div>
+        </div>
+
+        {/* ── Controls ────────────────────────────────────────────────────── */}
         <div style={S.controls}>
           <div style={S.ctrlGroup}>
             <span style={S.ctrlLabel}>방향</span>
             {DIR_OPTS.map(o => (
-              <button key={o.value} style={{ ...S.ctrlBtn, ...(direction === o.value ? S.ctrlActive : {}) }}
+              <button key={o.value}
+                style={{ ...S.ctrlBtn, ...(direction === o.value ? S.ctrlActive : {}) }}
                 onClick={() => setDirection(o.value)}>{o.label}</button>
             ))}
           </div>
           <div style={S.ctrlGroup}>
             <span style={S.ctrlLabel}>타임프레임</span>
             {INTV_OPTS.map(o => (
-              <button key={o.value} style={{ ...S.ctrlBtn, ...(scanInterval === o.value ? S.ctrlActive : {}) }}
-                onClick={() => setScanInterval(o.value)}>{o.label}</button>
+              <button key={o.value}
+                style={{ ...S.ctrlBtn, ...(scanInterval === o.value ? S.ctrlActive : {}) }}
+                onClick={() => {
+                  setScanInterval(o.value);
+                  setAutoScanEnabled(defaultAutoScan(o.value));
+                }}>{o.label}</button>
             ))}
           </div>
-          <button style={{ ...S.scanBtn, ...(scanning ? S.scanStop : {}) }} onClick={handleScan}>
+          <div style={S.ctrlGroup}>
+            <span style={S.ctrlLabel}>상태</span>
+            {(['all', 'PENDING', 'TRIGGERED'] as StatusFilter[]).map(f => (
+              <button key={f}
+                style={{ ...S.ctrlBtn, ...(statusFilter === f ? S.ctrlActive : {}) }}
+                onClick={() => setStatusFilter(f)}>
+                {f === 'all' ? '전체' : STATUS_LABEL[f as CandidateStatus]}
+              </button>
+            ))}
+          </div>
+          <button
+            style={{ ...S.scanBtn, ...(scanning ? S.scanStop : {}) }}
+            onClick={handleScan}>
             {scanning ? '⏹ 중지' : '▶ 스캔 시작'}
           </button>
         </div>
 
-        {/* Progress */}
+        {/* ── Progress ─────────────────────────────────────────────────────── */}
         {(scanning || progress.done > 0) && (
           <div style={S.progressWrap}>
             <div style={{ ...S.progressBar, width: `${progressPct}%` }} />
-            <span style={S.progressText}>{progress.done}/{progress.total} ({progressPct}%) — 발굴: {candidates.length}개</span>
+            <span style={S.progressText}>
+              {progress.done}/{progress.total} ({progressPct}%) — 발굴: {candidates.length}개
+            </span>
           </div>
         )}
 
-        {/* Body */}
+        {/* ── Body ─────────────────────────────────────────────────────────── */}
         <div style={S.body}>
           {/* List */}
           <div style={S.list}>
-            {candidates.length === 0 && !scanning && (
-              <div style={S.emptyMsg}>{progress.done > 0 ? '발굴된 종목 없음' : '스캔을 시작하세요'}</div>
+            {displayCandidates.length === 0 && !scanning && (
+              <div style={S.emptyMsg}>
+                {progress.done > 0 ? '발굴된 종목 없음' : '스캔을 시작하세요'}
+              </div>
             )}
-            {candidates.map(c => {
-              const op = buildOpinion(c);
+            {displayCandidates.map(c => {
+              const op     = buildOpinion(c);
               const active = selected?.symbol === c.symbol && selected?.direction === c.direction;
+              const iMs    = intervalToMs(c.interval);
+              const remMs  = c.validUntilTime - nowMs;
+              const remBars = remMs > 0 ? Math.ceil(remMs / iMs) : 0;
               return (
                 <div key={c.symbol + c.direction}
                   style={{ ...S.listItem, ...(active ? S.listItemActive : {}) }}
                   onClick={() => handleSelect(c)}>
+                  {/* Top row: symbol + score */}
                   <div style={S.listTop}>
                     <span style={S.listSymbol}>{c.symbol.replace('USDT', '')}</span>
                     <span style={{ fontSize: '0.75rem', color: op.color }}>{'★'.repeat(op.stars)}</span>
                   </div>
+                  {/* Direction + type */}
                   <div style={S.listMeta}>
                     <span style={{
                       ...S.dirBadgeSm,
@@ -422,6 +684,33 @@ export function AltScannerModal({
                     <span style={S.listType}>{c.breakoutType}</span>
                     <span style={{ ...S.listScore, color: scoreColor(c.score) }}>{c.score}</span>
                   </div>
+                  {/* Status badge + remaining validity */}
+                  <div style={S.listStatusRow}>
+                    <span style={{
+                      ...S.statusBadge,
+                      background: `${STATUS_COLOR[c.status]}22`,
+                      color: STATUS_COLOR[c.status],
+                      borderColor: STATUS_COLOR[c.status],
+                    }}>
+                      {STATUS_LABEL[c.status]}
+                    </span>
+                    {c.status === 'PENDING' && remBars > 0 && (
+                      <span style={{ color: '#5e6673', fontSize: '0.68rem' }}>{remBars}봉 남음</span>
+                    )}
+                    {c.status === 'TRIGGERED' && (
+                      <span style={{ color: '#0ecb81', fontSize: '0.68rem' }}>발생!</span>
+                    )}
+                    {(c.status === 'INVALID' || c.status === 'EXPIRED') && (
+                      <span style={{ color: '#5e6673', fontSize: '0.67rem' }}>
+                        {c.invalidReason?.slice(0, 10) ?? c.expiredReason ?? ''}
+                      </span>
+                    )}
+                  </div>
+                  {/* asOf */}
+                  <div style={S.listAsOf}>
+                    기준: {fmtDateTime(c.asOfCloseTime)}
+                  </div>
+                  {/* Entry / TP / SL prices */}
                   <div style={S.listTpsl}>
                     <span style={{ color: '#848e9c', fontSize: '0.72rem' }}>진입 {pf(c.entryPrice)}</span>
                   </div>
@@ -439,11 +728,40 @@ export function AltScannerModal({
             {selected ? (
               <>
                 <div style={S.chartHeader}>
-                  <span style={S.chartTitle}>
-                    {selected.symbol} · {scanInterval} ·&nbsp;
-                    <span style={{ color: scoreColor(selected.score) }}>{selected.score}점</span>
-                  </span>
+                  <div style={S.chartHeaderLeft}>
+                    <span style={S.chartTitle}>
+                      {selected.symbol} · {scanInterval} ·&nbsp;
+                      <span style={{ color: scoreColor(selected.score) }}>{selected.score}점</span>
+                    </span>
+                    {/* Status inline */}
+                    <span style={{
+                      ...S.statusBadge,
+                      background: `${STATUS_COLOR[selected.status]}22`,
+                      color: STATUS_COLOR[selected.status],
+                      borderColor: STATUS_COLOR[selected.status],
+                      fontSize: '0.76rem',
+                    }}>
+                      {STATUS_LABEL[selected.status]}
+                    </span>
+                    {selected.invalidReason && (
+                      <span style={{ color: '#f6465d', fontSize: '0.72rem' }}>{selected.invalidReason}</span>
+                    )}
+                  </div>
                   <div style={S.chartHeaderRight}>
+                    {/* Validity info */}
+                    <div style={S.validityInfo}>
+                      <span style={{ color: '#5e6673', fontSize: '0.72rem' }}>
+                        기준: {fmtDateTime(selected.asOfCloseTime)}
+                      </span>
+                      <span style={{ color: '#5e6673', fontSize: '0.72rem' }}>
+                        만료: {fmtDateTime(selected.validUntilTime)}
+                      </span>
+                      {selected.status === 'PENDING' && (
+                        <span style={{ color: '#848e9c', fontSize: '0.72rem' }}>
+                          유효: {Math.ceil(Math.max(0, selected.validUntilTime - nowMs) / intervalToMs(selected.interval))}봉
+                        </span>
+                      )}
+                    </div>
                     <span style={{ color: '#5e6673', fontSize: '0.75rem' }}>
                       SR {selected.srLevels.length}개 · HVN {selected.hvnZones.length}개
                     </span>
@@ -490,7 +808,8 @@ export function AltScannerModal({
 // ── Styles ─────────────────────────────────────────────────────────────────
 const S: Record<string, React.CSSProperties> = {
   overlay: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.70)', zIndex: 1200, display: 'flex', alignItems: 'center', justifyContent: 'center' },
-  modal: { background: '#1e222d', border: '1px solid #2a2e39', borderRadius: 8, display: 'flex', flexDirection: 'column', width: 'min(1440px, 97vw)', height: 'min(900px, 95vh)', overflow: 'hidden' },
+  modal: { background: '#1e222d', border: '1px solid #2a2e39', borderRadius: 8, display: 'flex', flexDirection: 'column', width: 'min(1440px, 97vw)', height: 'min(920px, 95vh)', overflow: 'hidden' },
+  // Header
   header: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 16px', borderBottom: '1px solid #2a2e39', flexShrink: 0 },
   title: { color: '#d1d4dc', fontWeight: 600, fontSize: '0.95rem' },
   headerRight: { display: 'flex', alignItems: 'center', gap: 6 },
@@ -498,9 +817,18 @@ const S: Record<string, React.CSSProperties> = {
   toggleBtn: { background: 'none', border: '1px solid #2a2e39', borderRadius: 4, color: '#848e9c', cursor: 'pointer', fontSize: '0.78rem', padding: '2px 8px', fontFamily: 'inherit' },
   toggleActive: { borderColor: '#f0b90b', color: '#f0b90b', background: 'rgba(240,185,11,0.1)' },
   hvnActive: { borderColor: '#3b8beb', color: '#3b8beb', background: 'rgba(59,139,235,0.1)' },
+  autoScanActive: { borderColor: '#0ecb81', color: '#0ecb81', background: 'rgba(14,203,129,0.1)' },
   sep: { width: 1, height: 18, background: '#2a2e39', margin: '0 2px' },
   closeBtn: { background: 'none', border: 'none', color: '#848e9c', cursor: 'pointer', fontSize: '1rem', padding: '2px 6px' },
-  controls: { display: 'flex', alignItems: 'center', gap: 12, padding: '8px 16px', borderBottom: '1px solid #2a2e39', flexShrink: 0, flexWrap: 'wrap' as const },
+  // Auto-scan bar
+  autoBar: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '5px 16px', background: 'rgba(0,0,0,0.2)', borderBottom: '1px solid #2a2e39', flexShrink: 0, gap: 10, flexWrap: 'wrap' as const },
+  autoBarLeft: { display: 'flex', alignItems: 'center', gap: 14 },
+  autoBarRight: { display: 'flex', alignItems: 'center', gap: 6 },
+  autoBarInfo: { color: '#5e6673', fontSize: '0.76rem' },
+  autoBarCountdown: { color: '#848e9c', fontSize: '0.76rem' },
+  autoBarNote: { color: '#5e6673', fontSize: '0.72rem', fontStyle: 'italic' },
+  // Controls
+  controls: { display: 'flex', alignItems: 'center', gap: 10, padding: '7px 16px', borderBottom: '1px solid #2a2e39', flexShrink: 0, flexWrap: 'wrap' as const },
   ctrlGroup: { display: 'flex', alignItems: 'center', gap: 4 },
   ctrlLabel: { color: '#5e6673', fontSize: '0.78rem', marginRight: 4, whiteSpace: 'nowrap' as const },
   ctrlBtn: { background: 'none', border: '1px solid #2a2e39', borderRadius: 4, color: '#848e9c', cursor: 'pointer', fontSize: '0.82rem', padding: '3px 9px', fontFamily: 'inherit', whiteSpace: 'nowrap' as const },
@@ -512,9 +840,9 @@ const S: Record<string, React.CSSProperties> = {
   progressText: { position: 'relative', zIndex: 1, color: '#848e9c', fontSize: '0.75rem', paddingLeft: 10 },
   body: { display: 'flex', flex: 1, overflow: 'hidden', minHeight: 0 },
   // List
-  list: { width: 220, flexShrink: 0, overflowY: 'auto' as const, borderRight: '1px solid #2a2e39' },
+  list: { width: 230, flexShrink: 0, overflowY: 'auto' as const, borderRight: '1px solid #2a2e39' },
   emptyMsg: { color: '#5e6673', fontSize: '0.82rem', padding: '20px 12px', textAlign: 'center' as const },
-  listItem: { padding: '10px 12px', borderBottom: '1px solid #2a2e39', cursor: 'pointer', transition: 'background 0.1s' },
+  listItem: { padding: '9px 11px', borderBottom: '1px solid #2a2e39', cursor: 'pointer', transition: 'background 0.1s' },
   listItemActive: { background: 'rgba(59,139,235,0.12)' },
   listTop: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 3 },
   listSymbol: { color: '#d1d4dc', fontWeight: 600, fontSize: '0.88rem' },
@@ -522,19 +850,25 @@ const S: Record<string, React.CSSProperties> = {
   listMeta: { display: 'flex', alignItems: 'center', gap: 5, marginBottom: 3 },
   dirBadgeSm: { fontSize: '0.72rem', fontWeight: 600, padding: '1px 5px', borderRadius: 3 },
   listType: { color: '#5e6673', fontSize: '0.72rem' },
+  listStatusRow: { display: 'flex', alignItems: 'center', gap: 5, marginBottom: 2 },
+  listAsOf: { color: '#3e4452', fontSize: '0.67rem', marginBottom: 2 },
   listTpsl: { display: 'flex', justifyContent: 'space-between', marginTop: 2 },
+  // Status badge
+  statusBadge: { fontSize: '0.70rem', fontWeight: 700, padding: '1px 6px', borderRadius: 3, border: '1px solid', flexShrink: 0 },
+  validityBadge: { display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' as const },
   // Chart panel
   chartWrap: { flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 },
-  chartHeader: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 12px', borderBottom: '1px solid #2a2e39', flexShrink: 0 },
+  chartHeader: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 12px', borderBottom: '1px solid #2a2e39', flexShrink: 0, gap: 8 },
+  chartHeaderLeft: { display: 'flex', alignItems: 'center', gap: 8 },
   chartTitle: { color: '#d1d4dc', fontWeight: 600, fontSize: '0.88rem' },
   chartHeaderRight: { display: 'flex', alignItems: 'center', gap: 10 },
+  validityInfo: { display: 'flex', gap: 8, alignItems: 'center' },
   openMainBtn: { background: 'none', border: '1px solid #3b8beb', borderRadius: 4, color: '#3b8beb', cursor: 'pointer', fontSize: '0.8rem', padding: '3px 10px' },
   // Legend
   legendBar: { display: 'flex', alignItems: 'center', gap: 14, padding: '5px 14px', background: 'rgba(0,0,0,0.20)', borderBottom: '1px solid #2a2e39', flexShrink: 0, flexWrap: 'wrap' as const },
   legendItem: { display: 'flex', alignItems: 'center', gap: 4 },
   legendNum: { fontSize: '0.80rem', fontWeight: 700, minWidth: 14, textAlign: 'center' as const },
   legendLabel: { color: '#7a8292', fontSize: '0.72rem', whiteSpace: 'nowrap' as const },
-  // Chart area — opacity only (no saturation change)
   chartArea: { flex: 1, position: 'relative', minHeight: 0, overflow: 'hidden' },
   chartCanvasWrap: { position: 'absolute', inset: 0, opacity: 0.80 },
   chartPlaceholder: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#5e6673', fontSize: '0.88rem' },
@@ -552,19 +886,15 @@ const S: Record<string, React.CSSProperties> = {
   rrBox: { background: 'rgba(240,185,11,0.08)', border: '1px solid rgba(240,185,11,0.3)', borderRadius: 6, padding: '3px 10px', display: 'flex', flexDirection: 'column', alignItems: 'center' },
   rrLabel: { color: '#5e6673', fontSize: '0.66rem', textTransform: 'uppercase' as const },
   rrValue: { color: '#f0b90b', fontSize: '0.95rem', fontWeight: 800, fontFamily: '"SF Mono", Consolas, monospace' },
-  // Trade buttons
   paperTradeBtn: { background: 'rgba(240,185,11,0.12)', border: '1px solid rgba(240,185,11,0.5)', borderRadius: 5, color: '#f0b90b', cursor: 'pointer', fontSize: '0.83rem', fontWeight: 600, padding: '5px 14px', fontFamily: 'inherit', whiteSpace: 'nowrap' as const, flexShrink: 0 },
   liveTradeBtn: { background: 'rgba(14,203,129,0.12)', border: '1px solid rgba(14,203,129,0.5)', borderRadius: 5, color: '#0ecb81', cursor: 'pointer', fontSize: '0.83rem', fontWeight: 600, padding: '5px 14px', fontFamily: 'inherit', whiteSpace: 'nowrap' as const, flexShrink: 0 },
-  // Explanation blocks
   blockRow: { display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 7 },
   infoBlock: { background: 'rgba(255,255,255,0.025)', border: '1px solid #2a2e39', borderRadius: 6, padding: '6px 10px' },
   infoBlockTitle: { color: '#848e9c', fontSize: '0.74rem', fontWeight: 600, marginBottom: 4 },
   infoBlockBody: { color: '#b2b8c4', fontSize: '0.77rem', lineHeight: 1.55 },
-  // Footer row
   footerRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between' },
   tipText: { color: '#5e6673', fontSize: '0.76rem' },
   glossaryBtn: { background: 'none', border: '1px solid #2a2e39', borderRadius: 4, color: '#5e6673', cursor: 'pointer', fontSize: '0.75rem', padding: '2px 8px', fontFamily: 'inherit', whiteSpace: 'nowrap' as const },
-  // Glossary grid
   glossaryGrid: { display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 5, padding: '6px 0 2px' },
   glossaryItem: { background: 'rgba(255,255,255,0.02)', border: '1px solid #252930', borderRadius: 4, padding: '5px 8px' },
   glossaryTerm: { display: 'block', color: '#f0b90b', fontSize: '0.73rem', fontWeight: 600, marginBottom: 2 },
