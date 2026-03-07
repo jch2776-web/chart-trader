@@ -426,17 +426,36 @@ function TradingInfoPanel({
         </div>
       )}
 
-      {/* Conditional entry notice (trendline PENDING only) */}
-      {c.breakoutType === 'trendline' && c.status === 'PENDING' && c.triggerPriceAtNextClose != null && (
-        <div style={{ display: 'flex', gap: 12, padding: '6px 12px', background: 'rgba(240,185,11,0.06)', borderRadius: 6, border: '1px solid rgba(240,185,11,0.22)', flexWrap: 'wrap' as const, fontSize: '0.74rem' }}>
-          <span style={{ color: '#f0b90b', fontWeight: 700, whiteSpace: 'nowrap' as const }}>⚡ 조건부 진입 안내</span>
-          <span style={{ color: '#ccc' }}>
-            📄 <b style={{ color: '#f0b90b' }}>모의</b>: 다음 봉 종가 {isLong ? '≥' : '≤'} <b style={{ color: '#f0b90b' }}>{pf(c.triggerPriceAtNextClose)}</b> 확정 시 자동 체결 (봉마감 감시 중)
-          </span>
-          <span style={{ color: '#848e9c' }}>|</span>
-          <span style={{ color: '#ccc' }}>
-            ⚡ <b style={{ color: '#0ecb81' }}>실전</b>: 바이낸스 지정가 @ <b style={{ color: '#0ecb81' }}>{pf(c.triggerPriceAtNextClose)}</b> 즉시 접수 <span style={{ color: '#f6465d' }}>(봉마감 확인 불가)</span>
-          </span>
+      {/* Entry method notice for trendline signals */}
+      {c.breakoutType === 'trendline' && (c.status === 'PENDING' || c.status === 'TRIGGERED') && (
+        <div style={{ display: 'flex', gap: 12, padding: '6px 12px', borderRadius: 6, flexWrap: 'wrap' as const, fontSize: '0.74rem',
+          ...(c.status === 'PENDING'
+            ? { background: 'rgba(240,185,11,0.06)', border: '1px solid rgba(240,185,11,0.22)' }
+            : { background: 'rgba(14,203,129,0.05)', border: '1px solid rgba(14,203,129,0.2)' }),
+        }}>
+          {c.status === 'PENDING' ? (
+            <>
+              <span style={{ color: '#f0b90b', fontWeight: 700, whiteSpace: 'nowrap' as const }}>⏳ 조건부 진입 (대기중)</span>
+              <span style={{ color: '#ccc' }}>
+                📄 <b style={{ color: '#f0b90b' }}>모의</b>: 다음 봉 종가 {isLong ? '≥' : '≤'} <b style={{ color: '#f0b90b' }}>{pf(c.triggerPriceAtNextClose)}</b> 확정 시 자동 체결
+              </span>
+              <span style={{ color: '#848e9c' }}>|</span>
+              <span style={{ color: '#ccc' }}>
+                ⚡ <b style={{ color: '#0ecb81' }}>실전</b>: 지정가 @ <b style={{ color: '#0ecb81' }}>{pf(c.triggerPriceAtNextClose)}</b> <span style={{ color: '#f6465d' }}>(봉마감 미확인)</span>
+              </span>
+            </>
+          ) : (
+            <>
+              <span style={{ color: '#0ecb81', fontWeight: 700, whiteSpace: 'nowrap' as const }}>✅ 돌파 확인됨 (즉시 진입)</span>
+              <span style={{ color: '#ccc' }}>
+                📄 <b style={{ color: '#f0b90b' }}>모의</b>: 지정가 @ <b style={{ color: '#f0b90b' }}>{pf(c.entryPrice)}</b> 예약 — 현재가 도달 시 체결
+              </span>
+              <span style={{ color: '#848e9c' }}>|</span>
+              <span style={{ color: '#ccc' }}>
+                ⚡ <b style={{ color: '#0ecb81' }}>실전</b>: 지정가 @ <b style={{ color: '#0ecb81' }}>{pf(c.entryPrice)}</b> 즉시 접수
+              </span>
+            </>
+          )}
         </div>
       )}
 
@@ -471,7 +490,9 @@ function TradingInfoPanel({
           💡 RR={rr.toFixed(1)} → 승률 <b>{breakEvenPct}%</b> 이상이면 수익 ({nTrials}번 중 1번만 성공해도 손익분기)
         </span>
         <div style={{ display: 'flex', gap: 6 }}>
-          <button style={S.glossaryBtn} onClick={() => { setShowLiveTip(false); setShowGlossary(v => !v); }}>
+          <button
+            style={{ background: showGlossary ? 'rgba(59,139,235,0.12)' : 'rgba(255,255,255,0.04)', border: `1px solid ${showGlossary ? 'rgba(59,139,235,0.5)' : '#3a3f4b'}`, borderRadius: 5, color: showGlossary ? '#3b8beb' : '#848e9c', cursor: 'pointer', fontSize: '0.83rem', fontWeight: 600, padding: '5px 14px', fontFamily: 'inherit', whiteSpace: 'nowrap' as const, flexShrink: 0, lineHeight: 1.4, height: 32 }}
+            onClick={() => { setShowLiveTip(false); setShowGlossary(v => !v); }}>
             📖 용어 사전 {showGlossary ? '▲' : '▼'}
           </button>
           {onLiveTrade && (
@@ -575,7 +596,7 @@ export function AltScannerModal({
   const [chartViewCandles, setChartViewCandles] = useState<Candle[]>([]);
   const [levelMode, setLevelMode]       = useState<LevelMode>('core');
   const [showHVN, setShowHVN]           = useState(true);
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>('TRIGGERED');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [paperLeverage, setPaperLeverage]       = useState(10);
   const [paperMarginType, setPaperMarginType]   = useState<'ISOLATED' | 'CROSSED'>('ISOLATED');
   const [paperRiskPct, setPaperRiskPct]         = useState(2);
@@ -1303,8 +1324,8 @@ const S: Record<string, React.CSSProperties> = {
   rrBox: { background: 'rgba(240,185,11,0.08)', border: '1px solid rgba(240,185,11,0.3)', borderRadius: 6, padding: '3px 10px', display: 'flex', flexDirection: 'column', alignItems: 'center' },
   rrLabel: { color: '#5e6673', fontSize: '0.66rem', textTransform: 'uppercase' as const },
   rrValue: { color: '#f0b90b', fontSize: '0.95rem', fontWeight: 800, fontFamily: '"SF Mono", Consolas, monospace' },
-  paperTradeBtn: { background: 'rgba(240,185,11,0.12)', border: '1px solid rgba(240,185,11,0.5)', borderRadius: 5, color: '#f0b90b', cursor: 'pointer', fontSize: '0.83rem', fontWeight: 600, padding: '5px 14px', fontFamily: 'inherit', whiteSpace: 'nowrap' as const, flexShrink: 0 },
-  liveTradeBtn: { background: 'rgba(14,203,129,0.12)', border: '1px solid rgba(14,203,129,0.5)', borderRadius: 5, color: '#0ecb81', cursor: 'pointer', fontSize: '0.83rem', fontWeight: 600, padding: '5px 14px', fontFamily: 'inherit', whiteSpace: 'nowrap' as const, flexShrink: 0 },
+  paperTradeBtn: { background: 'rgba(240,185,11,0.12)', border: '1px solid rgba(240,185,11,0.5)', borderRadius: 5, color: '#f0b90b', cursor: 'pointer', fontSize: '0.83rem', fontWeight: 600, padding: '5px 14px', fontFamily: 'inherit', whiteSpace: 'nowrap' as const, flexShrink: 0, lineHeight: 1.4, height: 32 },
+  liveTradeBtn: { background: 'rgba(14,203,129,0.12)', border: '1px solid rgba(14,203,129,0.5)', borderRadius: 5, color: '#0ecb81', cursor: 'pointer', fontSize: '0.83rem', fontWeight: 600, padding: '5px 14px', fontFamily: 'inherit', whiteSpace: 'nowrap' as const, flexShrink: 0, lineHeight: 1.4, height: 32 },
   blockRow: { display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 7 },
   infoBlock: { background: 'rgba(255,255,255,0.025)', border: '1px solid #2a2e39', borderRadius: 6, padding: '6px 10px' },
   infoBlockTitle: { color: '#848e9c', fontSize: '0.74rem', fontWeight: 600, marginBottom: 4 },
