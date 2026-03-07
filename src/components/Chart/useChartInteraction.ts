@@ -32,6 +32,7 @@ export function useChartInteraction({
 }: UseChartInteractionProps) {
   const isPanningRef   = useRef(false);
   const lastMouseXRef  = useRef(0);
+  const lastMouseYRef  = useRef(0);
 
   // Touch state refs
   const isTouchPanRef     = useRef(false);
@@ -120,6 +121,7 @@ export function useChartInteraction({
     if (e.button === 0) {
       isPanningRef.current  = true;
       lastMouseXRef.current = e.clientX;
+      lastMouseYRef.current = e.clientY;
     }
   }, [isDrawing]);
 
@@ -138,23 +140,40 @@ export function useChartInteraction({
     if (!isPanningRef.current || isDrawing) return;
 
     const dx = e.clientX - lastMouseXRef.current;
+    const dy = e.clientY - lastMouseYRef.current;
     lastMouseXRef.current = e.clientX;
-    if (dx === 0) return;
+    lastMouseYRef.current = e.clientY;
 
     setViewport(prev => {
       const { price: a } = getAreas();
-      const range   = prev.endIdx - prev.startIdx;
-      const dIdx    = -(dx / a.w) * range;
-      let newStart  = prev.startIdx + dIdx;
-      let newEnd    = prev.endIdx   + dIdx;
+      let newStart = prev.startIdx;
+      let newEnd   = prev.endIdx;
+      let newMin   = prev.minPrice;
+      let newMax   = prev.maxPrice;
 
-      [newStart, newEnd] = clampViewport(newStart, newEnd, candles.length);
+      // Horizontal pan (X)
+      if (dx !== 0) {
+        const range  = prev.endIdx - prev.startIdx;
+        const dIdx   = -(dx / a.w) * range;
+        newStart = prev.startIdx + dIdx;
+        newEnd   = prev.endIdx   + dIdx;
+        [newStart, newEnd] = clampViewport(newStart, newEnd, candles.length);
+      }
+
+      // Vertical pan (Y) — dragging UP shifts view UP (higher prices), DOWN shifts DOWN
+      if (dy !== 0) {
+        isYManualRef.current = true;
+        const priceRange = prev.maxPrice - prev.minPrice;
+        const dPrice     = (dy / a.h) * priceRange; // positive dy → drag down → shift prices up
+        newMin = prev.minPrice + dPrice;
+        newMax = prev.maxPrice + dPrice;
+      }
 
       if (!isYManualRef.current) {
         const { minPrice, maxPrice } = fitY(candles, newStart, newEnd);
         return { startIdx: newStart, endIdx: newEnd, minPrice, maxPrice };
       }
-      return { ...prev, startIdx: newStart, endIdx: newEnd };
+      return { startIdx: newStart, endIdx: newEnd, minPrice: newMin, maxPrice: newMax };
     });
   }, [candles, getAreas, setCrosshair, setViewport, isDrawing, isYManualRef]);
 

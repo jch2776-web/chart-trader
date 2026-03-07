@@ -12,6 +12,16 @@ export interface FuturesPosition {
   entryTime?: number;         // ms epoch — time of the actual opening trade (from userTrades)
 }
 
+export interface LiveHistoryEntry {
+  tranId: string;
+  symbol: string;
+  income: number;   // realized PnL (USDT, can be negative)
+  asset: string;    // "USDT"
+  time: number;     // ms timestamp
+  tradeId: string;
+  info: string;
+}
+
 export interface FuturesOrder {
   symbol: string;
   orderId: string;

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import type { FuturesPosition, FuturesOrder } from '../types/futures';
+import type { FuturesPosition, FuturesOrder, LiveHistoryEntry } from '../types/futures';
 
 const BASE = 'https://fapi.binance.com';
 
@@ -616,5 +616,25 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
     await fetchData();
   }, [fetchData]);
 
-  return { positions, orders, allPositions, allOrders, balance, loading, error, refetch: fetchData, placeOrder, cancelOrder, placeTPSL, clientSlMap, removeClientSL };
+  const fetchIncomeHistory = useCallback(async (startTime?: number, endTime?: number): Promise<LiveHistoryEntry[]> => {
+    const key = apiKeyRef.current;
+    const secret = apiSecretRef.current;
+    if (!key || !secret) throw new Error('API 키가 설정되지 않았습니다');
+    const params: Record<string, string | number> = { incomeType: 'REALIZED_PNL', limit: 1000 };
+    if (startTime) params.startTime = startTime;
+    if (endTime) params.endTime = endTime;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const res = await fetchSigned<any[]>('/fapi/v1/income', key, secret, params);
+    return res.map(r => ({
+      tranId:  String(r.tranId),
+      symbol:  r.symbol,
+      income:  parseFloat(r.income),
+      asset:   r.asset,
+      time:    r.time as number,
+      tradeId: String(r.tradeId ?? ''),
+      info:    r.info ?? '',
+    }));
+  }, []);
+
+  return { positions, orders, allPositions, allOrders, balance, loading, error, refetch: fetchData, placeOrder, cancelOrder, placeTPSL, clientSlMap, removeClientSL, fetchIncomeHistory };
 }

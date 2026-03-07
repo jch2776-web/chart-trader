@@ -90,6 +90,10 @@ export function usePaperTrading(storageKey: string) {
             entryPrice: avgEntryPrice,
             isolatedMargin: parseFloat((existing.isolatedMargin + margin).toFixed(8)),
             entryFee: parseFloat((existing.entryFee + actualFee).toFixed(8)),
+            // New call wins if provided; otherwise keep existing value
+            tpPrice: tpPrice ?? existing.tpPrice,
+            slPrice: slPrice ?? existing.slPrice,
+            altMeta: altMeta ?? existing.altMeta,
           }),
         };
       }

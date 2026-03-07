@@ -11,6 +11,7 @@ import {
   intervalToMs, getNextAlignedCloseTime, defaultAutoScan,
   fmtCountdown, fmtDateTime,
 } from './timeUtils';
+import { AltScannerFAQ } from './AltScannerFAQ';
 
 export interface AltTradeParams {
   symbol: string;
@@ -31,6 +32,9 @@ export interface AltTradeParams {
   breakoutType: 'trendline' | 'hline' | 'box';
   candidateStatus: CandidateStatus;
   triggerPriceAtNextClose?: number; // only for trendline signals
+  // Paper sizing mode
+  sizeMode: 'risk' | 'margin';
+  marginUsdt?: number; // only when sizeMode === 'margin'
 }
 
 interface Props {
@@ -169,9 +173,12 @@ const LEVERAGE_PRESETS = [3, 5, 10, 20, 50];
 const RISK_PRESETS = [1, 2, 3, 5];
 
 // ── Info panel ─────────────────────────────────────────────────────────────
+const MARGIN_PRESETS = [50, 100, 200, 500];
+
 function TradingInfoPanel({
   c, onPaperTrade, onLiveTrade,
   paperLeverage, setPaperLeverage, paperMarginType, setPaperMarginType, paperRiskPct, setPaperRiskPct,
+  paperSizeMode, setPaperSizeMode, paperMarginUsdt, setPaperMarginUsdt,
   liveLeverage, setLiveLeverage, liveMarginType, setLiveMarginType, liveRiskPct, setLiveRiskPct,
   paperBalance,
 }: {
@@ -181,6 +188,8 @@ function TradingInfoPanel({
   paperLeverage: number; setPaperLeverage: (v: number) => void;
   paperMarginType: 'ISOLATED' | 'CROSSED'; setPaperMarginType: (v: 'ISOLATED' | 'CROSSED') => void;
   paperRiskPct: number; setPaperRiskPct: (v: number) => void;
+  paperSizeMode: 'risk' | 'margin'; setPaperSizeMode: (v: 'risk' | 'margin') => void;
+  paperMarginUsdt: number; setPaperMarginUsdt: (v: number) => void;
   liveLeverage: number; setLiveLeverage: (v: number) => void;
   liveMarginType: 'ISOLATED' | 'CROSSED'; setLiveMarginType: (v: 'ISOLATED' | 'CROSSED') => void;
   liveRiskPct: number; setLiveRiskPct: (v: number) => void;
@@ -232,12 +241,15 @@ function TradingInfoPanel({
     leverage: paperLeverage,
     marginType: paperMarginType,
     riskPct: paperRiskPct,
+    sizeMode: paperSizeMode,
+    marginUsdt: paperSizeMode === 'margin' ? paperMarginUsdt : undefined,
   };
   const liveTradeParams: AltTradeParams = {
     ...baseParams,
     leverage: liveLeverage,
     marginType: liveMarginType,
     riskPct: liveRiskPct,
+    sizeMode: 'risk',
   };
 
   return (
@@ -355,23 +367,65 @@ function TradingInfoPanel({
             ))}
           </div>
           <div style={{ width: 1, height: 22, background: '#2a2e39', flexShrink: 0 }} />
+          {/* Size mode toggle */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-            <span style={{ color: '#5e6673', fontSize: '0.75rem', whiteSpace: 'nowrap' as const }}>리스크</span>
-            {RISK_PRESETS.map(r => (
-              <button key={r}
+            <span style={{ color: '#5e6673', fontSize: '0.75rem', whiteSpace: 'nowrap' as const }}>수량 기준</span>
+            {(['risk', 'margin'] as const).map(m => (
+              <button key={m}
                 style={{ ...S.glossaryBtn, padding: '2px 9px', fontSize: '0.78rem',
-                  ...(paperRiskPct === r ? { borderColor: '#0ecb81', color: '#0ecb81', background: 'rgba(14,203,129,0.12)' } : {}),
+                  ...(paperSizeMode === m ? { borderColor: '#f0b90b', color: '#f0b90b', background: 'rgba(240,185,11,0.12)' } : {}),
                 }}
-                onClick={() => setPaperRiskPct(r)}>
-                {r}%
+                onClick={() => setPaperSizeMode(m)}>
+                {m === 'risk' ? '리스크%' : '마진'}
               </button>
             ))}
           </div>
+          <div style={{ width: 1, height: 22, background: '#2a2e39', flexShrink: 0 }} />
+          {paperSizeMode === 'risk' ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <span style={{ color: '#5e6673', fontSize: '0.75rem', whiteSpace: 'nowrap' as const }}>리스크</span>
+              {RISK_PRESETS.map(r => (
+                <button key={r}
+                  style={{ ...S.glossaryBtn, padding: '2px 9px', fontSize: '0.78rem',
+                    ...(paperRiskPct === r ? { borderColor: '#0ecb81', color: '#0ecb81', background: 'rgba(14,203,129,0.12)' } : {}),
+                  }}
+                  onClick={() => setPaperRiskPct(r)}>
+                  {r}%
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <span style={{ color: '#5e6673', fontSize: '0.75rem', whiteSpace: 'nowrap' as const }}>마진(USDT)</span>
+              {MARGIN_PRESETS.map(m => (
+                <button key={m}
+                  style={{ ...S.glossaryBtn, padding: '2px 9px', fontSize: '0.78rem',
+                    ...(paperMarginUsdt === m ? { borderColor: '#0ecb81', color: '#0ecb81', background: 'rgba(14,203,129,0.12)' } : {}),
+                  }}
+                  onClick={() => setPaperMarginUsdt(m)}>
+                  ${m}
+                </button>
+              ))}
+              <input
+                type="number"
+                min={1}
+                value={paperMarginUsdt}
+                onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v) && v > 0) setPaperMarginUsdt(v); }}
+                style={{ width: 72, padding: '2px 6px', borderRadius: 4, border: '1px solid #3b8beb', background: '#131722', color: '#d1d4dc', fontSize: '0.78rem', fontFamily: 'inherit' }}
+              />
+            </div>
+          )}
           <span style={{ color: '#5e6673', fontSize: '0.72rem', marginLeft: 2 }}>
             <b style={{ color: '#f0b90b' }}>{paperLeverage}x</b> · <b style={{ color: '#3b8beb' }}>{paperMarginType === 'ISOLATED' ? '격리' : '교차'}</b>
-            {' · '}<b style={{ color: '#0ecb81' }}>{paperRiskPct}%</b> 리스크
-            {paperBalance != null && paperBalance > 0 && (
-              <> = <b style={{ color: '#0ecb81' }}>${(paperBalance * paperRiskPct / 100).toFixed(2)}</b></>
+            {paperSizeMode === 'risk' ? (
+              <>
+                {' · '}<b style={{ color: '#0ecb81' }}>{paperRiskPct}%</b> 리스크
+                {paperBalance != null && paperBalance > 0 && (
+                  <> = <b style={{ color: '#0ecb81' }}>${(paperBalance * paperRiskPct / 100).toFixed(2)}</b></>
+                )}
+              </>
+            ) : (
+              <> · 투입마진 <b style={{ color: '#0ecb81' }}>${paperMarginUsdt}</b></>
             )}
           </span>
         </div>
@@ -569,6 +623,7 @@ export function AltScannerModal({
   symbols, initialCandidates, onCandidatesChange, onClose, onOpenInMain,
   onPaperTrade, onLiveTrade, snapshotMeta, paperBalance,
 }: Props) {
+  const [showFAQ, setShowFAQ]           = useState(false);
   const [scanInterval, setScanInterval] = useState<ScanInterval>('1h');
   const [direction, setDirection]       = useState<ScanDirection>('both');
   const [scanning, setScanning]         = useState(false);
@@ -600,6 +655,8 @@ export function AltScannerModal({
   const [paperLeverage, setPaperLeverage]       = useState(10);
   const [paperMarginType, setPaperMarginType]   = useState<'ISOLATED' | 'CROSSED'>('ISOLATED');
   const [paperRiskPct, setPaperRiskPct]         = useState(2);
+  const [paperSizeMode, setPaperSizeMode]       = useState<'risk' | 'margin'>('risk');
+  const [paperMarginUsdt, setPaperMarginUsdt]   = useState(100);
   const [liveLeverage, setLiveLeverage]         = useState(10);
   const [liveMarginType, setLiveMarginType]     = useState<'ISOLATED' | 'CROSSED'>('ISOLATED');
   const [liveRiskPct, setLiveRiskPct]           = useState(2);
@@ -859,13 +916,13 @@ export function AltScannerModal({
     if (!selected) return [];
     const { drawingGroups: g } = selected;
 
-    // For trendlines, update the entry hline to reflect triggerPriceAtNextClose
+    // For trendlines, annotate the entry hline memo with triggerPriceAtNextClose
+    // (do NOT move the price — entry line must stay at entryPrice above SL)
     const entryLines = g.entryLines.map((d): Drawing => {
-      if (d.type === 'hline' && d.memo?.startsWith('① ') && selected.breakoutType === 'trendline') {
+      if (d.type === 'hline' && d.memo?.startsWith('① ') && selected.breakoutType === 'trendline' && selected.triggerPriceAtNextClose) {
         const hd = d as HlineDrawing;
         const updated: HlineDrawing = {
           ...hd,
-          price: selected.triggerPriceAtNextClose,
           memo: `${hd.memo} · 다음봉 기준: ${fmt(selected.triggerPriceAtNextClose)}`,
         };
         return updated;
@@ -913,9 +970,18 @@ export function AltScannerModal({
               {showHVN ? 'ON' : 'OFF'}
             </button>
             <div style={S.sep} />
+            <button
+              style={{ ...S.toggleBtn, borderColor: '#f0b90b', color: '#f0b90b', background: 'rgba(240,185,11,0.08)', fontSize: '0.78rem', padding: '2px 10px' }}
+              onClick={() => setShowFAQ(true)}
+              title="ALT추천 매수 로직 전체 해설">
+              📋 FAQ
+            </button>
+            <div style={S.sep} />
             <button style={S.closeBtn} onClick={onClose}>✕</button>
           </div>
         </div>
+
+        {showFAQ && <AltScannerFAQ onClose={() => setShowFAQ(false)} />}
 
         {/* ── Auto-scan status bar ────────────────────────────────────────── */}
         <div style={S.autoBar}>
@@ -1172,6 +1238,8 @@ export function AltScannerModal({
                   paperLeverage={paperLeverage} setPaperLeverage={setPaperLeverage}
                   paperMarginType={paperMarginType} setPaperMarginType={setPaperMarginType}
                   paperRiskPct={paperRiskPct} setPaperRiskPct={setPaperRiskPct}
+                  paperSizeMode={paperSizeMode} setPaperSizeMode={setPaperSizeMode}
+                  paperMarginUsdt={paperMarginUsdt} setPaperMarginUsdt={setPaperMarginUsdt}
                   liveLeverage={liveLeverage} setLiveLeverage={setLiveLeverage}
                   liveMarginType={liveMarginType} setLiveMarginType={setLiveMarginType}
                   liveRiskPct={liveRiskPct} setLiveRiskPct={setLiveRiskPct}
@@ -1308,7 +1376,7 @@ const S: Record<string, React.CSSProperties> = {
   legendNum: { fontSize: '0.80rem', fontWeight: 700, minWidth: 14, textAlign: 'center' as const },
   legendLabel: { color: '#7a8292', fontSize: '0.72rem', whiteSpace: 'nowrap' as const },
   chartArea: { flex: 1, position: 'relative', minHeight: 300, overflow: 'hidden' },
-  chartCanvasWrap: { position: 'absolute', inset: 0, opacity: 0.80 },
+  chartCanvasWrap: { position: 'absolute', inset: 0, opacity: 0.80, display: 'flex', flexDirection: 'column' },
   chartPlaceholder: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#5e6673', fontSize: '0.88rem' },
   // Info panel
   infoPanel: { flexShrink: 0, background: 'linear-gradient(180deg, #161a24 0%, #1a1e2a 100%)', borderTop: '1px solid #2a2e39', padding: '9px 14px 8px', display: 'flex', flexDirection: 'column', gap: 7, maxHeight: 280, overflowY: 'auto' as const },

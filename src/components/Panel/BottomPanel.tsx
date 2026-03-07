@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect, useMemo } from 'react';
-import type { FuturesPosition, FuturesOrder } from '../../types/futures';
+import type { FuturesPosition, FuturesOrder, LiveHistoryEntry } from '../../types/futures';
 import type { ClientSlMap } from '../../hooks/useBinanceFutures';
 import type { PaperHistoryEntry, PaperPosition, PaperOrder, AltMeta } from '../../types/paperTrading';
 
@@ -28,9 +28,12 @@ interface Props {
   paperInitialBalance?: number;
   onOpenAltPosition?: (meta: AltMeta) => void;
   liveAltMetaMap?: Record<string, AltMeta>;
+  // Live trading history
+  liveHistory?: LiveHistoryEntry[];
+  onFetchLiveHistory?: (startTime?: number, endTime?: number) => Promise<void>;
 }
 
-type Tab = 'positions' | 'orders' | 'paper-orders' | 'paper-history' | 'paper-asset';
+type Tab = 'positions' | 'orders' | 'paper-orders' | 'paper-history' | 'paper-asset' | 'live-history' | 'live-asset';
 
 // ── TP/SL modal state ─────────────────────────────────────────────────────────
 interface TPSLModal {
@@ -522,6 +525,90 @@ function PaperAssetChart({ history, initialBalance }: { history: PaperHistoryEnt
   );
 }
 
+// ── CSV export helper ─────────────────────────────────────────────────────────
+function downloadCsv(filename: string, rows: string[][]): void {
+  const bom = '\uFEFF';
+  const csv = bom + rows.map(r => r.map(c => `"${c.replace(/"/g, '""')}"`).join(',')).join('\r\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
+  a.download = filename;
+  a.click();
+}
+
+// ── Live Asset Chart ──────────────────────────────────────────────────────────
+function LiveAssetChart({ history }: { history: LiveHistoryEntry[] }) {
+  const [period, setPeriod] = useState<AssetPeriod>('1M');
+
+  const sorted = useMemo(() => [...history].sort((a, b) => a.time - b.time), [history]);
+  const cutMs  = useMemo(() => (period === 'ALL' ? 0 : Date.now() - PERIOD_OFFSETS[period]), [period]);
+
+  const baselineCumPnl = useMemo(() => {
+    let acc = 0;
+    for (const h of sorted) { if (h.time < cutMs) acc += h.income; }
+    return acc;
+  }, [sorted, cutMs]);
+
+  const { filtered, cumPnlPts, tradeCountPts, winRatePts } = useMemo(() => {
+    const filtered = sorted.filter(h => h.time >= cutMs);
+    const cumPnlPts: AssetPt[] = [];
+    const tradeCountPts: AssetPt[] = [];
+    const winRatePts: AssetPt[] = [];
+    let cumPnl = baselineCumPnl;
+    let wins = 0;
+    filtered.forEach((h, i) => {
+      cumPnl += h.income;
+      if (h.income > 0) wins++;
+      cumPnlPts.push({ time: h.time, value: cumPnl });
+      tradeCountPts.push({ time: h.time, value: i + 1 });
+      winRatePts.push({ time: h.time, value: (wins / (i + 1)) * 100 });
+    });
+    return { filtered, cumPnlPts, tradeCountPts, winRatePts };
+  }, [sorted, cutMs, baselineCumPnl]);
+
+  const totalPnl  = filtered.reduce((s, h) => s + h.income, 0);
+  const winCount  = filtered.filter(h => h.income > 0).length;
+  const winRate   = filtered.length > 0 ? (winCount / filtered.length) * 100 : 0;
+  const pnlColor2 = totalPnl >= 0 ? '#0ecb81' : '#f6465d';
+
+  return (
+    <div style={{ padding: '8px 14px 6px', color: '#d4d9e1' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 10 }}>
+        <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+          {[
+            { label: '기간손익', value: `${totalPnl >= 0 ? '+' : ''}${totalPnl.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, unit: 'USDT', color: pnlColor2 },
+            { label: '승률', value: `${winRate.toFixed(1)}%`, unit: `(${winCount}/${filtered.length})`, color: '#d4d9e1' },
+            { label: '거래횟수', value: `${filtered.length}`, unit: '건', color: '#7b8cde' },
+          ].map(({ label, value, unit, color }) => (
+            <div key={label} style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+              <span style={{ fontSize: '0.62rem', color: '#4a5568', lineHeight: 1 }}>{label}</span>
+              <span style={{ fontSize: '0.82rem', fontWeight: 700, color, fontFamily: '"SF Mono",Consolas,monospace', lineHeight: 1.2 }}>
+                {value}{unit ? <span style={{ fontSize: '0.62rem', color: '#4a5568', fontWeight: 400, marginLeft: 2 }}>{unit}</span> : null}
+              </span>
+            </div>
+          ))}
+        </div>
+        <div style={{ display: 'flex', gap: 0, alignItems: 'center', flexShrink: 0 }}>
+          {(Object.keys(PERIOD_LABELS) as AssetPeriod[]).map(p => (
+            <button key={p} onClick={() => setPeriod(p)} style={{
+              fontSize: '0.72rem', padding: '2px 7px', background: 'none', border: 'none',
+              cursor: 'pointer', fontWeight: period === p ? 700 : 400,
+              color: period === p ? '#e0e3eb' : '#3e4f64',
+            }}>{PERIOD_LABELS[p]}</button>
+          ))}
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 10 }}>
+        <AssetLineChart pts={cumPnlPts} gradId="lg-cumpnl" showZeroLine color={pnlColor2} label="누적 실현손익" period={period}
+          fmtTooltip={v => `${v >= 0 ? '+' : ''}${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT`} />
+        <AssetLineChart pts={tradeCountPts} gradId="lg-trades" color="#7b8cde" label="누적 거래횟수" period={period}
+          fmtTooltip={v => `${Math.round(v)} 건`} />
+        <AssetLineChart pts={winRatePts} gradId="lg-winrate" color="#a78bfa" label="승률 추이" period={period}
+          fmtTooltip={v => `${v.toFixed(1)}%`} />
+      </div>
+    </div>
+  );
+}
+
 // ── Coin logo component ───────────────────────────────────────────────────────
 function CoinLogo({ symbol }: { symbol: string }) {
   const coin = extractCoin(symbol).toLowerCase();
@@ -889,8 +976,14 @@ export function BottomPanel({
   paperOrders, paperHistory, paperInitialBalance,
   onPaperClosePosition, onPaperSetTPSL, onPaperResetBalance,
   onPaperCancelOrder, onPaperClearHistory, onOpenAltPosition, liveAltMetaMap,
+  liveHistory, onFetchLiveHistory,
 }: Props) {
   const [tab, setTab] = useState<Tab>('positions');
+
+  // Date range filter for history tabs
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo,   setDateTo]   = useState('');
+  const [histFetching, setHistFetching] = useState(false);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [tpslModal, setTpslModal] = useState<TPSLModal | null>(null);
   const lastY = useRef(0);
@@ -1015,6 +1108,12 @@ export function BottomPanel({
               미체결 주문
               {allOrders.length > 0 && <span style={s.badge}>{allOrders.length}</span>}
             </button>
+            <button style={{ ...s.tab, ...(tab === 'live-history' ? s.tabActive : {}) }} onClick={() => setTab('live-history')}>
+              거래 히스토리
+            </button>
+            <button style={{ ...s.tab, ...(tab === 'live-asset' ? s.tabActive : {}) }} onClick={() => setTab('live-asset')}>
+              자산현황
+            </button>
           </>
         )}
       </div>
@@ -1031,6 +1130,7 @@ export function BottomPanel({
                 <th style={s.th}>수량</th>
                 <th style={s.th}>레버리지</th>
                 <th style={s.th}>지정가 (USDT)</th>
+                <th style={s.th}>예상마진 (USDT)</th>
                 <th style={s.th}>구분</th>
                 <th style={s.th}>등록시간</th>
                 <th style={s.th}>취소</th>
@@ -1038,7 +1138,7 @@ export function BottomPanel({
             </thead>
             <tbody>
               {(paperOrders?.length ?? 0) === 0 ? (
-                <tr><td colSpan={8} style={s.empty}>예약주문 없음</td></tr>
+                <tr><td colSpan={9} style={s.empty}>예약주문 없음</td></tr>
               ) : paperOrders!.map(o => {
                 const isBuy = o.side === 'BUY';
                 const label = o.reduceOnly ? (isBuy ? '숏 청산' : '롱 청산') : (isBuy ? '롱 매수' : '숏 매도');
@@ -1077,6 +1177,12 @@ export function BottomPanel({
                       </div>
                       <div style={{ fontSize: '0.64rem', color: isConditional ? '#f0b90b' : '#848e9c', marginTop: 1 }}>{triggerLabel}</div>
                     </td>
+                    <td style={s.td}>
+                      <div style={s.priceCell}>
+                        <span>{(o.limitPrice * o.qty / o.leverage).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                        <span style={s.priceUnit}>USDT</span>
+                      </div>
+                    </td>
                     <td style={{ ...s.td, color: col, fontWeight: 600, fontSize: '0.8rem' }}>{label}</td>
                     <td style={{ ...s.td, color: '#5d6776', fontSize: '0.74rem', whiteSpace: 'nowrap' }}>{new Date(o.placedAt).toLocaleTimeString()}</td>
                     <td style={s.td}>
@@ -1095,6 +1201,33 @@ export function BottomPanel({
         {/* Paper history tab */}
         {isPaperMode && tab === 'paper-history' && (
           <div>
+            {/* Filter / Export toolbar */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px 4px', borderBottom: '1px solid #1a2535' }}>
+              <span style={{ fontSize: '0.72rem', color: '#848e9c' }}>기간:</span>
+              <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
+                style={{ ...s.paperInput, width: 130, fontSize: '0.74rem', padding: '2px 6px' }} />
+              <span style={{ fontSize: '0.72rem', color: '#848e9c' }}>~</span>
+              <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
+                style={{ ...s.paperInput, width: 130, fontSize: '0.74rem', padding: '2px 6px' }} />
+              <button style={{ ...s.cancelBtn, color: '#f0b90b', borderColor: 'rgba(240,185,11,0.35)' }}
+                onClick={() => {
+                  const from = dateFrom ? new Date(dateFrom).getTime() : 0;
+                  const to   = dateTo   ? new Date(dateTo).getTime() + 86399999 : Infinity;
+                  const rows = [['심볼','방향','수량','레버리지','투입마진(USDT)','진입가','청산가','실현손익(USDT)','ROI(%)','수수료(USDT)','사유','진입시간','종료시간']];
+                  (paperHistory ?? []).filter(h => h.exitTime >= from && h.exitTime <= to).forEach(h => {
+                    const margin = h.entryPrice * h.qty / h.leverage;
+                    const roi    = margin > 0 ? (h.pnl / margin * 100).toFixed(2) : '0';
+                    const reason = h.closeReason === 'tp' ? '익절' : h.closeReason === 'sl' ? '손절' : h.closeReason === 'liq' ? '청산' : '수동';
+                    const fmtT   = (ts: number) => new Date(ts).toLocaleString('ko-KR');
+                    rows.push([h.symbol, h.positionSide, String(h.qty), `${h.leverage}x`, margin.toFixed(2), String(h.entryPrice), String(h.exitPrice), h.pnl.toFixed(4), roi, h.fees.toFixed(4), reason, fmtT(h.entryTime), fmtT(h.exitTime)]);
+                  });
+                  downloadCsv(`paper_history_${dateFrom||'all'}_${dateTo||'all'}.csv`, rows);
+                }}>엑셀 내보내기</button>
+              <div style={{ flex: 1 }} />
+              {(paperHistory?.length ?? 0) > 0 && (
+                <button style={{ ...s.cancelBtn, color: '#f6465d', borderColor: 'rgba(246,70,93,0.3)' }} onClick={onPaperClearHistory}>전체 삭제</button>
+              )}
+            </div>
             <table style={s.table}>
               <thead>
                 <tr>
@@ -1109,17 +1242,7 @@ export function BottomPanel({
                   <th style={s.th}>수수료 (USDT)</th>
                   <th style={s.th}>사유</th>
                   <th style={s.th}>진입시간</th>
-                  <th style={{ ...s.th, whiteSpace: 'nowrap' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                      <span>종료시간</span>
-                      {(paperHistory?.length ?? 0) > 0 && (
-                        <button
-                          style={{ ...s.cancelBtn, color: '#f6465d', borderColor: 'rgba(246,70,93,0.3)', padding: '1px 6px', fontSize: '0.68rem' }}
-                          onClick={onPaperClearHistory}
-                        >전체 삭제</button>
-                      )}
-                    </div>
-                  </th>
+                  <th style={s.th}>종료시간</th>
                 </tr>
               </thead>
               <tbody>
@@ -1170,6 +1293,88 @@ export function BottomPanel({
             history={paperHistory ?? []}
             initialBalance={paperInitialBalance ?? 10000}
           />
+        )}
+
+        {/* Live history tab */}
+        {!isPaperMode && tab === 'live-history' && (
+          <div>
+            {/* Filter / Fetch / Export toolbar */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px 4px', borderBottom: '1px solid #1a2535' }}>
+              <span style={{ fontSize: '0.72rem', color: '#848e9c' }}>기간:</span>
+              <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
+                style={{ ...s.paperInput, width: 130, fontSize: '0.74rem', padding: '2px 6px' }} />
+              <span style={{ fontSize: '0.72rem', color: '#848e9c' }}>~</span>
+              <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
+                style={{ ...s.paperInput, width: 130, fontSize: '0.74rem', padding: '2px 6px' }} />
+              <button style={{ ...s.cancelBtn, color: '#3b8beb', borderColor: 'rgba(59,139,235,0.35)' }}
+                disabled={histFetching}
+                onClick={async () => {
+                  setHistFetching(true);
+                  try {
+                    const from = dateFrom ? new Date(dateFrom).getTime() : undefined;
+                    const to   = dateTo   ? new Date(dateTo).getTime() + 86399999 : undefined;
+                    await onFetchLiveHistory?.(from, to);
+                  } finally { setHistFetching(false); }
+                }}>{histFetching ? '조회 중...' : '조회'}</button>
+              <button style={{ ...s.cancelBtn, color: '#f0b90b', borderColor: 'rgba(240,185,11,0.35)' }}
+                onClick={() => {
+                  const rows = [['심볼','실현손익(USDT)','자산','시간','거래ID']];
+                  (liveHistory ?? []).forEach(h => {
+                    rows.push([h.symbol, h.income.toFixed(4), h.asset, new Date(h.time).toLocaleString('ko-KR'), h.tradeId]);
+                  });
+                  const from = dateFrom || 'all';
+                  const to   = dateTo   || 'all';
+                  downloadCsv(`live_history_${from}_${to}.csv`, rows);
+                }}>엑셀 내보내기</button>
+            </div>
+            <table style={s.table}>
+              <thead>
+                <tr>
+                  <th style={s.th}>심볼</th>
+                  <th style={s.th}>실현손익 (USDT)</th>
+                  <th style={s.th}>자산</th>
+                  <th style={s.th}>거래 ID</th>
+                  <th style={s.th}>시간</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(liveHistory?.length ?? 0) === 0 ? (
+                  <tr><td colSpan={5} style={s.empty}>기간을 설정하고 조회 버튼을 눌러주세요</td></tr>
+                ) : [...(liveHistory ?? [])].sort((a, b) => b.time - a.time).map(h => {
+                  const pnlCol = h.income >= 0 ? '#0ecb81' : '#f6465d';
+                  const d = new Date(h.time);
+                  const fmtT = `${d.toLocaleDateString('ko-KR', { month: '2-digit', day: '2-digit' })} ${d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+                  return (
+                    <tr key={h.tranId} style={s.tr}>
+                      <td style={s.td}>
+                        <div style={s.symbolCell}>
+                          <CoinLogo symbol={h.symbol} />
+                          <div style={{ ...s.symbolText, ...s.symbolClickable }} onClick={() => onSelectTicker(h.symbol)}>
+                            <span style={s.symbolName}>{extractCoin(h.symbol)}</span>
+                            <span style={s.symbolFull}>{h.symbol}</span>
+                          </div>
+                        </div>
+                      </td>
+                      <td style={{ ...s.td, color: pnlCol, fontWeight: 700 }}>
+                        <div style={s.priceCell}>
+                          <span>{h.income >= 0 ? '+' : ''}{h.income.toLocaleString('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 4 })}</span>
+                          <span style={s.priceUnit}>{h.asset}</span>
+                        </div>
+                      </td>
+                      <td style={{ ...s.td, color: '#848e9c' }}>{h.asset}</td>
+                      <td style={{ ...s.td, color: '#5d6776', fontSize: '0.72rem' }}>{h.tradeId}</td>
+                      <td style={{ ...s.td, color: '#5d6776', fontSize: '0.74rem', whiteSpace: 'nowrap' }}>{fmtT}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* Live asset tab */}
+        {!isPaperMode && tab === 'live-asset' && (
+          <LiveAssetChart history={liveHistory ?? []} />
         )}
 
         {/* Positions tab */}

@@ -37,6 +37,7 @@ import { SecurityFaqModal } from './components/Security/SecurityFaqModal';
 import { AltScannerModal } from './components/AltScanner/AltScannerModal';
 import type { AltTradeParams } from './components/AltScanner/AltScannerModal';
 import type { ScanCandidate } from './components/AltScanner/breakoutScanner';
+import type { LiveHistoryEntry } from './types/futures';
 import { AltPositionMonitor } from './components/AltScanner/AltPositionMonitor';
 import type { AltMeta } from './types/paperTrading';
 
@@ -159,7 +160,8 @@ function AppInner() {
   const [showUserBoard, setShowUserBoard] = useState(false);
   const [showSecurityFaq, setShowSecurityFaq] = useState(false);
   const [showAltScanner, setShowAltScanner] = useState(false);
-  const [altScanCandidates, setAltScanCandidates] = useState<ScanCandidate[]>([]);
+  // Per-interval cache: keeps results from all scanned intervals so reopening restores them
+  const [altScanCandidatesCache, setAltScanCandidatesCache] = useState<Record<string, ScanCandidate[]>>({});
   const [altScannerSnapshotMeta, setAltScannerSnapshotMeta] = useState<AltMeta | undefined>();
 
   // Live position AltMeta map: key = `${symbol}_${direction}` (persisted)
@@ -528,7 +530,15 @@ function AppInner() {
     placeTPSL: futuresPlaceTPSL,
     clientSlMap: futuresClientSlMap,
     removeClientSL: futuresRemoveClientSL,
+    fetchIncomeHistory: futuresFetchIncomeHistory,
   } = useBinanceFutures(binanceApiKey, binanceApiSecret, ticker);
+
+  // ── Live trading history ──────────────────────────────────────────────
+  const [liveHistory, setLiveHistory] = useState<LiveHistoryEntry[]>([]);
+  const fetchLiveHistory = useCallback(async (startTime?: number, endTime?: number) => {
+    const entries = await futuresFetchIncomeHistory(startTime, endTime);
+    setLiveHistory(entries);
+  }, [futuresFetchIncomeHistory]);
 
   // ── Chart indicators ──────────────────────────────────────────────────
   const [indicators, setIndicators] = useState<IndicatorConfig>(() => {
@@ -855,17 +865,23 @@ function AppInner() {
     const balance = paperTradingRef.current.balance;
     const leverage = params.leverage ?? 10;
     const marginType = params.marginType === 'CROSSED' ? 'cross' : 'isolated';
-    const riskAmount = balance * ((params.riskPct ?? 2) / 100);
     // For conditional trendline entry use triggerPriceAtNextClose as the effective entry for risk calc
     const isTrendlinePending =
       params.breakoutType === 'trendline' &&
       params.candidateStatus === 'PENDING' &&
       params.triggerPriceAtNextClose != null;
     const effectiveEntryPrice = isTrendlinePending ? params.triggerPriceAtNextClose! : params.entryPrice;
-    const slDistance = Math.abs(effectiveEntryPrice - params.slPrice);
-    const qty = slDistance > 0
-      ? parseFloat((riskAmount / slDistance).toFixed(6))
-      : parseFloat(((riskAmount * leverage) / effectiveEntryPrice).toFixed(6));
+    let qty: number;
+    if (params.sizeMode === 'margin' && params.marginUsdt != null && params.marginUsdt > 0) {
+      // Margin mode: qty = marginUsdt * leverage / entryPrice
+      qty = parseFloat(((params.marginUsdt * leverage) / effectiveEntryPrice).toFixed(6));
+    } else {
+      const riskAmount = balance * ((params.riskPct ?? 2) / 100);
+      const slDistance = Math.abs(effectiveEntryPrice - params.slPrice);
+      qty = slDistance > 0
+        ? parseFloat((riskAmount / slDistance).toFixed(6))
+        : parseFloat(((riskAmount * leverage) / effectiveEntryPrice).toFixed(6));
+    }
     if (qty <= 0) return;
     // Reject if current mark price has already blown past the SL (setup invalidated)
     const mark = markPricesMapRef.current[params.symbol] ?? 0;
@@ -923,7 +939,11 @@ function AppInner() {
   // Called whenever AltScanner updates its candidates (auto-scan result)
   // → also syncs TP/SL on existing matching paper orders/positions
   const handleAltCandidatesChange = useCallback((candidates: ScanCandidate[]) => {
-    setAltScanCandidates(candidates);
+    // Merge into per-interval cache (only overwrite when non-empty, preserving other intervals)
+    if (candidates.length > 0) {
+      const interval = candidates[0].interval;
+      setAltScanCandidatesCache(prev => ({ ...prev, [interval]: candidates }));
+    }
     for (const c of candidates) {
       // Update matching pending paper orders
       const orders = paperTradingRef.current.orders.filter(
@@ -1160,7 +1180,7 @@ function AppInner() {
       {showAltScanner && (
         <AltScannerModal
           symbols={tickers.map(t => t.symbol)}
-          initialCandidates={altScanCandidates}
+          initialCandidates={Object.values(altScanCandidatesCache).flat()}
           onCandidatesChange={handleAltCandidatesChange}
           onClose={() => setShowAltScanner(false)}
           onOpenInMain={(symbol) => {
@@ -1344,6 +1364,8 @@ function AppInner() {
           onPaperClearHistory={paperTrading.clearHistory}
           onOpenAltPosition={handleOpenAltPosition}
           liveAltMetaMap={liveAltMetaMap}
+          liveHistory={liveHistory}
+          onFetchLiveHistory={fetchLiveHistory}
         />
       )}
     </div>
