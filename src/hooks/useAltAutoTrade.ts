@@ -83,6 +83,8 @@ export function useAltAutoTrade({
     addLog(`🚀 자동 스캔 시작 — ${syms.length}개 심볼 × 3개 타임프레임 (예상 소요 약 ${estTotalSec}초, API 과부하 방지 속도제한 적용)`);
 
     let totalEntered = 0;
+    // Deduplicate across timeframes: each symbol+direction is entered at most once per run
+    const enteredThisRun = new Set<string>();
 
     for (let i = 0; i < SCAN_INTERVALS.length; i++) {
       const interval = SCAN_INTERVALS[i];
@@ -126,11 +128,17 @@ export function useAltAutoTrade({
       );
 
       for (const c of top) {
+        const key = `${c.symbol}_${c.direction}`;
+        if (enteredThisRun.has(key)) {
+          addLog(`⏭ [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — 이미 이번 실행에서 진입됨 (중복 건너뜀)`, 'info');
+          continue;
+        }
         addLog(
           `✅ [${interval}] 모의진입: ${c.symbol} ${c.direction.toUpperCase()} 점수${c.score} 진입${c.entryPrice.toFixed(4)} SL${c.slPrice.toFixed(4)} TP${c.tpPrice.toFixed(4)}`,
           'success',
         );
         onEnterRef.current(c);
+        enteredThisRun.add(key);
         totalEntered++;
       }
     }

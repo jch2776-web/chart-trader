@@ -517,6 +517,28 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
     await fetchData();
   }, [fetchData]);
 
+  // ── Close position with MARKET order (reduceOnly) ────────────────────────────
+  const closeMarket = useCallback(async (
+    symbol: string,
+    closeSide: 'BUY' | 'SELL',
+    qty: number,
+    positionSide: 'LONG' | 'SHORT' | 'BOTH' = 'BOTH',
+  ): Promise<void> => {
+    const key = apiKeyRef.current;
+    const secret = apiSecretRef.current;
+    if (!key || !secret) throw new Error('API 키가 설정되지 않았습니다');
+    const info = await fetchSymbolInfo(symbol);
+    if (!info) throw new Error(`${symbol} 호가 단위를 조회할 수 없습니다`);
+    const qtyStr = floorToStep(qty, info.stepSize);
+    const isHedge = positionSide !== 'BOTH';
+    await fetchSigned('/fapi/v1/order', key, secret, {
+      symbol, side: closeSide, type: 'MARKET', quantity: qtyStr, recvWindow: 10000,
+      ...(isHedge ? { positionSide } : { reduceOnly: 'true' }),
+    }, 'POST');
+    await new Promise(r => setTimeout(r, 600));
+    await fetchData();
+  }, [fetchData]);
+
   // ── Place TP/SL orders ────────────────────────────────────────────────────────
   const placeTPSL = useCallback(async (
     symbol: string,
@@ -636,5 +658,5 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
     }));
   }, []);
 
-  return { positions, orders, allPositions, allOrders, balance, loading, error, refetch: fetchData, placeOrder, cancelOrder, placeTPSL, clientSlMap, removeClientSL, fetchIncomeHistory };
+  return { positions, orders, allPositions, allOrders, balance, loading, error, refetch: fetchData, placeOrder, cancelOrder, placeTPSL, closeMarket, clientSlMap, removeClientSL, fetchIncomeHistory };
 }

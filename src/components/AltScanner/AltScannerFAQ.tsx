@@ -623,6 +623,7 @@ SHORT 청산가 = entryPrice × (1 + 1/leverage - 0.005)
           '조건부 주문: 다음 봉 종가 기준 close_above / close_below 체결',
           '예약 주문 탭에서 예상마진, 진입 방식, ALT 배지 확인 가능',
           '자동 스캔 시 pending 주문의 TP/SL 자동 갱신',
+          '모의 가격 피드(5초 REST 폴링)는 포지션뿐 아니라 예약 주문 심볼도 포함 — 화면에 없어도 지정가/조건부 주문이 정상 체결됨',
         ]} />
 
         <H2>차트 스냅샷 보기</H2>
@@ -641,24 +642,58 @@ SHORT 청산가 = entryPrice × (1 + 1/leverage - 0.005)
       <>
         <P>
           실전 진입 버튼은 바이낸스 선물 API를 통해 지정가 주문을 즉시 접수합니다.
+          TP/SL 등록, 포지션 자동 모니터링까지 세 단계로 동작합니다.
         </P>
 
-        <Card title="실전 진입 로직" accent="#0ecb81">
+        <Card title="① 실전 진입 로직" accent="#0ecb81">
           <Ul items={[
             '진입 방향 결정: direction → BUY(롱) / SELL(숏)',
             'PENDING 추세선 신호: triggerPriceAtNextClose로 지정가 접수 (봉마감 미확인 주의)',
             'TRIGGERED 신호: entryPrice로 즉시 지정가 접수',
-            '수량 계산: 모의와 동일한 riskPct 기준 (리스크% 모드만 지원)',
-            'TP/SL: OCO 주문으로 동시 접수 (지원 시)',
+            '수량 계산: 모의와 동일한 마진 기준 (실전 설정 패널에서 지정)',
+          ]} />
+        </Card>
+
+        <Card title="② TP/SL 지연 등록 (pendingLiveTPSLMap)" accent="#f0b90b">
+          <P>
+            진입 주문 직후에는 포지션이 아직 체결되지 않아 TP/SL을 즉시 등록할 수 없습니다.
+            대신 내부 대기 목록(pendingLiveTPSLMap)에 TP/SL 의도를 저장하고,
+            포지션이 실제로 열린 것이 확인되면 자동으로 등록합니다.
+          </P>
+          <Ul items={[
+            '진입 주문 성공 → TP/SL 의도를 localStorage에 저장 (최대 15분 유지)',
+            'futuresAllPositions 갱신마다 해당 심볼·방향의 실제 포지션 확인',
+            '포지션 확인되면 실제 체결 수량(positionAmt)으로 TP/SL 주문 자동 접수',
+            '15분 이내 포지션 미확인 시 만료 — 활동 로그에 경고 기록 후 수동 설정 필요',
+            '중복 접수 방지: inFlight 가드로 동일 심볼 TP/SL이 한 번만 호출됨',
+          ]} />
+        </Card>
+
+        <Card title="③ 자동 청산 모니터링 (LiveAltPositionMonitor)" accent="#3b8beb">
+          <P>
+            모의 거래의 AltPositionMonitor와 동일하게, 실전 포지션도 scanInterval 봉 마감마다
+            두 가지 조건을 자동으로 검사합니다.
+          </P>
+          <Table
+            headers={['조건', '동작']}
+            rows={[
+              ['now > validUntilTime (타임스탑)', 'MARKET reduceOnly 전량 청산 + liveAltMetaMap에서 제거'],
+              ['종가가 slPrice를 손실 방향으로 돌파 (구조적 무효화)', 'MARKET reduceOnly 전량 청산 + liveAltMetaMap에서 제거'],
+            ]}
+          />
+          <Ul items={[
+            '포지션이 실제로 열려 있을 때만 모니터링 컴포넌트가 마운트됨',
+            '동일 봉 마감 신호가 두 번 오더라도 한 번만 청산 (firedRef 가드)',
+            '청산 성공/실패 모두 활동 로그에 기록',
           ]} />
         </Card>
 
         <Card title="주의 사항" accent="#f6465d">
           <Ul items={[
             'PENDING 추세선 신호의 실전 진입은 봉마감을 기다리지 않음 — 봉 중간에 지정가 접수',
-            '시장 변동성에 따라 지정가가 체결되지 않을 수 있음',
+            '시장 변동성에 따라 지정가가 체결되지 않으면 TP/SL 대기가 15분 후 만료됨',
             '레버리지는 실전 설정에서 별도로 지정 (모의 설정과 독립)',
-            '잔고 및 마진 확인 후 진입할 것',
+            '앱을 새로고침하면 pendingLiveTPSLMap이 localStorage에서 복원되어 계속 대기',
           ]} />
         </Card>
       </>
@@ -771,7 +806,10 @@ SHORT 청산가 = entryPrice × (1 + 1/leverage - 0.005)
           <p>네, 모의 설정 패널에서 '수량 기준'을 '마진'으로 전환하면 투입할 USDT 마진을 직접 지정할 수 있습니다. 프리셋($50/$100/$200/$500) 또는 직접 입력이 가능합니다.</p>
         </Q>
         <Q q="실전 진입에서 TP/SL이 자동으로 설정되나요?">
-          <p>현재 실전 진입은 진입 주문만 접수하며, TP/SL은 별도로 포지션 탭에서 수동 설정해야 합니다. (향후 OCO 주문 자동화 예정)</p>
+          <p>네, 자동으로 등록됩니다. 단, 진입 주문 직후가 아닌 <strong>포지션이 실제로 체결된 것이 확인된 후</strong> 등록됩니다. 진입 즉시 내부 대기 목록(pendingLiveTPSLMap)에 TP/SL 의도가 저장되고, futuresAllPositions에서 해당 포지션이 열린 것이 감지되면 실제 체결 수량으로 TP/SL 주문이 자동 접수됩니다. 대기 시간은 최대 15분이며, 이 시간 안에 포지션이 확인되지 않으면 활동 로그에 경고가 기록되고 수동 설정이 필요합니다.</p>
+        </Q>
+        <Q q="실전 포지션도 타임스탑이나 SL 이탈 시 자동 청산되나요?">
+          <p>네. ALT추천으로 진입된 실전 포지션은 LiveAltPositionMonitor가 scanInterval 봉 마감마다 두 가지 조건을 감시합니다. ① 신호 유효 시간(validUntilTime) 초과 시 타임스탑, ② 종가가 slPrice를 손실 방향으로 돌파 시 구조적 무효화. 두 경우 모두 MARKET reduceOnly 주문으로 전량 청산 후 활동 로그에 기록됩니다. 단, 앱이 실행 중일 때만 동작하므로 브라우저 종료 시 모니터링이 중단됩니다.</p>
         </Q>
         <Q q="여러 인터벌의 신호가 동시에 있을 때 어떻게 선택하나요?">
           <p>상위 봉(4h, 1d)과 하위 봉(15m, 1h)이 동일 방향일 때 신뢰도가 높습니다. 상위 봉의 TRIGGERED 신호와 하위 봉의 TRIGGERED 신호가 일치하면 강한 진입 근거가 됩니다.</p>

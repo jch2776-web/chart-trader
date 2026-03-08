@@ -38,7 +38,7 @@ import { AltScannerModal } from './components/AltScanner/AltScannerModal';
 import type { AltTradeParams } from './components/AltScanner/AltScannerModal';
 import type { ScanCandidate } from './components/AltScanner/breakoutScanner';
 import type { LiveHistoryEntry } from './types/futures';
-import { AltPositionMonitor } from './components/AltScanner/AltPositionMonitor';
+import { AltPositionMonitor, LiveAltPositionMonitor } from './components/AltScanner/AltPositionMonitor';
 import type { AltMeta } from './types/paperTrading';
 import { useAltAutoTrade } from './hooks/useAltAutoTrade';
 
@@ -71,6 +71,16 @@ const CURRENT_USER = (() => {
 })();
 /** Returns a per-user namespaced key, or the bare key if not logged in. */
 const uk = (key: string) => CURRENT_USER ? `u:${CURRENT_USER}:${key}` : key;
+
+interface PendingLiveTPSL {
+  symbol: string;
+  direction: 'long' | 'short';
+  closeSide: 'BUY' | 'SELL';
+  tp?: number;
+  sl?: number;
+  plannedQty: number;
+  createdAt: number;
+}
 
 const DEFAULT_SETTINGS: TradeSettings = {
   leverage: 10,
@@ -172,6 +182,15 @@ function AppInner() {
   React.useEffect(() => {
     try { localStorage.setItem(uk('live-alt-meta'), JSON.stringify(liveAltMetaMap)); } catch {}
   }, [liveAltMetaMap]);
+
+  // Pending live TP/SL: placed after entry order fills (persisted across reload)
+  const [pendingLiveTPSLMap, setPendingLiveTPSLMap] = useState<Record<string, PendingLiveTPSL>>(() => {
+    try { return JSON.parse(localStorage.getItem(uk('pending-live-tpsl')) ?? '{}'); } catch { return {}; }
+  });
+  React.useEffect(() => {
+    try { localStorage.setItem(uk('pending-live-tpsl'), JSON.stringify(pendingLiveTPSLMap)); } catch {}
+  }, [pendingLiveTPSLMap]);
+  const inFlightTPSLRef = useRef(new Set<string>());
   const [showDisclaimer, setShowDisclaimer] = useState(() => !hasAgreedDisclaimer());
   const [multiPanelTickers, setMultiPanelTickers] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem(uk('multi-panels')) ?? '["BTCUSDT","ETHUSDT"]'); }
@@ -529,6 +548,7 @@ function AppInner() {
     placeOrder: futuresPlaceOrder,
     cancelOrder: futuresCancelOrder,
     placeTPSL: futuresPlaceTPSL,
+    closeMarket: futuresCloseMarket,
     clientSlMap: futuresClientSlMap,
     removeClientSL: futuresRemoveClientSL,
     fetchIncomeHistory: futuresFetchIncomeHistory,
@@ -635,30 +655,33 @@ function AppInner() {
   // Mark prices map: accumulated as the user browses charts; also refreshed via REST for paper positions
   const markPricesMapRef = useRef<Record<string, number>>({});
 
-  // Fetch REST mark prices for all paper positions whose symbol isn't the current chart
+  // Symbols for paper price feed: union of open positions and pending orders
+  const paperSymbolsKey = isPaperMode
+    ? [...new Set([
+        ...paperTrading.positions.map(p => p.symbol),
+        ...paperTrading.orders.map(o => o.symbol),
+      ])].sort().join(',')
+    : '';
+
+  // Fetch REST mark prices for all paper symbols (positions ∪ orders), call checkPrices after each update
   React.useEffect(() => {
-    if (!isPaperMode || paperTrading.positions.length === 0) return;
-    const symbols = [...new Set(paperTrading.positions.map(p => p.symbol))];
-    symbols.forEach(sym => {
-      fetch(`https://fapi.binance.com/fapi/v1/ticker/price?symbol=${sym}`)
-        .then(r => r.json())
-        .then((d: { price: string }) => {
-          markPricesMapRef.current[sym] = parseFloat(d.price);
-        })
-        .catch(() => {});
-    });
-    const interval = window.setInterval(() => {
+    if (!isPaperMode || paperSymbolsKey === '') return;
+    const symbols = paperSymbolsKey.split(',');
+    const fetchAndCheck = () => {
       symbols.forEach(sym => {
         fetch(`https://fapi.binance.com/fapi/v1/ticker/price?symbol=${sym}`)
           .then(r => r.json())
           .then((d: { price: string }) => {
             markPricesMapRef.current[sym] = parseFloat(d.price);
+            paperTradingRef.current.checkPrices(markPricesMapRef.current);
           })
           .catch(() => {});
       });
-    }, 5000);
+    };
+    fetchAndCheck();
+    const interval = window.setInterval(fetchAndCheck, 5000);
     return () => window.clearInterval(interval);
-  }, [isPaperMode, paperTrading.positions.length]);
+  }, [isPaperMode, paperSymbolsKey]);
 
   // paperPlaceOrder: drop-in for futuresPlaceOrder in paper mode
   // price === 0 → market order (execute immediately)
@@ -1014,7 +1037,17 @@ function AppInner() {
              p.altMeta?.direction === c.direction,
       );
       for (const p of positions) {
-        paperTradingRef.current.setTPSL(p.id, c.tpPrice, c.slPrice);
+        const isLong = p.altMeta!.direction === 'long';
+        // Only apply new TP if it remains in profit territory relative to the actual entry price.
+        // e.g. if market dropped below LONG entry and scanner re-anchors TP below entry, skip update.
+        const safeTP = isLong
+          ? (c.tpPrice > p.entryPrice ? c.tpPrice : p.tpPrice)
+          : (c.tpPrice < p.entryPrice ? c.tpPrice : p.tpPrice);
+        // Only apply new SL if it remains in loss territory (i.e. correct side of entry).
+        const safeSL = isLong
+          ? (c.slPrice < p.entryPrice ? c.slPrice : p.slPrice)
+          : (c.slPrice > p.entryPrice ? c.slPrice : p.slPrice);
+        paperTradingRef.current.setTPSL(p.id, safeTP, safeSL);
       }
     }
   }, []);
@@ -1068,16 +1101,60 @@ function AppInner() {
       await futuresPlaceOrder(side, effectiveEntryPrice, qty, leverage, liveMarginType, false, params.symbol);
       addLog('info', `[ALT실전] 진입 주문 — ${side} ${qty} ${params.symbol} @ ${effectiveEntryPrice}`);
       setLiveAltMetaMap(prev => ({ ...prev, [`${params.symbol}_${params.direction}`]: liveMeta }));
-      try {
-        await futuresPlaceTPSL(params.symbol, closeSide, qty, params.tpPrice, params.slPrice);
-        addLog('info', `[ALT실전] TP/SL 설정 — TP:${params.tpPrice} SL:${params.slPrice}`);
-      } catch (e) {
-        addLog('error', `[ALT실전] TP/SL 실패: ${e instanceof Error ? e.message : 'unknown'}`);
-      }
+      // Register pending TP/SL — applied once the position is confirmed open via allPositions update
+      const pendingKey = `${params.symbol}_${params.direction}`;
+      setPendingLiveTPSLMap(prev => ({
+        ...prev,
+        [pendingKey]: {
+          symbol: params.symbol, direction: params.direction, closeSide,
+          tp: params.tpPrice, sl: params.slPrice,
+          plannedQty: qty, createdAt: Date.now(),
+        },
+      }));
+      addLog('info', `[ALT실전] TP/SL 대기 등록 — 포지션 확인 후 자동 적용`);
     } catch (e) {
       addLog('error', `[ALT실전] 진입 실패: ${e instanceof Error ? e.message : 'unknown'}`);
     }
-  }, [handleTickerSelect, addLog, futuresPlaceOrder, futuresPlaceTPSL, binanceApiKey, binanceApiSecret]);
+  }, [handleTickerSelect, addLog, futuresPlaceOrder, binanceApiKey, binanceApiSecret]);
+
+  // ── Pending live TP/SL processor ─────────────────────────────────────
+  // Stable ref so the effect doesn't re-subscribe when futuresPlaceTPSL identity changes
+  const futuresPlaceTPSLRef = useRef(futuresPlaceTPSL);
+  futuresPlaceTPSLRef.current = futuresPlaceTPSL;
+
+  React.useEffect(() => {
+    const pending = Object.entries(pendingLiveTPSLMap);
+    if (pending.length === 0) return;
+    const EXPIRE_MS = 15 * 60 * 1000;
+    const now = Date.now();
+    for (const [key, entry] of pending) {
+      // Discard entries older than 15 minutes
+      if (now - entry.createdAt > EXPIRE_MS) {
+        addLog('error', `[ALT실전] TP/SL 대기 만료(15분) — ${entry.symbol} 수동 설정 필요`);
+        setPendingLiveTPSLMap(prev => { const n = { ...prev }; delete n[key]; return n; });
+        continue;
+      }
+      if (inFlightTPSLRef.current.has(key)) continue;
+      // Check if a matching position is now open
+      const pos = futuresAllPositions.find(p =>
+        p.symbol === entry.symbol &&
+        Math.abs(p.positionAmt) > 0 &&
+        (entry.direction === 'long' ? p.positionAmt > 0 : p.positionAmt < 0),
+      );
+      if (!pos) continue;
+      const actualQty = Math.abs(pos.positionAmt);
+      inFlightTPSLRef.current.add(key);
+      futuresPlaceTPSLRef.current(entry.symbol, entry.closeSide, actualQty, entry.tp, entry.sl)
+        .then(() => {
+          addLog('info', `[ALT실전] TP/SL 등록 완료 — ${entry.symbol} qty:${actualQty} TP:${entry.tp ?? '—'} SL:${entry.sl ?? '—'}`);
+          setPendingLiveTPSLMap(prev => { const n = { ...prev }; delete n[key]; return n; });
+        })
+        .catch((e: unknown) => {
+          addLog('error', `[ALT실전] TP/SL 실패: ${e instanceof Error ? e.message : 'unknown'}`);
+        })
+        .finally(() => { inFlightTPSLRef.current.delete(key); });
+    }
+  }, [futuresAllPositions, pendingLiveTPSLMap, addLog]);
 
   // ── ALT position badge click: open AltScanner modal in snapshot view ─
   const handleOpenAltPosition = useCallback((meta: AltMeta) => {
@@ -1105,7 +1182,33 @@ function AppInner() {
             }}
           />
         ))
-    : null;
+    : Object.entries(liveAltMetaMap).flatMap(([key, meta]) => {
+        const pos = futuresAllPositions.find(p =>
+          p.symbol === meta.symbol &&
+          Math.abs(p.positionAmt) > 0 &&
+          (meta.direction === 'long' ? p.positionAmt > 0 : p.positionAmt < 0),
+        );
+        if (!pos) return [];
+        return [(
+          <LiveAltPositionMonitor
+            key={key}
+            meta={meta}
+            positionSide={pos.positionSide}
+            qty={Math.abs(pos.positionAmt)}
+            onCloseMarket={(symbol, closeSide, qty, positionSide, reason) => {
+              addLog('info', `[ALT실전] ${symbol} 자동청산 (${reason === 'time-stop' ? '타임스탑' : '구조적 무효화'}) — MARKET ${closeSide} ${qty}`);
+              futuresCloseMarket(symbol, closeSide, qty, positionSide)
+                .then(() => {
+                  addLog('info', `[ALT실전] ${symbol} 청산 완료`);
+                  setLiveAltMetaMap(prev => { const n = { ...prev }; delete n[key]; return n; });
+                })
+                .catch((e: unknown) => {
+                  addLog('error', `[ALT실전] ${symbol} 청산 실패: ${e instanceof Error ? e.message : 'unknown'}`);
+                });
+            }}
+          />
+        )];
+      });
 
   return (
     <div style={styles.root}>
