@@ -130,6 +130,24 @@ async function fetchSigned<T>(
   return JSON.parse(safeText) as T;
 }
 
+// ── Position mode check (cached 5 min) ───────────────────────────────────────
+const _positionModeCache: Record<string, { isDual: boolean; expiry: number }> = {};
+
+/**
+ * Returns true if the Binance Futures account is in Hedge Mode (dualSidePosition=true),
+ * false for One-way Mode. Result is cached for 5 minutes per API key.
+ */
+export async function getPositionMode(apiKey: string, apiSecret: string): Promise<boolean> {
+  const cacheKey = apiKey.slice(-8);
+  const cached = _positionModeCache[cacheKey];
+  if (cached && Date.now() < cached.expiry) return cached.isDual;
+  const res = await fetchSigned<{ dualSidePosition: boolean }>(
+    '/fapi/v1/positionSide/dual', apiKey, apiSecret,
+  );
+  _positionModeCache[cacheKey] = { isDual: res.dualSidePosition, expiry: Date.now() + 5 * 60 * 1000 };
+  return res.dualSidePosition;
+}
+
 // ── Symbol precision info (cached, no auth required) ─────────────────────────
 const _infoCache: Record<string, { tickSize: number; stepSize: number }> = {};
 

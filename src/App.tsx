@@ -8,7 +8,7 @@ import type { TradeSettings, ActivityLog, TelegramSettings } from './types/trade
 import type { ConditionalOrderPair } from './types/conditionalOrder';
 import { useBinanceKlines } from './hooks/useBinanceKlines';
 import { useBinanceWS } from './hooks/useBinanceWS';
-import { useBinanceFutures } from './hooks/useBinanceFutures';
+import { useBinanceFutures, getPositionMode } from './hooks/useBinanceFutures';
 import { usePaperTrading } from './hooks/usePaperTrading';
 import { useTickers } from './hooks/useTickers';
 import { use24hStats } from './hooks/use24hStats';
@@ -982,8 +982,9 @@ function AppInner() {
     setShowAltScanner(false);
   }, [handleTickerSelect]);
 
-  // Forward ref for handleAltLiveTrade — populated after it's defined below
-  const handleAltLiveTradeRef = useRef<((params: AltTradeParams) => void) | null>(null);
+  // Forward refs — populated after their targets are defined below
+  const handleAltLiveTradeRef    = useRef<((params: AltTradeParams) => void) | null>(null);
+  const altAutoTradeSetActiveRef = useRef<((v: boolean) => void) | null>(null);
 
   // ── AltScanner auto-trade: convert ScanCandidate → AltTradeParams and route by mode ──
   const handleAutoTradeScan = useCallback((c: ScanCandidate) => {
@@ -1018,7 +1019,17 @@ function AppInner() {
         addLog('info', '[자동매매] 실전 모드이지만 API 키 미설정 — 건너뜀');
         return;
       }
-      handleAltLiveTradeRef.current?.(params);
+      getPositionMode(binanceApiKey, binanceApiSecret).then(isDual => {
+        if (isDual) {
+          addLog('error', '[자동매매] Hedge(헤지) 모드 감지 — 단방향(One-way) 필수. 자동매매 OFF, 모의 모드로 전환.');
+          altAutoTradeSetActiveRef.current?.(false);
+          setAutoTradeMode('paper');
+          return;
+        }
+        handleAltLiveTradeRef.current?.(params);
+      }).catch(() => {
+        addLog('error', '[자동매매] 포지션 모드 확인 실패 — 진입 건너뜀. 네트워크 또는 API 권한 확인.');
+      });
     } else {
       handleAltPaperTrade(params);
     }
@@ -1033,6 +1044,7 @@ function AppInner() {
     },
     enterLabel: autoTradeMode === 'live' ? '실전진입' : '모의진입',
   });
+  altAutoTradeSetActiveRef.current = altAutoTrade.setActive;
 
   // Called whenever AltScanner updates its candidates (auto-scan result)
   // → also syncs TP/SL on existing matching paper orders/positions
@@ -1079,22 +1091,45 @@ function AppInner() {
       addLog('error', '[ALT실전] API 키가 설정되지 않았습니다');
       return;
     }
+    // ── Position mode check: One-way (단방향) 필수 ────────────────────────
+    try {
+      const isDual = await getPositionMode(binanceApiKey, binanceApiSecret);
+      if (isDual) {
+        addLog('error', '[ALT실전] Hedge(헤지) 모드 감지 — 단방향(One-way) 모드 필수. 바이낸스에서 포지션 모드 변경 후 재시도.');
+        return;
+      }
+    } catch {
+      addLog('error', '[ALT실전] 포지션 모드 확인 실패 — 네트워크 또는 API 권한 확인');
+      return;
+    }
+
     const side: 'BUY' | 'SELL' = params.direction === 'long' ? 'BUY' : 'SELL';
     const closeSide: 'BUY' | 'SELL' = side === 'BUY' ? 'SELL' : 'BUY';
     const leverage = params.leverage ?? 10;
     const liveMarginType: 'CROSSED' | 'ISOLATED' = params.marginType ?? 'ISOLATED';
     const balance = futuresBalanceRef.current;
-    const riskAmount = balance * ((params.riskPct ?? 2) / 100);
     // For trendline PENDING: use triggerPriceAtNextClose as effective entry (binance can't do candle-close conditional)
     const isTrendlinePending =
       params.breakoutType === 'trendline' &&
       params.candidateStatus === 'PENDING' &&
       params.triggerPriceAtNextClose != null;
     const effectiveEntryPrice = isTrendlinePending ? params.triggerPriceAtNextClose! : params.entryPrice;
-    const slDistance = Math.abs(effectiveEntryPrice - params.slPrice);
-    const qty = slDistance > 0
-      ? parseFloat((riskAmount / slDistance).toFixed(6))
-      : parseFloat(((riskAmount * leverage) / effectiveEntryPrice).toFixed(6));
+
+    // ── Quantity calculation: margin mode vs risk% mode ───────────────────
+    let qty: number;
+    if (params.sizeMode === 'margin' && (params.marginUsdt ?? 0) > 0) {
+      if (params.marginUsdt! > balance) {
+        addLog('error', `[ALT실전] 잔고 부족: 필요 마진 $${params.marginUsdt} > 가용 잔고 $${balance.toFixed(2)} — 건너뜀`);
+        return;
+      }
+      qty = parseFloat(((params.marginUsdt! * leverage) / effectiveEntryPrice).toFixed(6));
+    } else {
+      const riskAmount = balance * ((params.riskPct ?? 2) / 100);
+      const slDistance = Math.abs(effectiveEntryPrice - params.slPrice);
+      qty = slDistance > 0
+        ? parseFloat((riskAmount / slDistance).toFixed(6))
+        : parseFloat(((riskAmount * leverage) / effectiveEntryPrice).toFixed(6));
+    }
     if (qty <= 0) {
       addLog('error', '[ALT실전] 수량 계산 실패: 잔고 또는 SL 거리를 확인하세요');
       return;

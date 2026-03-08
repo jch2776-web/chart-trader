@@ -609,7 +609,7 @@ function TradingInfoPanel({
             { icon: '💰', title: '수량 계산', desc: `잔고의 ${liveRiskPct}% 리스크 기준으로 수량이 자동 산출됩니다. (수량 = 잔고 × ${liveRiskPct}% ÷ SL 거리)` },
             { icon: '⚙️', title: '레버리지 · 마진', desc: `현재 설정: 레버리지 ${liveLeverage}x · ${liveMarginType === 'ISOLATED' ? '격리 마진(Isolated)' : '교차 마진(Cross)'}. ⚙ 실전 설정 버튼으로 변경 가능합니다.` },
             { icon: '🎯', title: 'TP/SL 자동 설정', desc: '진입 주문 체결 직후 TP(익절)와 SL(손절) 조건부 주문이 자동으로 등록됩니다.' },
-            { icon: '⚠️', title: '헤지 모드 필수', desc: '바이낸스 선물 계정이 반드시 헤지 모드(Hedge Mode)로 설정되어 있어야 합니다. 단방향 모드에서는 오류가 발생합니다.' },
+            { icon: '⚠️', title: '단방향(One-way) 필수', desc: '바이낸스 선물 계정이 단방향(One-way) 모드여야 합니다. Hedge 모드는 미지원 — positionSide를 미전송하므로 Hedge 계정에서는 오류가 발생합니다. 진입 전 자동으로 모드를 확인하며, Hedge 감지 시 진입이 중단됩니다.' },
             { icon: '🔑', title: 'API 키 필요', desc: '설정 > API 키에 바이낸스 Futures API Key / Secret이 입력되어 있어야 실전 주문이 가능합니다.' },
             { icon: '📌', title: '알아두세요', desc: '실전 주문 접수 후 바이낸스 앱에서 체결 여부를 반드시 확인하세요. 미체결 주문은 수동으로 취소 가능합니다.' },
           ].map(({ icon, title, desc }) => (
