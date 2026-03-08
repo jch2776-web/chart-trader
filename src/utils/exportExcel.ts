@@ -1,8 +1,7 @@
 /**
  * Styled Excel export via HTML-to-XLS technique.
- * Generates an Excel-compatible HTML table with full inline styling
- * (background colors, text colors, bold, alignment).
- * Opens natively in Excel / LibreOffice Calc as .xls.
+ * Generates an Excel-compatible HTML table with full inline styling.
+ * Uses a clean light theme for readability in Excel / LibreOffice Calc.
  */
 
 export interface ExcelHeader {
@@ -20,20 +19,20 @@ export interface ExcelCell {
 }
 
 const COLOR_MAP: Record<CellColor, string> = {
-  green:   '#0ecb81',
-  red:     '#f6465d',
-  yellow:  '#f0b90b',
-  orange:  '#f59e42',
-  blue:    '#3b8beb',
-  gray:    '#848e9c',
-  default: '#d4d9e1',
+  green:   '#1a7a4a',
+  red:     '#cc2222',
+  yellow:  '#9a6d00',
+  orange:  '#c47400',
+  blue:    '#1a5faa',
+  gray:    '#666666',
+  default: '#1a1a1a',
 };
 
 function cellHtml(cell: ExcelCell): string {
   const color = COLOR_MAP[cell.color ?? 'default'];
   const bold  = cell.bold ? 'font-weight:bold;' : '';
   const align = `text-align:${cell.align ?? 'left'};`;
-  const style = `color:${color};${bold}${align}padding:5px 10px;border:1px solid #2a3545;white-space:nowrap;font-family:Consolas,"SF Mono",monospace;font-size:12px;`;
+  const style = `color:${color};${bold}${align}padding:5px 10px;border:1px solid #d0d0d0;white-space:nowrap;font-family:Calibri,Arial,sans-serif;font-size:12px;`;
   return `<td style="${style}">${String(cell.value).replace(/&/g, '&amp;').replace(/</g, '&lt;')}</td>`;
 }
 
@@ -47,11 +46,11 @@ export function downloadExcel(
   ).join('');
 
   const headerCells = headers.map(h =>
-    `<th style="background:#1e2d3d;color:#f0b90b;font-weight:bold;padding:6px 10px;border:1px solid #3a4a5c;white-space:nowrap;font-family:Consolas,'SF Mono',monospace;font-size:12px;text-align:center;">${h.label}</th>`
+    `<th style="background:#3d4a5c;color:#ffffff;font-weight:bold;padding:6px 10px;border:1px solid #2a3545;white-space:nowrap;font-family:Calibri,Arial,sans-serif;font-size:12px;text-align:center;">${h.label}</th>`
   ).join('');
 
   const bodyRows = rows.map((row, i) => {
-    const bg = i % 2 === 0 ? '#0e1823' : '#111c27';
+    const bg = i % 2 === 0 ? '#ffffff' : '#f4f6f8';
     const cells = row.map(cellHtml).join('');
     return `<tr style="background:${bg};">${cells}</tr>`;
   }).join('');
@@ -79,9 +78,9 @@ export function downloadExcel(
   </xml><![endif]-->
 </head>
 <body>
-  <table style="border-collapse:collapse;background:#0e1823;">
+  <table style="border-collapse:collapse;background:#ffffff;">
     <colgroup>${colGroup}</colgroup>
-    <thead><tr style="background:#1e2d3d;">${headerCells}</tr></thead>
+    <thead><tr style="background:#3d4a5c;">${headerCells}</tr></thead>
     <tbody>${bodyRows}</tbody>
   </table>
 </body>

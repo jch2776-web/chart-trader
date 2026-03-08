@@ -12,7 +12,7 @@ interface Props {
 /**
  * Invisible component that watches a paper position opened from AltScanner.
  * Closes the position automatically when:
- *   1. Time-stop: now > meta.validUntilTime (reason: 'manual')
+ *   1. Time-stop: now > meta.validUntilTime (reason: 'expired')
  *   2. Structural invalidation: close crosses the SL in the direction of loss (reason: 'sl')
  *
  * Renders nothing — mount one per alt-scanned paper position.
@@ -23,7 +23,7 @@ export function AltPositionMonitor({ meta, onClose }: Props) {
 
     // ── Time-stop ──────────────────────────────────────────────────────────
     if (Date.now() > meta.validUntilTime) {
-      onClose(candle.close, 'manual');
+      onClose(candle.close, 'expired');
       return;
     }
 

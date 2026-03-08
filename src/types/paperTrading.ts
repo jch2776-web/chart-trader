@@ -58,7 +58,7 @@ export interface PaperHistoryEntry {
   fees: number;               // total taker fees (entry + exit)
   entryTime: number;
   exitTime: number;
-  closeReason: 'manual' | 'tp' | 'sl' | 'liq';
+  closeReason: 'manual' | 'tp' | 'sl' | 'liq' | 'expired';
 }
 
 export interface PaperState {

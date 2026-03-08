@@ -1212,7 +1212,8 @@ export function BottomPanel({
                     .map(h => {
                       const margin = h.entryPrice * h.qty / h.leverage;
                       const roi    = margin > 0 ? (h.pnl / margin * 100).toFixed(2) : '0';
-                      const reason = h.closeReason === 'tp' ? '익절' : h.closeReason === 'sl' ? '손절' : h.closeReason === 'liq' ? '청산' : '수동';
+                      const reason = h.closeReason === 'tp' ? '익절' : h.closeReason === 'sl' ? '손절' : h.closeReason === 'liq' ? '청산' : h.closeReason === 'expired' ? '타임스탑' : '수동';
+                      const reasonClr = h.closeReason === 'tp' ? 'green' : h.closeReason === 'expired' ? 'orange' : 'red';
                       const pnlClr = h.pnl >= 0 ? 'green' : 'red';
                       return [
                         { value: h.symbol },
@@ -1225,7 +1226,7 @@ export function BottomPanel({
                         { value: `${h.pnl >= 0 ? '+' : ''}${h.pnl.toFixed(4)}`, color: pnlClr, bold: true, align: 'right' },
                         { value: `${Number(roi) >= 0 ? '+' : ''}${roi}%`, color: pnlClr, align: 'right' },
                         { value: `-${h.fees.toFixed(4)}`, color: 'orange', align: 'right' },
-                        { value: reason, color: h.closeReason === 'tp' ? 'green' : 'red' },
+                        { value: reason, color: reasonClr },
                         { value: fmtT(h.entryTime) },
                         { value: fmtT(h.exitTime) },
                       ] as ExcelCell[];
@@ -1265,8 +1266,8 @@ export function BottomPanel({
                 {(paperHistory?.length ?? 0) === 0 ? (
                   <tr><td colSpan={12} style={s.empty}>거래 히스토리 없음</td></tr>
                 ) : paperHistory!.map(h => {
-                  const reasonLabel = h.closeReason === 'tp' ? '익절' : h.closeReason === 'sl' ? '손절' : h.closeReason === 'liq' ? '청산' : '수동';
-                  const reasonColor = h.closeReason === 'tp' ? '#0ecb81' : h.closeReason === 'liq' ? '#f59e42' : '#f6465d';
+                  const reasonLabel = h.closeReason === 'tp' ? '익절' : h.closeReason === 'sl' ? '손절' : h.closeReason === 'liq' ? '청산' : h.closeReason === 'expired' ? '타임스탑' : '수동';
+                  const reasonColor = h.closeReason === 'tp' ? '#0ecb81' : h.closeReason === 'liq' ? '#f59e42' : h.closeReason === 'expired' ? '#f0b90b' : '#f6465d';
                   const histMargin = h.entryPrice * h.qty / h.leverage;
                   const roi = histMargin > 0 ? (h.pnl / histMargin) * 100 : 0;
                   const pnlCol = h.pnl >= 0 ? '#0ecb81' : '#f6465d';

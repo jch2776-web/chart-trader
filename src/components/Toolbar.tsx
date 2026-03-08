@@ -194,10 +194,7 @@ export function Toolbar({
 
       {/* Multi-panel toggle */}
       <button
-        style={{
-          ...styles.multiBtn,
-          ...(isMultiMode ? styles.multiBtnActive : {}),
-        }}
+        style={{ ...styles.featureBtn, ...(isMultiMode ? styles.featureBtnBlue : {}) }}
         onClick={onToggleMultiMode}
         title={isMultiMode ? '단일 차트로 돌아가기' : '다중 분할 모니터링'}
       >
@@ -206,7 +203,7 @@ export function Toolbar({
 
       {/* Paper trading toggle */}
       <button
-        style={{ ...styles.paperBtn, ...(isPaperMode ? styles.paperBtnActive : {}) }}
+        style={{ ...styles.featureBtn, ...(isPaperMode ? styles.featureBtnYellow : {}) }}
         onClick={onTogglePaperMode}
         title={isPaperMode ? '모의거래 모드 ON — 클릭하여 해제' : '모의거래 모드 (실제 주문 없음)'}
       >
@@ -215,7 +212,7 @@ export function Toolbar({
 
       {/* Board button */}
       <button
-        style={styles.boardBtn}
+        style={styles.featureBtn}
         onClick={onOpenBoard}
         title="도형 게시판"
       >
@@ -224,7 +221,7 @@ export function Toolbar({
 
       {/* Alt scanner button */}
       <button
-        style={styles.altScannerBtn}
+        style={styles.featureBtn}
         onClick={onOpenAltScanner}
         title="알트추천 (돌파 스캐너)"
       >
@@ -232,51 +229,35 @@ export function Toolbar({
       </button>
 
       {/* Auto trade toggle */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 2 }}>
-        <button
-          onClick={onToggleAutoTrade}
-          title={isAutoTradeActive ? '자동 모의거래 끄기' : '자동 모의거래 켜기 (매 정각 1h→4h→1d 스캔, 90점+ 상위 2개 자동 진입)'}
-          style={{
-            display: 'flex', alignItems: 'center', gap: 5,
-            padding: '3px 9px', borderRadius: 4, cursor: 'pointer',
-            fontSize: '0.76rem', fontWeight: 700, transition: 'all 0.15s',
-            border: isAutoTradeActive ? '1px solid rgba(14,203,129,0.6)' : '1px solid rgba(132,142,156,0.35)',
-            background: isAutoTradeActive ? 'rgba(14,203,129,0.14)' : 'rgba(132,142,156,0.08)',
-            color: isAutoTradeActive ? '#0ecb81' : '#5d6776',
-          }}
-        >
-          {/* Toggle pill */}
+      <button
+        onClick={onToggleAutoTrade}
+        title={isAutoTradeActive ? '자동 모의거래 끄기' : '자동 모의거래 켜기 (매 정각 1h→4h→1d 스캔, 90점+ 상위 2개 자동 진입)'}
+        style={{ ...styles.featureBtn, ...(isAutoTradeActive ? styles.featureBtnGreen : {}), display: 'flex', alignItems: 'center', gap: 5 }}
+      >
+        <span style={{
+          display: 'inline-block', width: 26, height: 13, borderRadius: 7, position: 'relative',
+          background: isAutoTradeActive ? '#0ecb81' : '#3a4455', transition: 'background 0.2s', flexShrink: 0,
+        }}>
           <span style={{
-            display: 'inline-block', width: 28, height: 14, borderRadius: 7, position: 'relative',
-            background: isAutoTradeActive ? '#0ecb81' : '#2a3545', transition: 'background 0.2s',
-            flexShrink: 0,
-          }}>
-            <span style={{
-              display: 'block', width: 10, height: 10, borderRadius: '50%', background: '#fff',
-              position: 'absolute', top: 2,
-              left: isAutoTradeActive ? 16 : 2,
-              transition: 'left 0.2s',
-            }} />
-          </span>
-          {autoTradeScanning ? '⟳ 스캔 중...' : '⚡ 자동매매'}
-        </button>
-        {isAutoTradeActive && !autoTradeScanning && (
-          <button
-            onClick={onTriggerAutoTradeNow}
-            title="지금 즉시 스캔 실행"
-            style={{
-              padding: '3px 7px', borderRadius: 4, cursor: 'pointer',
-              fontSize: '0.72rem', fontWeight: 600,
-              border: '1px solid rgba(240,185,11,0.4)',
-              background: 'rgba(240,185,11,0.1)', color: '#f0b90b',
-            }}
-          >▶ 즉시실행</button>
-        )}
-      </div>
+            display: 'block', width: 9, height: 9, borderRadius: '50%', background: '#fff',
+            position: 'absolute', top: 2,
+            left: isAutoTradeActive ? 15 : 2,
+            transition: 'left 0.2s',
+          }} />
+        </span>
+        {autoTradeScanning ? '⟳ 스캔 중...' : '⚡ 자동매매'}
+      </button>
+      {isAutoTradeActive && !autoTradeScanning && (
+        <button
+          onClick={onTriggerAutoTradeNow}
+          title="지금 즉시 스캔 실행"
+          style={{ ...styles.featureBtn, ...styles.featureBtnYellow }}
+        >▶ 즉시실행</button>
+      )}
 
       {/* User board button */}
       <button
-        style={styles.boardBtn}
+        style={styles.featureBtn}
         onClick={onOpenUserBoard}
         title="유저 게시판"
       >
@@ -285,7 +266,7 @@ export function Toolbar({
 
       {/* Security FAQ button */}
       <button
-        style={styles.securityBtn}
+        style={styles.featureBtn}
         onClick={onOpenSecurityFaq}
         title="보안 FAQ"
       >
@@ -424,25 +405,35 @@ const styles: Record<string, React.CSSProperties> = {
     minWidth: 30,
     textAlign: 'center' as const,
   },
-  // ── Multi-panel toggle ────────────────────────────────────────────────────
-  multiBtn: {
+  // ── Feature buttons (right side) — shared base ───────────────────────────
+  featureBtn: {
     background: 'none',
     border: '1px solid #2a2e39',
     borderRadius: 4,
     color: '#848e9c',
     cursor: 'pointer',
-    fontSize: '0.85rem',
-    fontWeight: 500,
+    fontSize: '0.82rem',
+    fontWeight: 600,
     padding: '4px 10px',
     transition: 'all 0.1s',
     fontFamily: 'inherit',
     flexShrink: 0,
     whiteSpace: 'nowrap',
   },
-  multiBtnActive: {
-    borderColor: '#3b8beb',
+  featureBtnYellow: {
+    borderColor: 'rgba(240,185,11,0.55)',
+    color: '#f0b90b',
+    background: 'rgba(240,185,11,0.10)',
+  },
+  featureBtnGreen: {
+    borderColor: 'rgba(14,203,129,0.55)',
+    color: '#0ecb81',
+    background: 'rgba(14,203,129,0.10)',
+  },
+  featureBtnBlue: {
+    borderColor: 'rgba(59,139,235,0.55)',
     color: '#3b8beb',
-    background: 'rgba(59,139,235,0.1)',
+    background: 'rgba(59,139,235,0.10)',
   },
   // ── Indicator toggles ────────────────────────────────────────────────────
   indicatorGroup: {
@@ -462,73 +453,6 @@ const styles: Record<string, React.CSSProperties> = {
   },
   indicatorDWActive: {
     borderColor: '#22d3ee', color: '#22d3ee', background: 'rgba(34,211,238,0.1)',
-  },
-  // ── Paper trading toggle ──────────────────────────────────────────────────
-  paperBtn: {
-    background: 'none',
-    border: '1px solid #2a2e39',
-    borderRadius: 4,
-    color: '#848e9c',
-    cursor: 'pointer',
-    fontSize: '0.85rem',
-    fontWeight: 500,
-    padding: '4px 10px',
-    transition: 'all 0.1s',
-    fontFamily: 'inherit',
-    flexShrink: 0,
-    whiteSpace: 'nowrap',
-  },
-  paperBtnActive: {
-    borderColor: '#f0b90b',
-    color: '#f0b90b',
-    background: 'rgba(240,185,11,0.12)',
-  },
-  // ── Alt scanner button ───────────────────────────────────────────────────
-  altScannerBtn: {
-    background: 'none',
-    border: '1px solid rgba(240,185,11,0.45)',
-    borderRadius: 4,
-    color: '#f0b90b',
-    cursor: 'pointer',
-    fontSize: '0.85rem',
-    fontWeight: 500,
-    padding: '4px 10px',
-    transition: 'all 0.1s',
-    fontFamily: 'inherit',
-    flexShrink: 0,
-    whiteSpace: 'nowrap',
-    opacity: 0.85,
-  },
-  // ── Board button ──────────────────────────────────────────────────────────
-  boardBtn: {
-    background: 'none',
-    border: '1px solid #2a2e39',
-    borderRadius: 4,
-    color: '#848e9c',
-    cursor: 'pointer',
-    fontSize: '0.85rem',
-    fontWeight: 500,
-    padding: '4px 10px',
-    transition: 'all 0.1s',
-    fontFamily: 'inherit',
-    flexShrink: 0,
-    whiteSpace: 'nowrap',
-  },
-  // ── Security FAQ button ───────────────────────────────────────────────────
-  securityBtn: {
-    background: 'none',
-    border: '1px solid rgba(59,139,235,0.35)',
-    borderRadius: 4,
-    color: '#3b8beb',
-    cursor: 'pointer',
-    fontSize: '0.85rem',
-    fontWeight: 500,
-    padding: '4px 10px',
-    transition: 'all 0.1s',
-    fontFamily: 'inherit',
-    flexShrink: 0,
-    whiteSpace: 'nowrap',
-    opacity: 0.75,
   },
   // ── Mobile nav buttons ────────────────────────────────────────────────────
   mobileNavBtn: {
