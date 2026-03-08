@@ -749,21 +749,13 @@ export function AltScannerModal({
   useEffect(() => { onCandidatesChange(candidates); }, [candidates, onCandidatesChange]);
 
   // ── Snapshot: fetch candles when snapshotMeta changes ────────────────────
+  // Always fetch fresh candles and use the stored drawingsSnapshot.
+  // Do NOT try to match candidates — the stored snapshot may differ from the
+  // current scan results (e.g. auto-trade ran while the modal was closed).
   useEffect(() => {
     if (!snapshotMeta) { setSnapshotCandles([]); return; }
-    // Try to auto-select the matching candidate (if scan was done in this session)
-    const match = candidates.find(c =>
-      `${c.symbol}_${c.direction}_${c.asOfCloseTime}` === snapshotMeta.candidateId,
-    );
-    if (match) {
-      setSelected(match);
-      setChartCandles(match.candles);
-      setChartViewInterval(match.interval as Interval);
-      setChartViewCandles([]);
-      return;
-    }
-    // No matching candidate — fetch candles for snapshot chart
-    setSelected(null);
+    setSelected(null); // clear any previously selected candidate
+    setSnapshotCandles([]); // show "로딩 중…" while fetching
     const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${snapshotMeta.symbol}&interval=${snapshotMeta.scanInterval}&limit=300`;
     fetch(url)
       .then(r => r.json())
@@ -776,7 +768,6 @@ export function AltScannerModal({
         volume: parseFloat(r[5] as string),
       }))))
       .catch(() => {});
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [snapshotMeta?.candidateId]);
 
   // ── Fetch candles when chart view interval differs from scan interval ────
@@ -1180,7 +1171,61 @@ export function AltScannerModal({
 
           {/* Chart panel */}
           <div style={S.chartWrap}>
-            {selected ? (
+            {snapshotMeta && snapshotCandles.length > 0 ? (
+              /* ── Snapshot view (position opened from AltScanner) ── */
+              <>
+                <div style={S.chartHeader}>
+                  <div style={S.chartHeaderLeft}>
+                    <span style={S.chartTitle}>
+                      {snapshotMeta.symbol} · {snapshotMeta.scanInterval} · 포지션 스냅샷
+                    </span>
+                    <span style={{ fontSize: '0.78rem', color: snapshotMeta.direction === 'long' ? '#0ecb81' : '#f6465d',
+                      background: snapshotMeta.direction === 'long' ? 'rgba(14,203,129,0.12)' : 'rgba(246,70,93,0.12)',
+                      border: `1px solid ${snapshotMeta.direction === 'long' ? 'rgba(14,203,129,0.4)' : 'rgba(246,70,93,0.4)'}`,
+                      borderRadius: 4, padding: '1px 7px', fontWeight: 700 }}>
+                      {snapshotMeta.direction === 'long' ? '▲ 롱' : '▼ 숏'}
+                    </span>
+                    <span style={{ fontSize: '0.72rem', color: '#3b8beb', background: 'rgba(59,139,235,0.12)',
+                      border: '1px solid rgba(59,139,235,0.35)', borderRadius: 4, padding: '1px 6px' }}>
+                      ALT추천 진입
+                    </span>
+                  </div>
+                  <div style={S.chartHeaderRight}>
+                    <span style={{ color: '#5e6673', fontSize: '0.72rem' }}>
+                      만료: {fmtDateTime(snapshotMeta.validUntilTime)}
+                    </span>
+                    <span style={{ fontSize: '0.72rem', fontFamily: 'monospace',
+                      color: nowMs < snapshotMeta.validUntilTime ? '#0ecb81' : '#f6465d' }}>
+                      {nowMs < snapshotMeta.validUntilTime
+                        ? `남은시간: ${fmtCountdown(snapshotMeta.validUntilTime - nowMs)}`
+                        : '만료됨'}
+                    </span>
+                    {onOpenInMain && (
+                      <button style={S.openMainBtn}
+                        onClick={() => { onOpenInMain(snapshotMeta.symbol); onClose(); }}>
+                        메인 차트로 열기 →
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div style={S.chartArea}>
+                  <div style={S.chartCanvasWrap}>
+                    <CandleChart
+                      key={`snapshot-${snapshotMeta.candidateId}`}
+                      candles={snapshotCandles}
+                      interval={snapshotMeta.scanInterval as Interval}
+                      ticker={snapshotMeta.symbol}
+                      drawingMode="none"
+                      setDrawingMode={() => {}}
+                      onDrawingsChange={() => {}}
+                      initialDrawings={snapshotMeta.drawingsSnapshot}
+                    />
+                  </div>
+                </div>
+              </>
+            ) : snapshotMeta ? (
+              <div style={S.chartPlaceholder}>차트 로딩 중…</div>
+            ) : selected ? (
               <>
                 <div style={S.chartHeader}>
                   <div style={S.chartHeaderLeft}>
@@ -1278,60 +1323,6 @@ export function AltScannerModal({
                   liveRiskPct={liveRiskPct} setLiveRiskPct={setLiveRiskPct}
                   paperBalance={paperBalance} />
               </>
-            ) : snapshotMeta && snapshotCandles.length > 0 ? (
-              /* ── Snapshot view (position opened from AltScanner) ── */
-              <>
-                <div style={S.chartHeader}>
-                  <div style={S.chartHeaderLeft}>
-                    <span style={S.chartTitle}>
-                      {snapshotMeta.symbol} · {snapshotMeta.scanInterval} · 포지션 스냅샷
-                    </span>
-                    <span style={{ fontSize: '0.78rem', color: snapshotMeta.direction === 'long' ? '#0ecb81' : '#f6465d',
-                      background: snapshotMeta.direction === 'long' ? 'rgba(14,203,129,0.12)' : 'rgba(246,70,93,0.12)',
-                      border: `1px solid ${snapshotMeta.direction === 'long' ? 'rgba(14,203,129,0.4)' : 'rgba(246,70,93,0.4)'}`,
-                      borderRadius: 4, padding: '1px 7px', fontWeight: 700 }}>
-                      {snapshotMeta.direction === 'long' ? '▲ 롱' : '▼ 숏'}
-                    </span>
-                    <span style={{ fontSize: '0.72rem', color: '#3b8beb', background: 'rgba(59,139,235,0.12)',
-                      border: '1px solid rgba(59,139,235,0.35)', borderRadius: 4, padding: '1px 6px' }}>
-                      ALT추천 진입
-                    </span>
-                  </div>
-                  <div style={S.chartHeaderRight}>
-                    <span style={{ color: '#5e6673', fontSize: '0.72rem' }}>
-                      만료: {fmtDateTime(snapshotMeta.validUntilTime)}
-                    </span>
-                    <span style={{ fontSize: '0.72rem', fontFamily: 'monospace',
-                      color: nowMs < snapshotMeta.validUntilTime ? '#0ecb81' : '#f6465d' }}>
-                      {nowMs < snapshotMeta.validUntilTime
-                        ? `남은시간: ${fmtCountdown(snapshotMeta.validUntilTime - nowMs)}`
-                        : '만료됨'}
-                    </span>
-                    {onOpenInMain && (
-                      <button style={S.openMainBtn}
-                        onClick={() => { onOpenInMain(snapshotMeta.symbol); onClose(); }}>
-                        메인 차트로 열기 →
-                      </button>
-                    )}
-                  </div>
-                </div>
-                <div style={S.chartArea}>
-                  <div style={S.chartCanvasWrap}>
-                    <CandleChart
-                      key={`snapshot-${snapshotMeta.candidateId}`}
-                      candles={snapshotCandles}
-                      interval={snapshotMeta.scanInterval as Interval}
-                      ticker={snapshotMeta.symbol}
-                      drawingMode="none"
-                      setDrawingMode={() => {}}
-                      onDrawingsChange={() => {}}
-                      initialDrawings={snapshotMeta.drawingsSnapshot}
-                    />
-                  </div>
-                </div>
-              </>
-            ) : snapshotMeta && snapshotCandles.length === 0 ? (
-              <div style={S.chartPlaceholder}>차트 로딩 중…</div>
             ) : (
               <div style={S.chartPlaceholder}>
                 {candidates.length > 0 ? '← 종목을 선택하세요' : '스캔 후 종목을 선택하면 차트가 표시됩니다'}

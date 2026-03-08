@@ -27,6 +27,8 @@ interface Props {
   autoTradeScanning?: boolean;
   onToggleAutoTrade?: () => void;
   onTriggerAutoTradeNow?: () => void;
+  autoTradeMode?: 'paper' | 'live';
+  onChangeAutoTradeMode?: (m: 'paper' | 'live') => void;
   isMobile?: boolean;
   mobilePanel?: 'none' | 'tickers' | 'settings';
   onToggleMobilePanel?: (panel: 'tickers' | 'settings') => void;
@@ -44,6 +46,7 @@ export function Toolbar({
   indicators, onToggleIndicator,
   onOpenBoard, onOpenUserBoard, onOpenSecurityFaq, onOpenAltScanner,
   isAutoTradeActive, autoTradeScanning, onToggleAutoTrade, onTriggerAutoTradeNow,
+  autoTradeMode = 'paper', onChangeAutoTradeMode,
   isMobile, mobilePanel, onToggleMobilePanel,
 }: Props) {
   const toggleMode = (m: DrawingMode) => {
@@ -228,15 +231,36 @@ export function Toolbar({
         🔍 알트추천
       </button>
 
+      {/* Auto trade mode toggle [모의] [실전] */}
+      {onChangeAutoTradeMode && (
+        <div style={{ display: 'flex', gap: 2, flexShrink: 0 }}>
+          <button
+            style={{ ...styles.modeBtn, ...(autoTradeMode === 'paper' ? styles.modeBtnActivePaper : {}) }}
+            onClick={() => onChangeAutoTradeMode('paper')}
+            title="모의 자동매매"
+          >모의</button>
+          <button
+            style={{ ...styles.modeBtn, ...(autoTradeMode === 'live' ? styles.modeBtnActiveLive : {}) }}
+            onClick={() => onChangeAutoTradeMode('live')}
+            title="실전 자동매매 (실제 주문 발생)"
+          >실전</button>
+        </div>
+      )}
+
       {/* Auto trade toggle */}
       <button
         onClick={onToggleAutoTrade}
-        title={isAutoTradeActive ? '자동 모의거래 끄기' : '자동 모의거래 켜기 (매 정각 1h→4h→1d 스캔, 90점+ 상위 2개 자동 진입)'}
-        style={{ ...styles.featureBtn, ...(isAutoTradeActive ? styles.featureBtnGreen : {}), display: 'flex', alignItems: 'center', gap: 5 }}
+        title={isAutoTradeActive ? '자동매매 끄기' : '자동매매 켜기 (매 정각 1h→4h→1d 스캔, 90점+ 상위 2개 자동 진입)'}
+        style={{
+          ...styles.featureBtn,
+          ...(isAutoTradeActive ? (autoTradeMode === 'live' ? styles.featureBtnRed : styles.featureBtnGreen) : {}),
+          display: 'flex', alignItems: 'center', gap: 5,
+        }}
       >
         <span style={{
           display: 'inline-block', width: 26, height: 13, borderRadius: 7, position: 'relative',
-          background: isAutoTradeActive ? '#0ecb81' : '#3a4455', transition: 'background 0.2s', flexShrink: 0,
+          background: isAutoTradeActive ? (autoTradeMode === 'live' ? '#f6465d' : '#0ecb81') : '#3a4455',
+          transition: 'background 0.2s', flexShrink: 0,
         }}>
           <span style={{
             display: 'block', width: 9, height: 9, borderRadius: '50%', background: '#fff',
@@ -245,7 +269,7 @@ export function Toolbar({
             transition: 'left 0.2s',
           }} />
         </span>
-        {autoTradeScanning ? '⟳ 스캔 중...' : '⚡ 자동매매'}
+        {autoTradeScanning ? '⟳ 스캔 중...' : autoTradeMode === 'live' ? '⚡ 자동매매(실전)' : '⚡ 자동매매(모의)'}
       </button>
       {isAutoTradeActive && !autoTradeScanning && (
         <button
@@ -434,6 +458,36 @@ const styles: Record<string, React.CSSProperties> = {
     borderColor: 'rgba(59,139,235,0.55)',
     color: '#3b8beb',
     background: 'rgba(59,139,235,0.10)',
+  },
+  featureBtnRed: {
+    borderColor: 'rgba(246,70,93,0.55)',
+    color: '#f6465d',
+    background: 'rgba(246,70,93,0.10)',
+  },
+  // ── Auto trade mode mini-toggle ───────────────────────────────────────────
+  modeBtn: {
+    background: 'none',
+    border: '1px solid #2a2e39',
+    borderRadius: 3,
+    color: '#5e6673',
+    cursor: 'pointer',
+    fontSize: '0.72rem',
+    fontWeight: 600,
+    padding: '2px 6px',
+    fontFamily: 'inherit',
+    flexShrink: 0,
+    whiteSpace: 'nowrap' as const,
+    transition: 'all 0.1s',
+  },
+  modeBtnActivePaper: {
+    borderColor: 'rgba(14,203,129,0.5)',
+    color: '#0ecb81',
+    background: 'rgba(14,203,129,0.1)',
+  },
+  modeBtnActiveLive: {
+    borderColor: 'rgba(246,70,93,0.5)',
+    color: '#f6465d',
+    background: 'rgba(246,70,93,0.1)',
   },
   // ── Indicator toggles ────────────────────────────────────────────────────
   indicatorGroup: {

@@ -27,10 +27,12 @@ export function useAltAutoTrade({
   symbols,
   onEnterTrade,
   onLog,
+  enterLabel = '진입',
 }: {
   symbols: string[];
   onEnterTrade: (candidate: ScanCandidate) => void;
   onLog?: (msg: string, type: AutoTradeLog['type']) => void;
+  enterLabel?: string;
 }) {
   const [isActive, setIsActiveState] = useState<boolean>(() => {
     try { return localStorage.getItem(AUTO_TRADE_KEY) === 'true'; } catch { return false; }
@@ -45,12 +47,14 @@ export function useAltAutoTrade({
   const symbolsRef      = useRef(symbols);
   const onEnterRef      = useRef(onEnterTrade);
   const onLogRef        = useRef(onLog);
+  const enterLabelRef   = useRef(enterLabel);
   const scanningRef     = useRef(false);
   const lastRunHourRef  = useRef<number>(-1); // epoch-hours of last completed run
   isActiveRef.current   = isActive;
   symbolsRef.current    = symbols;
   onEnterRef.current    = onEnterTrade;
   onLogRef.current      = onLog;
+  enterLabelRef.current = enterLabel;
 
   const addLog = useCallback((msg: string, type: AutoTradeLog['type'] = 'info') => {
     setLogs(prev => [{ id: ++logSeq, time: Date.now(), msg, type }, ...prev].slice(0, 200));
@@ -134,7 +138,7 @@ export function useAltAutoTrade({
           continue;
         }
         addLog(
-          `✅ [${interval}] 모의진입: ${c.symbol} ${c.direction.toUpperCase()} 점수${c.score} 진입${c.entryPrice.toFixed(4)} SL${c.slPrice.toFixed(4)} TP${c.tpPrice.toFixed(4)}`,
+          `✅ [${interval}] ${enterLabelRef.current}: ${c.symbol} ${c.direction.toUpperCase()} 점수${c.score} 진입${c.entryPrice.toFixed(4)} SL${c.slPrice.toFixed(4)} TP${c.tpPrice.toFixed(4)}`,
           'success',
         );
         onEnterRef.current(c);
@@ -144,7 +148,7 @@ export function useAltAutoTrade({
     }
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
-    addLog(`🏁 자동 스캔 완료 (${elapsed}초) — 총 ${totalEntered}개 모의진입`, totalEntered > 0 ? 'success' : 'info');
+    addLog(`🏁 자동 스캔 완료 (${elapsed}초) — 총 ${totalEntered}개 ${enterLabelRef.current}`, totalEntered > 0 ? 'success' : 'info');
 
     // Schedule next run: next top of hour
     const now       = Date.now();

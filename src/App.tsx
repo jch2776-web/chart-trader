@@ -229,6 +229,16 @@ function AppInner() {
     try { localStorage.setItem(uk('telegram-settings'), JSON.stringify(telegramSettings)); } catch {}
   }, [telegramSettings]);
 
+  // ── Auto trade mode (paper / live) ──────────────────────────────────
+  const [autoTradeMode, setAutoTradeMode] = useState<'paper' | 'live'>(() => {
+    try { return (localStorage.getItem(uk('alt_auto_trade_mode')) as 'paper' | 'live') ?? 'paper'; } catch { return 'paper'; }
+  });
+  const autoTradeModeRef = useRef<'paper' | 'live'>(autoTradeMode);
+  autoTradeModeRef.current = autoTradeMode;
+  React.useEffect(() => {
+    try { localStorage.setItem(uk('alt_auto_trade_mode'), autoTradeMode); } catch {}
+  }, [autoTradeMode]);
+
   // ── Binance API keys (persisted) ─────────────────────────────────────
   const [binanceApiKey, setBinanceApiKey] = useState<string>(() => {
     try { return localStorage.getItem(uk('binance-api-key')) ?? ''; } catch { return ''; }
@@ -972,7 +982,10 @@ function AppInner() {
     setShowAltScanner(false);
   }, [handleTickerSelect]);
 
-  // ── AltScanner auto-trade: convert ScanCandidate → AltTradeParams and paper-trade ──
+  // Forward ref for handleAltLiveTrade — populated after it's defined below
+  const handleAltLiveTradeRef = useRef<((params: AltTradeParams) => void) | null>(null);
+
+  // ── AltScanner auto-trade: convert ScanCandidate → AltTradeParams and route by mode ──
   const handleAutoTradeScan = useCallback((c: ScanCandidate) => {
     const drawingsSnapshot = [
       ...c.drawingGroups.breakout,
@@ -1000,8 +1013,16 @@ function AppInner() {
       sizeMode:   'margin',
       marginUsdt: 100,
     };
-    handleAltPaperTrade(params);
-  }, [handleAltPaperTrade]);
+    if (autoTradeModeRef.current === 'live') {
+      if (!binanceApiKey || !binanceApiSecret) {
+        addLog('info', '[자동매매] 실전 모드이지만 API 키 미설정 — 건너뜀');
+        return;
+      }
+      handleAltLiveTradeRef.current?.(params);
+    } else {
+      handleAltPaperTrade(params);
+    }
+  }, [handleAltPaperTrade, binanceApiKey, binanceApiSecret, addLog]);
 
   const altAutoTrade = useAltAutoTrade({
     symbols: tickers.map(t => t.symbol),
@@ -1010,6 +1031,7 @@ function AppInner() {
       const mappedType: ActivityLog['type'] = type === 'error' ? 'error' : type === 'success' ? 'order' : 'info';
       addLog(mappedType, `[자동매매] ${msg}`);
     },
+    enterLabel: autoTradeMode === 'live' ? '실전진입' : '모의진입',
   });
 
   // Called whenever AltScanner updates its candidates (auto-scan result)
@@ -1116,6 +1138,18 @@ function AppInner() {
       addLog('error', `[ALT실전] 진입 실패: ${e instanceof Error ? e.message : 'unknown'}`);
     }
   }, [handleTickerSelect, addLog, futuresPlaceOrder, binanceApiKey, binanceApiSecret]);
+
+  // Connect forward ref so handleAutoTradeScan can call handleAltLiveTrade
+  handleAltLiveTradeRef.current = handleAltLiveTrade;
+
+  // ── Auto trade mode change handler ────────────────────────────────────
+  const handleChangeAutoTradeMode = useCallback((mode: 'paper' | 'live') => {
+    if (altAutoTrade.isActive) {
+      altAutoTrade.setActive(false);
+      addLog('info', `[자동매매] 모드 변경(${mode === 'live' ? '실전' : '모의'}) — 자동매매 OFF`);
+    }
+    setAutoTradeMode(mode);
+  }, [altAutoTrade, addLog]);
 
   // ── Pending live TP/SL processor ─────────────────────────────────────
   // Stable ref so the effect doesn't re-subscribe when futuresPlaceTPSL identity changes
@@ -1309,6 +1343,8 @@ function AppInner() {
         autoTradeScanning={altAutoTrade.scanning}
         onToggleAutoTrade={() => altAutoTrade.setActive(!altAutoTrade.isActive)}
         onTriggerAutoTradeNow={altAutoTrade.triggerNow}
+        autoTradeMode={autoTradeMode}
+        onChangeAutoTradeMode={handleChangeAutoTradeMode}
         isMobile={isMobile}
         mobilePanel={mobilePanel}
         onToggleMobilePanel={(panel) => setMobilePanel(p => p === panel ? 'none' : panel)}
