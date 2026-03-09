@@ -148,6 +148,7 @@ export function usePaperTrading(storageKey: string) {
         entryTime: pos.entryTime,
         exitTime: Date.now(),
         closeReason: reason,
+        interval: pos.altMeta?.scanInterval,
       };
       return {
         ...prev,
@@ -192,6 +193,7 @@ export function usePaperTrading(storageKey: string) {
         entryTime: pos.entryTime,
         exitTime: Date.now(),
         closeReason: reason,
+        interval: pos.altMeta?.scanInterval,
       };
       const isFull = qty >= totalQty;
       return {
@@ -289,8 +291,12 @@ export function usePaperTrading(storageKey: string) {
         );
         if (pos) partialClosePosition(pos.id, fillPrice, 'manual', order.qty);
       } else {
+        // Recalculate qty based on actual fill price to maintain original target margin.
+        // targetMargin = order.qty * order.limitPrice / order.leverage
+        const targetMargin = (order.qty * order.limitPrice) / order.leverage;
+        const actualQty = parseFloat(((targetMargin * order.leverage) / fillPrice).toFixed(6));
         openPosition(order.symbol, order.side === 'BUY' ? 'LONG' : 'SHORT',
-          order.qty, fillPrice, order.leverage, order.marginType,
+          actualQty, fillPrice, order.leverage, order.marginType,
           order.tpPrice, order.slPrice, order.altMeta);
       }
     }
@@ -317,10 +323,15 @@ export function usePaperTrading(storageKey: string) {
         (order.triggerType === 'close_below' && closePrice <= order.limitPrice);
       if (!triggered) continue;
       triggeredIds.push(order.id);
-      // Open position at the candle's close price
+      // Recalculate qty so that margin stays at the original intended amount even
+      // when the actual close price overshoots the trigger level.
+      // targetMargin = order.qty * order.limitPrice / order.leverage  (what qty was based on)
+      // actualQty    = targetMargin * order.leverage / closePrice
+      const targetMargin = (order.qty * order.limitPrice) / order.leverage;
+      const actualQty = parseFloat(((targetMargin * order.leverage) / closePrice).toFixed(6));
       openPosition(
         order.symbol, order.side === 'BUY' ? 'LONG' : 'SHORT',
-        order.qty, closePrice, order.leverage, order.marginType,
+        actualQty, closePrice, order.leverage, order.marginType,
         order.tpPrice, order.slPrice, order.altMeta,
       );
     }

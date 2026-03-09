@@ -1227,6 +1227,7 @@ export function BottomPanel({
                         { value: `${Number(roi) >= 0 ? '+' : ''}${roi}%`, color: pnlClr, align: 'right' },
                         { value: `-${h.fees.toFixed(4)}`, color: 'orange', align: 'right' },
                         { value: reason, color: reasonClr },
+                        { value: h.interval ?? '—', align: 'center' },
                         { value: fmtT(h.entryTime) },
                         { value: fmtT(h.exitTime) },
                       ] as ExcelCell[];
@@ -1237,6 +1238,7 @@ export function BottomPanel({
                     { label: '진입가(USDT)', width: 14 }, { label: '청산가(USDT)', width: 14 },
                     { label: '실현손익(USDT)', width: 16, }, { label: 'ROI(%)', width: 10 },
                     { label: '수수료(USDT)', width: 14 }, { label: '사유', width: 8 },
+                    { label: '타임프레임', width: 10 },
                     { label: '진입시간', width: 20 }, { label: '종료시간', width: 20 },
                   ], dataRows);
                 }}>엑셀 내보내기</button>
@@ -1258,13 +1260,14 @@ export function BottomPanel({
                   <th style={s.th}>실현손익 (USDT) / ROI</th>
                   <th style={s.th}>수수료 (USDT)</th>
                   <th style={s.th}>사유</th>
+                  <th style={s.th}>타임프레임</th>
                   <th style={s.th}>진입시간</th>
                   <th style={s.th}>종료시간</th>
                 </tr>
               </thead>
               <tbody>
                 {(paperHistory?.length ?? 0) === 0 ? (
-                  <tr><td colSpan={12} style={s.empty}>거래 히스토리 없음</td></tr>
+                  <tr><td colSpan={13} style={s.empty}>거래 히스토리 없음</td></tr>
                 ) : paperHistory!.map(h => {
                   const reasonLabel = h.closeReason === 'tp' ? '익절' : h.closeReason === 'sl' ? '손절' : h.closeReason === 'liq' ? '청산' : h.closeReason === 'expired' ? '타임스탑' : '수동';
                   const reasonColor = h.closeReason === 'tp' ? '#0ecb81' : h.closeReason === 'liq' ? '#f59e42' : h.closeReason === 'expired' ? '#f0b90b' : '#f6465d';
@@ -1294,6 +1297,12 @@ export function BottomPanel({
                         <div style={s.priceCell}><span>−{fmtPrice(h.fees)}</span><span style={s.priceUnit}>USDT</span></div>
                       </td>
                       <td style={{ ...s.td, color: reasonColor, fontWeight: 600 }}>{reasonLabel}</td>
+                      <td style={{ ...s.td, textAlign: 'center' }}>
+                        {h.interval
+                          ? <span style={{ color: '#3b8beb', fontWeight: 700, fontSize: '0.8rem', background: 'rgba(59,139,235,0.12)', borderRadius: 4, padding: '2px 7px' }}>{h.interval}</span>
+                          : <span style={{ color: '#3a4558', fontSize: '0.75rem' }}>—</span>
+                        }
+                      </td>
                       <td style={{ ...s.td, color: '#5d6776', fontSize: '0.74rem', whiteSpace: 'nowrap' }}>{fmtTime(h.entryTime)}</td>
                       <td style={{ ...s.td, color: '#5d6776', fontSize: '0.74rem', whiteSpace: 'nowrap' }}>{fmtTime(h.exitTime)}</td>
                     </tr>
@@ -1502,8 +1511,13 @@ export function BottomPanel({
                           })()}
                         </td>
                         {/* 유효 시간 column (paper) */}
-                        <td style={{ ...s.td, fontFamily: 'monospace', fontSize: '0.74rem', color: remMs > 0 ? '#848e9c' : '#f6465d', whiteSpace: 'nowrap' }}>
-                          {altMeta ? remStr : '—'}
+                        <td style={{ ...s.td, fontFamily: 'monospace', fontSize: '0.74rem', whiteSpace: 'nowrap' }}>
+                          {altMeta ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                              <span style={{ color: '#3b8beb', fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.03em' }}>{altMeta.scanInterval}</span>
+                              <span style={{ color: remMs > 0 ? '#848e9c' : '#f6465d' }}>{remStr}</span>
+                            </div>
+                          ) : '—'}
                         </td>
                         <td style={s.td}>
                           <button

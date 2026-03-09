@@ -6,13 +6,15 @@ const AUTO_TRADE_KEY   = 'alt_auto_trade_active';
 const SCORE_THRESHOLD  = 90;
 const TOP_N_PER_TF     = 2;
 const SCAN_INTERVALS: ScanInterval[] = ['1h', '4h', '1d'];
-const BETWEEN_SCAN_MS  = 5000;
+const BETWEEN_SCAN_MS  = 2000;
 
-// Conservative rate-limit settings for automated (unattended) scanning.
-// concurrency=2, delayMs=600 → ~2.4 sym/sec → ~17 weight/sec → ~1020/min
-// (Binance Futures limit: 2400/min — this stays well under 50% of the limit)
-const AUTO_CONCURRENCY = 2;
-const AUTO_DELAY_MS    = 600;
+// Rate-limit settings for automated (unattended) scanning.
+// Each symbol costs 7 weight (limit=202 → wt2, limit=502 → wt5).
+// Binance Futures IP limit: 2400 weight/min = 40 weight/sec (rolling).
+// concurrency=4, delayMs=450, avg HTTP=250ms → effective delay ≈ 700ms per batch
+//   → throughput ≈ 4/700ms = 5.7 sym/sec × 7 wt = 40 wt/sec = 2400 wt/min (at safe max)
+const AUTO_CONCURRENCY = 4;
+const AUTO_DELAY_MS    = 450;
 
 export interface AutoTradeLog {
   id: number;
@@ -84,7 +86,7 @@ export function useAltAutoTrade({
     // Estimated time: AUTO_DELAY_MS + ~250ms HTTP per symbol, 3 TF, 5s between
     const estSecPerTf = Math.ceil(syms.length * (AUTO_DELAY_MS + 250) / AUTO_CONCURRENCY / 1000);
     const estTotalSec = estSecPerTf * 3 + (BETWEEN_SCAN_MS / 1000) * 2;
-    addLog(`🚀 자동 스캔 시작 — ${syms.length}개 심볼 × 3개 타임프레임 (예상 소요 약 ${estTotalSec}초, API 과부하 방지 속도제한 적용)`);
+    addLog(`🚀 자동 스캔 시작 — ${syms.length}개 심볼 × 3개 타임프레임 (예상 소요 약 ${estTotalSec}초, 속도제한: 동시${AUTO_CONCURRENCY}개·간격${AUTO_DELAY_MS}ms)`);
 
     let totalEntered = 0;
     // Deduplicate across timeframes: each symbol+direction is entered at most once per run

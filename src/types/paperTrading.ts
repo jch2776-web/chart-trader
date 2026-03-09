@@ -59,6 +59,7 @@ export interface PaperHistoryEntry {
   entryTime: number;
   exitTime: number;
   closeReason: 'manual' | 'tp' | 'sl' | 'liq' | 'expired';
+  interval?: string;          // timeframe of entry candle (e.g. '15m', '1h') — ALT추천 positions only
 }
 
 export interface PaperState {

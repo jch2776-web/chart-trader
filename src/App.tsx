@@ -41,6 +41,11 @@ import type { LiveHistoryEntry } from './types/futures';
 import { AltPositionMonitor, LiveAltPositionMonitor } from './components/AltScanner/AltPositionMonitor';
 import type { AltMeta } from './types/paperTrading';
 import { useAltAutoTrade } from './hooks/useAltAutoTrade';
+import { useSoundPlayer } from './hooks/useSoundPlayer';
+import { SoundSettingsModal } from './components/SoundSettingsModal';
+import { AutoTradeSettingsModal } from './components/AutoTradeSettingsModal';
+import type { AutoTradeSettings } from './components/AutoTradeSettingsModal';
+import { DEFAULT_AUTO_TRADE_SETTINGS } from './components/AutoTradeSettingsModal';
 
 export interface BreakoutFlash {
   id: string;
@@ -136,6 +141,10 @@ function AppInner() {
   const [selectedDrawingId, setSelectedDrawingId] = useState<string | null>(null);
   const [logs, setLogs] = useState<ActivityLog[]>([]);
   const [flashes, setFlashes] = useState<BreakoutFlash[]>([]);
+  const [showSoundSettings, setShowSoundSettings] = useState(false);
+
+  // Sound player — exposes playBuy / playSell called at trade execution points
+  const soundPlayer = useSoundPlayer();
 
   // ── Mobile detection ─────────────────────────────────────────────────
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
@@ -228,6 +237,18 @@ function AppInner() {
   React.useEffect(() => {
     try { localStorage.setItem(uk('telegram-settings'), JSON.stringify(telegramSettings)); } catch {}
   }, [telegramSettings]);
+
+  // ── Auto trade settings (persisted) ─────────────────────────────────
+  const [autoTradeSettings, setAutoTradeSettings] = useState<AutoTradeSettings>(() => {
+    try { return JSON.parse(localStorage.getItem(uk('alt_auto_trade_settings')) ?? 'null') ?? DEFAULT_AUTO_TRADE_SETTINGS; }
+    catch { return DEFAULT_AUTO_TRADE_SETTINGS; }
+  });
+  const autoTradeSettingsRef = useRef<AutoTradeSettings>(autoTradeSettings);
+  autoTradeSettingsRef.current = autoTradeSettings;
+  React.useEffect(() => {
+    try { localStorage.setItem(uk('alt_auto_trade_settings'), JSON.stringify(autoTradeSettings)); } catch {}
+  }, [autoTradeSettings]);
+  const [showAutoTradeSettings, setShowAutoTradeSettings] = useState(false);
 
   // ── Auto trade mode (paper / live) ──────────────────────────────────
   const [autoTradeMode, setAutoTradeMode] = useState<'paper' | 'live'>(() => {
@@ -332,11 +353,12 @@ function AppInner() {
       return prev;
     });
 
-    // Paper trading: update price map and check TP/SL/liquidation on every tick
-    if (isPaperModeRef.current) {
-      markPricesMapRef.current[tickerRef.current] = candle.close;
-      paperTradingRef.current.checkPrices(markPricesMapRef.current);
-    }
+    // Paper trading: update price map and check TP/SL/liquidation on every tick.
+    // Always update the mark price and call checkPrices — it is a no-op when there
+    // are no paper positions, and altMeta paper positions must be monitored even
+    // when the user is in live mode (isPaperMode may be false).
+    markPricesMapRef.current[tickerRef.current] = candle.close;
+    paperTradingRef.current.checkPrices(markPricesMapRef.current);
 
     if (!tradeRef.current.active) return;
     if (drawingsRef.current.length === 0) return;
@@ -483,6 +505,7 @@ function AppInner() {
               co.entryMarginType === 'CROSSED' ? 'cross' : 'isolated',
             );
             addLog('info', `[모의] 조건부주문 체결 — ${co.entrySide} ${paperQty} @ ${co.entryPrice}`);
+            if (co.entrySide === 'BUY') soundPlayer.playBuy(); else soundPlayer.playSell();
           } else {
             addLog('error', '[모의] 잔고 부족으로 조건부주문 실패');
           }
@@ -499,6 +522,7 @@ function AppInner() {
                 }
               }
               addLog('info', `[조건부주문] 완료 — ${co.entrySide} ${entryQty} @ ${co.entryPrice}`);
+              if (co.entrySide === 'BUY') soundPlayer.playBuy(); else soundPlayer.playSell();
             })
             .catch((e: unknown) => {
               const msg = e instanceof Error ? e.message : '주문 실패';
@@ -665,17 +689,21 @@ function AppInner() {
   // Mark prices map: accumulated as the user browses charts; also refreshed via REST for paper positions
   const markPricesMapRef = useRef<Record<string, number>>({});
 
-  // Symbols for paper price feed: union of open positions and pending orders
-  const paperSymbolsKey = isPaperMode
-    ? [...new Set([
-        ...paperTrading.positions.map(p => p.symbol),
-        ...paperTrading.orders.map(o => o.symbol),
-      ])].sort().join(',')
-    : '';
+  // Symbols for paper price feed: union of open positions and pending orders.
+  // Always includes altMeta paper positions so they are monitored even in live mode.
+  const paperSymbolsKey = [...new Set([
+    ...(isPaperMode
+      ? [
+          ...paperTrading.positions.map(p => p.symbol),
+          ...paperTrading.orders.map(o => o.symbol),
+        ]
+      : paperTrading.positions.filter(p => p.altMeta).map(p => p.symbol)
+    ),
+  ])].sort().join(',');
 
   // Fetch REST mark prices for all paper symbols (positions ∪ orders), call checkPrices after each update
   React.useEffect(() => {
-    if (!isPaperMode || paperSymbolsKey === '') return;
+    if (paperSymbolsKey === '') return;
     const symbols = paperSymbolsKey.split(',');
     const fetchAndCheck = () => {
       symbols.forEach(sym => {
@@ -691,7 +719,7 @@ function AppInner() {
     fetchAndCheck();
     const interval = window.setInterval(fetchAndCheck, 5000);
     return () => window.clearInterval(interval);
-  }, [isPaperMode, paperSymbolsKey]);
+  }, [paperSymbolsKey]);
 
   // paperPlaceOrder: drop-in for futuresPlaceOrder in paper mode
   // price === 0 → market order (execute immediately)
@@ -974,6 +1002,7 @@ function AppInner() {
       altMeta,
       triggerType,
     );
+    if (params.direction === 'long') soundPlayer.playBuy(); else soundPlayer.playSell();
     if (isTrendlinePending) {
       addLog('info', `[ALT모의] ${params.symbol} 조건부 진입 대기 — 다음 봉 종가 ${params.direction === 'long' ? '≥' : '≤'} ${limitPrice.toFixed(4)} 시 체결`);
     }
@@ -1001,9 +1030,9 @@ function AppInner() {
       slPrice:    c.slPrice,
       tpPrice:    c.tpPrice,
       tp1Price:   c.tp1Price,
-      leverage:   3,
-      marginType: 'ISOLATED',
-      riskPct:    2,
+      leverage:   autoTradeSettingsRef.current.leverage,
+      marginType: autoTradeSettingsRef.current.marginType,
+      riskPct:    autoTradeSettingsRef.current.riskPct,
       candidateId: `${c.symbol}_${c.direction}_${c.asOfCloseTime}`,
       scanInterval: c.interval,
       validUntilTime: c.validUntilTime,
@@ -1011,8 +1040,8 @@ function AppInner() {
       breakoutType:    c.breakoutType,
       candidateStatus: c.status,
       triggerPriceAtNextClose: c.triggerPriceAtNextClose,
-      sizeMode:   'margin',
-      marginUsdt: 100,
+      sizeMode:   autoTradeSettingsRef.current.sizeMode,
+      marginUsdt: autoTradeSettingsRef.current.marginUsdt,
     };
     if (autoTradeModeRef.current === 'live') {
       if (!binanceApiKey || !binanceApiSecret) {
@@ -1157,6 +1186,7 @@ function AppInner() {
     try {
       await futuresPlaceOrder(side, effectiveEntryPrice, qty, leverage, liveMarginType, false, params.symbol);
       addLog('info', `[ALT실전] 진입 주문 — ${side} ${qty} ${params.symbol} @ ${effectiveEntryPrice}`);
+      if (side === 'BUY') soundPlayer.playBuy(); else soundPlayer.playSell();
       setLiveAltMetaMap(prev => ({ ...prev, [`${params.symbol}_${params.direction}`]: liveMeta }));
       // Register pending TP/SL — applied once the position is confirmed open via allPositions update
       const pendingKey = `${params.symbol}_${params.direction}`;
@@ -1238,8 +1268,11 @@ function AppInner() {
   }, [handleTickerSelect]);
 
   // ── AltPositionMonitor: auto-close on time-stop / structural break ────
-  const altMonitors = isPaperMode
-    ? paperTrading.positions
+  // Paper altMeta monitors are ALWAYS active regardless of isPaperMode — so that
+  // auto-trade paper positions continue to be closed (and balance returned) even
+  // when the user switches to live mode.
+  const altMonitors = [
+    ...paperTrading.positions
         .filter(p => p.altMeta)
         .map(p => (
           <AltPositionMonitor
@@ -1248,10 +1281,12 @@ function AppInner() {
             onClose={(price, reason) => {
               setDrawingsByTicker(prev => ({ ...prev, [p.symbol]: [] }));
               paperTrading.closePosition(p.id, price, reason);
+              // closing long → sell sound; closing short → buy sound
+              if (p.altMeta!.direction === 'long') soundPlayer.playSell(); else soundPlayer.playBuy();
             }}
           />
-        ))
-    : Object.entries(liveAltMetaMap).flatMap(([key, meta]) => {
+        )),
+    ...(!isPaperMode ? Object.entries(liveAltMetaMap).flatMap(([key, meta]) => {
         const pos = futuresAllPositions.find(p =>
           p.symbol === meta.symbol &&
           Math.abs(p.positionAmt) > 0 &&
@@ -1277,7 +1312,14 @@ function AppInner() {
             }}
           />
         )];
-      });
+      }) : []),
+  ];
+
+  // ── Error notification ───────────────────────────────────────────────────
+  const errorLogs = logs.filter(l => l.type === 'error');
+  const clearErrors = useCallback(() => {
+    setLogs(prev => prev.filter(l => l.type !== 'error'));
+  }, []);
 
   return (
     <div style={styles.root}>
@@ -1374,6 +1416,8 @@ function AppInner() {
         onOpenUserBoard={() => setShowUserBoard(true)}
         onOpenSecurityFaq={() => setShowSecurityFaq(true)}
         onOpenAltScanner={() => { setAltScannerSnapshotMeta(undefined); setShowAltScanner(true); }}
+        onOpenSoundSettings={() => setShowSoundSettings(true)}
+        onOpenAutoTradeSettings={() => setShowAutoTradeSettings(true)}
         isAutoTradeActive={altAutoTrade.isActive}
         autoTradeScanning={altAutoTrade.scanning}
         onToggleAutoTrade={() => altAutoTrade.setActive(!altAutoTrade.isActive)}
@@ -1383,7 +1427,27 @@ function AppInner() {
         isMobile={isMobile}
         mobilePanel={mobilePanel}
         onToggleMobilePanel={(panel) => setMobilePanel(p => p === panel ? 'none' : panel)}
+        errorLogs={errorLogs}
+        onClearErrors={clearErrors}
       />
+
+      {showAutoTradeSettings && (
+        <AutoTradeSettingsModal
+          settings={autoTradeSettings}
+          onSave={setAutoTradeSettings}
+          onClose={() => setShowAutoTradeSettings(false)}
+        />
+      )}
+
+      {showSoundSettings && (
+        <SoundSettingsModal
+          config={soundPlayer.config}
+          onUpdate={soundPlayer.updateConfig}
+          onPlayBuy={soundPlayer.playBuy}
+          onPlaySell={soundPlayer.playSell}
+          onClose={() => setShowSoundSettings(false)}
+        />
+      )}
 
       {showBoard && (
         <BoardModal

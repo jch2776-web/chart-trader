@@ -140,7 +140,7 @@ const ITEMS: FaqItem[] = [
             <strong>바이낸스 Algo 조건부 주문</strong> 시도
             (<code>/fapi/v1/algoOrder</code> · STOP_MARKET)<br />
             <span style={{ fontSize: '0.85em', color: '#848e9c' }}>
-              ※ 2026년 2월 바이낸스 정책 변경으로 STOP 계열 주문은 Algo 주문 방식으로 전환됩니다.
+              ※ 2026년 2월 바이낸스 정책 변경으로 STOP 계열 주문이 Algo 주문 방식으로 전환되었습니다.
               앱이 이를 자동 감지해 올바른 엔드포인트로 전송합니다.
             </span>
           </li>
@@ -208,6 +208,46 @@ const ITEMS: FaqItem[] = [
         </strong><br /><br />
         게시물 삭제는 작성 시 설정한 비밀번호로 가능합니다.
         비밀번호를 분실하면 삭제가 불가능하므로 주의하세요.
+      </>
+    ),
+  },
+
+  // ── 앱 기능 ────────────────────────────────────────────────────────────────
+  {
+    id: 'feature-sound',
+    category: 'usage',
+    risk: 'info',
+    q: '매매음 설정에서 업로드한 사운드 파일은 어디에 저장되나요?',
+    a: (
+      <>
+        업로드한 오디오 파일은 <strong>Base64로 인코딩되어 브라우저 localStorage에만</strong> 저장됩니다.
+        이 서비스의 서버나 외부로 전송되지 않습니다.<br /><br />
+        파일 크기 상한은 <strong>2MB</strong>입니다. localStorage 용량(약 5MB)을 고려해
+        가능하면 짧은 클립(MP3 기준 수 초 이내)을 권장합니다.<br /><br />
+        사운드를 삭제하려면 매매음 설정에서 <strong>✕ 초기화</strong> 버튼을 클릭하거나,
+        브라우저 사이트 데이터를 삭제하면 됩니다.
+      </>
+    ),
+  },
+  {
+    id: 'feature-error-bell',
+    category: 'usage',
+    risk: 'info',
+    q: '오류 알림(🔔)에 표시된 오류는 어디서 발생한 건가요?',
+    a: (
+      <>
+        툴바의 🔔 아이콘은 앱 활동 로그 중 <strong>오류(error) 타입</strong> 항목을 별도로 누적합니다.
+        다음과 같은 상황에서 오류가 기록됩니다:<br /><br />
+        <ul style={{ margin: '4px 0 0 16px', padding: 0, lineHeight: 1.8 }}>
+          <li>API 키 미설정 또는 잘못된 키로 주문 시도</li>
+          <li>잔고 부족으로 주문 실패</li>
+          <li>바이낸스 API 오류 (네트워크 오류, 권한 없음 등)</li>
+          <li>Hedge 모드 감지 (자동매매 실전 모드)</li>
+          <li>TP/SL 등록 실패, 청산 실패 등 실전 거래 오류</li>
+        </ul>
+        <br />
+        오류 내역은 <strong>전체 삭제</strong> 버튼으로 지울 수 있으며,
+        앱을 새로고침하면 초기화됩니다. 서버로 전송되지 않습니다.
       </>
     ),
   },

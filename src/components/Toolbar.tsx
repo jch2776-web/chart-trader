@@ -3,6 +3,8 @@ import type { Interval } from '../types/candle';
 import type { DrawingMode } from '../types/drawing';
 import { DRAWING_COLORS } from '../types/drawing';
 import type { IndicatorConfig } from './Chart/useChartRenderer';
+import { ErrorNotificationBell } from './ErrorNotificationBell';
+import type { ActivityLog } from '../types/trade';
 
 interface Props {
   interval: Interval;
@@ -23,6 +25,8 @@ interface Props {
   onOpenUserBoard?: () => void;
   onOpenSecurityFaq?: () => void;
   onOpenAltScanner?: () => void;
+  onOpenSoundSettings?: () => void;
+  onOpenAutoTradeSettings?: () => void;
   isAutoTradeActive?: boolean;
   autoTradeScanning?: boolean;
   onToggleAutoTrade?: () => void;
@@ -32,6 +36,9 @@ interface Props {
   isMobile?: boolean;
   mobilePanel?: 'none' | 'tickers' | 'settings';
   onToggleMobilePanel?: (panel: 'tickers' | 'settings') => void;
+  // Error notification
+  errorLogs?: ActivityLog[];
+  onClearErrors?: () => void;
 }
 
 const INTERVALS: Interval[] = ['1m', '3m', '5m', '15m', '1h', '4h', '1d'];
@@ -44,10 +51,11 @@ export function Toolbar({
   fontSize, onFontSizeChange, activeColor, onActiveColorChange,
   isMultiMode, onToggleMultiMode, isPaperMode, onTogglePaperMode,
   indicators, onToggleIndicator,
-  onOpenBoard, onOpenUserBoard, onOpenSecurityFaq, onOpenAltScanner,
+  onOpenBoard, onOpenUserBoard, onOpenSecurityFaq, onOpenAltScanner, onOpenSoundSettings, onOpenAutoTradeSettings,
   isAutoTradeActive, autoTradeScanning, onToggleAutoTrade, onTriggerAutoTradeNow,
   autoTradeMode = 'paper', onChangeAutoTradeMode,
   isMobile, mobilePanel, onToggleMobilePanel,
+  errorLogs = [], onClearErrors,
 }: Props) {
   const toggleMode = (m: DrawingMode) => {
     onDrawingModeChange(drawingMode === m ? 'none' : m);
@@ -279,6 +287,15 @@ export function Toolbar({
         >▶ 즉시실행</button>
       )}
 
+      {/* Auto trade settings button */}
+      <button
+        style={styles.featureBtn}
+        onClick={onOpenAutoTradeSettings}
+        title="자동매매 진입 설정 (레버리지 · 마진 크기)"
+      >
+        ⚙ 자동설정
+      </button>
+
       {/* User board button */}
       <button
         style={styles.featureBtn}
@@ -296,6 +313,21 @@ export function Toolbar({
       >
         🔒 보안FAQ
       </button>
+
+      {/* Sound settings button */}
+      <button
+        style={styles.featureBtn}
+        onClick={onOpenSoundSettings}
+        title="매매음 설정"
+      >
+        🔊
+      </button>
+
+      {/* Error notification bell */}
+      <ErrorNotificationBell
+        errors={errorLogs}
+        onClear={onClearErrors ?? (() => {})}
+      />
     </div>
   );
 }
