@@ -275,10 +275,10 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
       // Only show loading spinner on the very first fetch to avoid layout flicker
       if (isFirst) setLoading(true);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const [posRes, ordRes, algoOrdRes, tradeRes, balRes, allPosRes, allOrdRes] = (await Promise.all([
+      const [posRes, ordRes, algoOrdRes, tradeRes, balRes, allPosRes, allOrdRes, allAlgoOrdRes] = (await Promise.all([
         fetchSigned('/fapi/v2/positionRisk', apiKeyRef.current, apiSecretRef.current, { symbol: tickerRef.current }),
         fetchSigned('/fapi/v1/openOrders',   apiKeyRef.current, apiSecretRef.current, { symbol: tickerRef.current }),
-        // 조건부(Algo) 주문은 별도 엔드포인트에서 조회
+        // 조건부(Algo) 주문은 별도 엔드포인트에서 조회 (현재 심볼)
         fetchSigned('/fapi/v1/openAlgoOrders', apiKeyRef.current, apiSecretRef.current, { symbol: tickerRef.current }),
         // 최근 500건 거래 내역으로 실제 진입 시각 계산
         fetchSigned('/fapi/v1/userTrades',   apiKeyRef.current, apiSecretRef.current, { symbol: tickerRef.current, limit: 500 }),
@@ -288,6 +288,8 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
         fetchSigned('/fapi/v2/positionRisk', apiKeyRef.current, apiSecretRef.current),
         // 전체 미체결 주문 (심볼 필터 없이)
         fetchSigned('/fapi/v1/openOrders',   apiKeyRef.current, apiSecretRef.current),
+        // 전체 심볼 Algo 주문 (심볼 필터 없이) — TP/SL이 다른 심볼에 걸려있을 때도 표시
+        fetchSigned('/fapi/v1/openAlgoOrders', apiKeyRef.current, apiSecretRef.current).catch(() => []),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ])) as any[];
 
@@ -322,6 +324,7 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
         origQty:   parseFloat(o.origQty),
         stopPrice: parseFloat(o.stopPrice),
         status:    o.status,
+        time:      typeof o.time === 'number' ? o.time : undefined,
       }));
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const mappedAlgoOrders: FuturesOrder[] = algoOrdRes.map((o: any) => ({
@@ -335,6 +338,7 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
         status:    o.algoStatus ?? o.status ?? 'NEW',
         algoType:  o.algoType ?? 'CONDITIONAL',
         isAlgo:    true,
+        time:      typeof o.bookTime === 'number' ? o.bookTime : (typeof o.time === 'number' ? o.time : undefined),
       }));
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -367,13 +371,34 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
         origQty:   parseFloat(o.origQty),
         stopPrice: parseFloat(o.stopPrice),
         status:    o.status,
+        time:      typeof o.time === 'number' ? o.time : undefined,
+      }));
+      // 전체 심볼 Algo 주문 — symbol 파라미터 없이 조회하면 모든 심볼 반환
+      // 응답이 배열이 아닌 경우(계정 미지원 등) 빈 배열로 폴백
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const allAlgoRaw: any[] = Array.isArray(allAlgoOrdRes) ? allAlgoOrdRes : [];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const mappedAllAlgoOrders: FuturesOrder[] = allAlgoRaw.map((o: any) => ({
+        symbol:    o.symbol,
+        orderId:   String(o.algoId),
+        side:      o.side as 'BUY' | 'SELL',
+        type:      o.type,
+        price:     parseFloat(o.price ?? '0'),
+        origQty:   parseFloat(o.totalQty ?? o.origQty ?? o.quantity ?? '0'),
+        stopPrice: parseFloat(o.triggerPrice ?? o.stopPrice ?? '0'),
+        status:    o.algoStatus ?? o.status ?? 'NEW',
+        algoType:  o.algoType ?? 'CONDITIONAL',
+        isAlgo:    true,
+        time:      typeof o.bookTime === 'number' ? o.bookTime : (typeof o.time === 'number' ? o.time : undefined),
       }));
 
       setPositions(mapped);
       setOrders([...mappedOrders, ...mappedAlgoOrders]);
       setAllPositions(mappedAllPositions);
-      // allOrders에는 전심볼 일반 주문 + 현재 심볼 Algo 주문을 함께 노출
-      setAllOrders([...mappedAllOrders, ...mappedAlgoOrders]);
+      // allOrders에는 전심볼 일반 주문 + 전심볼 Algo 주문을 함께 노출 (중복 제거: algoId 기준)
+      const algoIdSet = new Set(mappedAllAlgoOrders.map(o => o.orderId));
+      const filteredAlgoPerTicker = mappedAlgoOrders.filter(o => !algoIdSet.has(o.orderId));
+      setAllOrders([...mappedAllOrders, ...mappedAllAlgoOrders, ...filteredAlgoPerTicker]);
       setError(null);
       firstFetchDone.current = true;
 

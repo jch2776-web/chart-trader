@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import type { ActivityLog } from '../types/trade';
 
 interface Props {
@@ -9,20 +10,23 @@ interface Props {
 const MAX_SHOWN = 100;
 
 export function ErrorNotificationBell({ errors, onClear }: Props) {
-  const [open, setOpen]         = useState(false);
+  const [open, setOpen]           = useState(false);
   const [seenCount, setSeenCount] = useState(0);
-  const dropdownRef             = useRef<HTMLDivElement>(null);
+  const [dropdownPos, setDropdownPos] = useState<{ top: number; right: number } | null>(null);
+  const buttonRef  = useRef<HTMLButtonElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
 
   // Badge = errors added since last time the panel was opened
   const badge = errors.length - seenCount;
 
-  // Close dropdown on outside click
+  // Close dropdown on outside click (portal — cannot use contains on toolbar wrapper)
   useEffect(() => {
     if (!open) return;
     const handler = (e: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
+      const target = e.target as Node;
+      const insideButton   = buttonRef.current?.contains(target) ?? false;
+      const insideDropdown = dropdownRef.current?.contains(target) ?? false;
+      if (!insideButton && !insideDropdown) setOpen(false);
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
@@ -30,8 +34,15 @@ export function ErrorNotificationBell({ errors, onClear }: Props) {
 
   const handleOpen = () => {
     setOpen(v => {
-      if (!v) setSeenCount(errors.length); // mark all as seen on open
-      return !v;
+      const next = !v;
+      if (next) {
+        setSeenCount(errors.length); // mark all as seen on open
+        if (buttonRef.current) {
+          const rect = buttonRef.current.getBoundingClientRect();
+          setDropdownPos({ top: rect.bottom + 6, right: window.innerWidth - rect.right });
+        }
+      }
+      return next;
     });
   };
 
@@ -45,9 +56,10 @@ export function ErrorNotificationBell({ errors, onClear }: Props) {
   const shown = errors.slice(-MAX_SHOWN).reverse(); // newest first
 
   return (
-    <div ref={dropdownRef} style={{ position: 'relative', flexShrink: 0 }}>
+    <div style={{ position: 'relative', flexShrink: 0 }}>
       {/* Bell button */}
       <button
+        ref={buttonRef}
         onClick={handleOpen}
         title={badge > 0 ? `미확인 오류 ${badge}건` : '오류 알림'}
         style={{
@@ -74,10 +86,10 @@ export function ErrorNotificationBell({ errors, onClear }: Props) {
         )}
       </button>
 
-      {/* Dropdown */}
-      {open && (
-        <div style={{
-          position: 'absolute', top: 'calc(100% + 6px)', right: 0,
+      {/* Dropdown — rendered via portal to escape toolbar's overflowY:hidden */}
+      {open && dropdownPos && createPortal(
+        <div ref={dropdownRef} style={{
+          position: 'fixed', top: dropdownPos.top, right: dropdownPos.right,
           width: 380, maxHeight: 420, background: '#1e222d',
           border: '1px solid #2a2e39', borderRadius: 8,
           boxShadow: '0 8px 32px rgba(0,0,0,0.55)',
@@ -144,7 +156,8 @@ export function ErrorNotificationBell({ errors, onClear }: Props) {
               최근 {MAX_SHOWN}건만 표시 · 전체 {errors.length}건
             </div>
           )}
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

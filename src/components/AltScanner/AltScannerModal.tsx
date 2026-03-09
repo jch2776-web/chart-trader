@@ -187,6 +187,7 @@ function TradingInfoPanel({
   paperLeverage, setPaperLeverage, paperMarginType, setPaperMarginType, paperRiskPct, setPaperRiskPct,
   paperSizeMode, setPaperSizeMode, paperMarginUsdt, setPaperMarginUsdt,
   liveLeverage, setLiveLeverage, liveMarginType, setLiveMarginType, liveRiskPct, setLiveRiskPct,
+  liveSizeMode, setLiveSizeMode, liveMarginUsdt, setLiveMarginUsdt,
   paperBalance,
 }: {
   c: ScanCandidate;
@@ -200,6 +201,8 @@ function TradingInfoPanel({
   liveLeverage: number; setLiveLeverage: (v: number) => void;
   liveMarginType: 'ISOLATED' | 'CROSSED'; setLiveMarginType: (v: 'ISOLATED' | 'CROSSED') => void;
   liveRiskPct: number; setLiveRiskPct: (v: number) => void;
+  liveSizeMode: 'risk' | 'margin'; setLiveSizeMode: (v: 'risk' | 'margin') => void;
+  liveMarginUsdt: number; setLiveMarginUsdt: (v: number) => void;
   paperBalance?: number;
 }) {
   const [showGlossary, setShowGlossary] = useState(false);
@@ -266,7 +269,8 @@ function TradingInfoPanel({
     leverage: liveLeverage,
     marginType: liveMarginType,
     riskPct: liveRiskPct,
-    sizeMode: 'risk',
+    sizeMode: liveSizeMode,
+    marginUsdt: liveSizeMode === 'margin' ? liveMarginUsdt : undefined,
   };
 
   return (
@@ -495,20 +499,60 @@ function TradingInfoPanel({
             ))}
           </div>
           <div style={{ width: 1, height: 22, background: '#2a2e39', flexShrink: 0 }} />
+          {/* Size mode toggle */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-            <span style={{ color: '#5e6673', fontSize: '0.75rem', whiteSpace: 'nowrap' as const }}>리스크</span>
-            {RISK_PRESETS.map(r => (
-              <button key={r}
+            <span style={{ color: '#5e6673', fontSize: '0.75rem', whiteSpace: 'nowrap' as const }}>수량 기준</span>
+            {(['risk', 'margin'] as const).map(m => (
+              <button key={m}
                 style={{ ...S.glossaryBtn, padding: '2px 9px', fontSize: '0.78rem',
-                  ...(liveRiskPct === r ? { borderColor: '#0ecb81', color: '#0ecb81', background: 'rgba(14,203,129,0.12)' } : {}),
+                  ...(liveSizeMode === m ? { borderColor: '#f0b90b', color: '#f0b90b', background: 'rgba(240,185,11,0.12)' } : {}),
                 }}
-                onClick={() => setLiveRiskPct(r)}>
-                {r}%
+                onClick={() => setLiveSizeMode(m)}>
+                {m === 'risk' ? '리스크%' : '마진'}
               </button>
             ))}
           </div>
+          <div style={{ width: 1, height: 22, background: '#2a2e39', flexShrink: 0 }} />
+          {liveSizeMode === 'risk' ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <span style={{ color: '#5e6673', fontSize: '0.75rem', whiteSpace: 'nowrap' as const }}>리스크</span>
+              {RISK_PRESETS.map(r => (
+                <button key={r}
+                  style={{ ...S.glossaryBtn, padding: '2px 9px', fontSize: '0.78rem',
+                    ...(liveRiskPct === r ? { borderColor: '#0ecb81', color: '#0ecb81', background: 'rgba(14,203,129,0.12)' } : {}),
+                  }}
+                  onClick={() => setLiveRiskPct(r)}>
+                  {r}%
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <span style={{ color: '#5e6673', fontSize: '0.75rem', whiteSpace: 'nowrap' as const }}>마진(USDT)</span>
+              {MARGIN_PRESETS.map(m => (
+                <button key={m}
+                  style={{ ...S.glossaryBtn, padding: '2px 9px', fontSize: '0.78rem',
+                    ...(liveMarginUsdt === m ? { borderColor: '#f6465d', color: '#f6465d', background: 'rgba(246,70,93,0.12)' } : {}),
+                  }}
+                  onClick={() => setLiveMarginUsdt(m)}>
+                  ${m}
+                </button>
+              ))}
+              <input
+                type="number"
+                min={1}
+                value={liveMarginUsdt}
+                onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v) && v > 0) setLiveMarginUsdt(v); }}
+                style={{ width: 72, padding: '2px 6px', borderRadius: 4, border: '1px solid #f6465d', background: '#131722', color: '#d1d4dc', fontSize: '0.78rem', fontFamily: 'inherit' }}
+              />
+            </div>
+          )}
           <span style={{ color: '#5e6673', fontSize: '0.72rem', marginLeft: 2 }}>
-            <b style={{ color: '#f0b90b' }}>{liveLeverage}x</b> · <b style={{ color: '#3b8beb' }}>{liveMarginType === 'ISOLATED' ? '격리' : '교차'}</b> · 잔고 <b style={{ color: '#0ecb81' }}>{liveRiskPct}%</b> 리스크
+            <b style={{ color: '#f0b90b' }}>{liveLeverage}x</b> · <b style={{ color: '#3b8beb' }}>{liveMarginType === 'ISOLATED' ? '격리' : '교차'}</b>
+            {liveSizeMode === 'risk'
+              ? <> · 잔고 <b style={{ color: '#f6465d' }}>{liveRiskPct}%</b> 리스크</>
+              : <> · 투입마진 <b style={{ color: '#f6465d' }}>${liveMarginUsdt}</b></>
+            }
           </span>
         </div>
       )}
@@ -693,6 +737,8 @@ export function AltScannerModal({
   const [liveLeverage, setLiveLeverage]         = useState(10);
   const [liveMarginType, setLiveMarginType]     = useState<'ISOLATED' | 'CROSSED'>('ISOLATED');
   const [liveRiskPct, setLiveRiskPct]           = useState(2);
+  const [liveSizeMode, setLiveSizeMode]         = useState<'risk' | 'margin'>('risk');
+  const [liveMarginUsdt, setLiveMarginUsdt]     = useState(100);
 
   // Snapshot view: candles fetched when snapshotMeta is provided
   const [snapshotCandles, setSnapshotCandles] = useState<Candle[]>([]);
@@ -1321,6 +1367,8 @@ export function AltScannerModal({
                   liveLeverage={liveLeverage} setLiveLeverage={setLiveLeverage}
                   liveMarginType={liveMarginType} setLiveMarginType={setLiveMarginType}
                   liveRiskPct={liveRiskPct} setLiveRiskPct={setLiveRiskPct}
+                  liveSizeMode={liveSizeMode} setLiveSizeMode={setLiveSizeMode}
+                  liveMarginUsdt={liveMarginUsdt} setLiveMarginUsdt={setLiveMarginUsdt}
                   paperBalance={paperBalance} />
               </>
             ) : (

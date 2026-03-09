@@ -43,9 +43,8 @@ import type { AltMeta } from './types/paperTrading';
 import { useAltAutoTrade } from './hooks/useAltAutoTrade';
 import { useSoundPlayer } from './hooks/useSoundPlayer';
 import { SoundSettingsModal } from './components/SoundSettingsModal';
-import { AutoTradeSettingsModal } from './components/AutoTradeSettingsModal';
+import { AutoTradeSettingsModal, DEFAULT_AUTO_TRADE_SETTINGS, DEFAULT_LIVE_AUTO_TRADE_SETTINGS } from './components/AutoTradeSettingsModal';
 import type { AutoTradeSettings } from './components/AutoTradeSettingsModal';
-import { DEFAULT_AUTO_TRADE_SETTINGS } from './components/AutoTradeSettingsModal';
 
 export interface BreakoutFlash {
   id: string;
@@ -188,6 +187,10 @@ function AppInner() {
   const [liveAltMetaMap, setLiveAltMetaMap] = useState<Record<string, AltMeta>>(() => {
     try { return JSON.parse(localStorage.getItem(uk('live-alt-meta')) ?? '{}'); } catch { return {}; }
   });
+  const liveAltMetaMapRef = useRef<Record<string, AltMeta>>(liveAltMetaMap);
+  liveAltMetaMapRef.current = liveAltMetaMap;
+  // In-flight guard: synchronously blocks duplicate live orders during async getPositionMode/futuresPlaceOrder gap
+  const liveInFlightRef = useRef<Set<string>>(new Set());
   React.useEffect(() => {
     try { localStorage.setItem(uk('live-alt-meta'), JSON.stringify(liveAltMetaMap)); } catch {}
   }, [liveAltMetaMap]);
@@ -239,15 +242,32 @@ function AppInner() {
   }, [telegramSettings]);
 
   // ── Auto trade settings (persisted) ─────────────────────────────────
-  const [autoTradeSettings, setAutoTradeSettings] = useState<AutoTradeSettings>(() => {
-    try { return JSON.parse(localStorage.getItem(uk('alt_auto_trade_settings')) ?? 'null') ?? DEFAULT_AUTO_TRADE_SETTINGS; }
-    catch { return DEFAULT_AUTO_TRADE_SETTINGS; }
+  // ── Auto trade settings: paper and live are independent ─────────────
+  const [paperAutoTradeSettings, setPaperAutoTradeSettings] = useState<AutoTradeSettings>(() => {
+    try {
+      const legacy = localStorage.getItem(uk('alt_auto_trade_settings'));
+      const saved = JSON.parse(localStorage.getItem(uk('alt_auto_trade_settings_paper')) ?? legacy ?? 'null');
+      return saved ? { ...DEFAULT_AUTO_TRADE_SETTINGS, ...saved } : DEFAULT_AUTO_TRADE_SETTINGS;
+    } catch { return DEFAULT_AUTO_TRADE_SETTINGS; }
   });
-  const autoTradeSettingsRef = useRef<AutoTradeSettings>(autoTradeSettings);
-  autoTradeSettingsRef.current = autoTradeSettings;
+  const paperAutoTradeSettingsRef = useRef<AutoTradeSettings>(paperAutoTradeSettings);
+  paperAutoTradeSettingsRef.current = paperAutoTradeSettings;
   React.useEffect(() => {
-    try { localStorage.setItem(uk('alt_auto_trade_settings'), JSON.stringify(autoTradeSettings)); } catch {}
-  }, [autoTradeSettings]);
+    try { localStorage.setItem(uk('alt_auto_trade_settings_paper'), JSON.stringify(paperAutoTradeSettings)); } catch {}
+  }, [paperAutoTradeSettings]);
+
+  const [liveAutoTradeSettings, setLiveAutoTradeSettings] = useState<AutoTradeSettings>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(uk('alt_auto_trade_settings_live')) ?? 'null');
+      return saved ? { ...DEFAULT_LIVE_AUTO_TRADE_SETTINGS, ...saved } : DEFAULT_LIVE_AUTO_TRADE_SETTINGS;
+    } catch { return DEFAULT_LIVE_AUTO_TRADE_SETTINGS; }
+  });
+  const liveAutoTradeSettingsRef = useRef<AutoTradeSettings>(liveAutoTradeSettings);
+  liveAutoTradeSettingsRef.current = liveAutoTradeSettings;
+  React.useEffect(() => {
+    try { localStorage.setItem(uk('alt_auto_trade_settings_live'), JSON.stringify(liveAutoTradeSettings)); } catch {}
+  }, [liveAutoTradeSettings]);
+
   const [showAutoTradeSettings, setShowAutoTradeSettings] = useState(false);
 
   // ── Auto trade mode (paper / live) ──────────────────────────────────
@@ -505,7 +525,7 @@ function AppInner() {
               co.entryMarginType === 'CROSSED' ? 'cross' : 'isolated',
             );
             addLog('info', `[모의] 조건부주문 체결 — ${co.entrySide} ${paperQty} @ ${co.entryPrice}`);
-            if (co.entrySide === 'BUY') soundPlayer.playBuy(); else soundPlayer.playSell();
+            soundPlayer.playEntry();
           } else {
             addLog('error', '[모의] 잔고 부족으로 조건부주문 실패');
           }
@@ -522,7 +542,7 @@ function AppInner() {
                 }
               }
               addLog('info', `[조건부주문] 완료 — ${co.entrySide} ${entryQty} @ ${co.entryPrice}`);
-              if (co.entrySide === 'BUY') soundPlayer.playBuy(); else soundPlayer.playSell();
+              soundPlayer.playEntry();
             })
             .catch((e: unknown) => {
               const msg = e instanceof Error ? e.message : '주문 실패';
@@ -615,7 +635,10 @@ function AppInner() {
     try { localStorage.setItem(uk('paper-mode'), isPaperMode ? '1' : '0'); } catch {}
   }, [isPaperMode]);
 
-  const paperTrading = usePaperTrading(uk('paper-trading'));
+  const paperTrading = usePaperTrading(uk('paper-trading'), (reason) => {
+    if (reason === 'tp') soundPlayer.playTp();
+    else soundPlayer.playSl();
+  });
   const isPaperModeRef = useRef(isPaperMode);
   isPaperModeRef.current = isPaperMode;
   const paperTradingRef = useRef(paperTrading);
@@ -924,6 +947,24 @@ function AppInner() {
 
   // ── AltScanner trade handlers ─────────────────────────────────────────
   const handleAltPaperTrade = useCallback((params: AltTradeParams) => {
+    // ── Duplicate guard ───────────────────────────────────────────────────
+    // Prevent the same symbol+direction from being entered multiple times.
+    // enteredThisRun in useAltAutoTrade deduplicates within one scan run,
+    // but across hourly runs the same candidate can reappear and compound
+    // margin via the position averaging (물타기) logic in openPosition.
+    const posSide = params.direction === 'long' ? 'LONG' : 'SHORT';
+    const orderSide = params.direction === 'long' ? 'BUY' : 'SELL';
+    const existingPos = paperTradingRef.current.positions.find(
+      p => p.symbol === params.symbol && p.positionSide === posSide && p.altMeta,
+    );
+    const existingOrder = paperTradingRef.current.orders.find(
+      o => o.symbol === params.symbol && o.side === orderSide && o.altMeta,
+    );
+    if (existingPos || existingOrder) {
+      addLog('info', `[ALT모의] ${params.symbol} ${params.direction.toUpperCase()} — 이미 ${existingPos ? '포지션' : '예약주문'} 존재, 중복 진입 건너뜀`);
+      return;
+    }
+    // ─────────────────────────────────────────────────────────────────────
     const balance = paperTradingRef.current.balance;
     const leverage = params.leverage ?? 10;
     const marginType = params.marginType === 'CROSSED' ? 'cross' : 'isolated';
@@ -989,7 +1030,7 @@ function AppInner() {
       ? params.triggerPriceAtNextClose!
       : params.entryPrice;
 
-    paperTradingRef.current.placeLimitOrder(
+    const placed = paperTradingRef.current.placeLimitOrder(
       params.symbol,
       side,
       qty,
@@ -1002,7 +1043,8 @@ function AppInner() {
       altMeta,
       triggerType,
     );
-    if (params.direction === 'long') soundPlayer.playBuy(); else soundPlayer.playSell();
+    if (!placed) return; // order was rejected (duplicate guard) — no sound, no log
+    soundPlayer.playEntry();
     if (isTrendlinePending) {
       addLog('info', `[ALT모의] ${params.symbol} 조건부 진입 대기 — 다음 봉 종가 ${params.direction === 'long' ? '≥' : '≤'} ${limitPrice.toFixed(4)} 시 체결`);
     }
@@ -1030,9 +1072,9 @@ function AppInner() {
       slPrice:    c.slPrice,
       tpPrice:    c.tpPrice,
       tp1Price:   c.tp1Price,
-      leverage:   autoTradeSettingsRef.current.leverage,
-      marginType: autoTradeSettingsRef.current.marginType,
-      riskPct:    autoTradeSettingsRef.current.riskPct,
+      leverage:   (autoTradeModeRef.current === 'live' ? liveAutoTradeSettingsRef : paperAutoTradeSettingsRef).current.leverage,
+      marginType: (autoTradeModeRef.current === 'live' ? liveAutoTradeSettingsRef : paperAutoTradeSettingsRef).current.marginType,
+      riskPct:    (autoTradeModeRef.current === 'live' ? liveAutoTradeSettingsRef : paperAutoTradeSettingsRef).current.riskPct,
       candidateId: `${c.symbol}_${c.direction}_${c.asOfCloseTime}`,
       scanInterval: c.interval,
       validUntilTime: c.validUntilTime,
@@ -1040,8 +1082,8 @@ function AppInner() {
       breakoutType:    c.breakoutType,
       candidateStatus: c.status,
       triggerPriceAtNextClose: c.triggerPriceAtNextClose,
-      sizeMode:   autoTradeSettingsRef.current.sizeMode,
-      marginUsdt: autoTradeSettingsRef.current.marginUsdt,
+      sizeMode:   (autoTradeModeRef.current === 'live' ? liveAutoTradeSettingsRef : paperAutoTradeSettingsRef).current.sizeMode,
+      marginUsdt: (autoTradeModeRef.current === 'live' ? liveAutoTradeSettingsRef : paperAutoTradeSettingsRef).current.marginUsdt,
     };
     if (autoTradeModeRef.current === 'live') {
       if (!binanceApiKey || !binanceApiSecret) {
@@ -1072,6 +1114,7 @@ function AppInner() {
       addLog(mappedType, `[자동매매] ${msg}`);
     },
     enterLabel: autoTradeMode === 'live' ? '실전진입' : '모의진입',
+    scanIntervals: (autoTradeMode === 'live' ? liveAutoTradeSettings : paperAutoTradeSettings).scanIntervals,
   });
   altAutoTradeSetActiveRef.current = altAutoTrade.setActive;
 
@@ -1120,6 +1163,15 @@ function AppInner() {
       addLog('error', '[ALT실전] API 키가 설정되지 않았습니다');
       return;
     }
+    // ── Duplicate guard ───────────────────────────────────────────────────
+    // Two layers: liveAltMetaMap (persisted, updated after re-render) +
+    // liveInFlightRef (synchronous, covers the async gap between check and map update).
+    const liveKey = `${params.symbol}_${params.direction}`;
+    if (liveAltMetaMapRef.current[liveKey] || liveInFlightRef.current.has(liveKey)) {
+      addLog('info', `[ALT실전] ${params.symbol} ${params.direction.toUpperCase()} — 이미 실전 포지션/주문 존재, 중복 진입 건너뜀`);
+      return;
+    }
+    liveInFlightRef.current.add(liveKey); // immediately lock before any async work
     // ── Position mode check: One-way (단방향) 필수 ────────────────────────
     try {
       const isDual = await getPositionMode(binanceApiKey, binanceApiSecret);
@@ -1186,13 +1238,12 @@ function AppInner() {
     try {
       await futuresPlaceOrder(side, effectiveEntryPrice, qty, leverage, liveMarginType, false, params.symbol);
       addLog('info', `[ALT실전] 진입 주문 — ${side} ${qty} ${params.symbol} @ ${effectiveEntryPrice}`);
-      if (side === 'BUY') soundPlayer.playBuy(); else soundPlayer.playSell();
-      setLiveAltMetaMap(prev => ({ ...prev, [`${params.symbol}_${params.direction}`]: liveMeta }));
+      soundPlayer.playEntry();
+      setLiveAltMetaMap(prev => ({ ...prev, [liveKey]: liveMeta }));
       // Register pending TP/SL — applied once the position is confirmed open via allPositions update
-      const pendingKey = `${params.symbol}_${params.direction}`;
       setPendingLiveTPSLMap(prev => ({
         ...prev,
-        [pendingKey]: {
+        [liveKey]: {
           symbol: params.symbol, direction: params.direction, closeSide,
           tp: params.tpPrice, sl: params.slPrice,
           plannedQty: qty, createdAt: Date.now(),
@@ -1201,6 +1252,9 @@ function AppInner() {
       addLog('info', `[ALT실전] TP/SL 대기 등록 — 포지션 확인 후 자동 적용`);
     } catch (e) {
       addLog('error', `[ALT실전] 진입 실패: ${e instanceof Error ? e.message : 'unknown'}`);
+      liveInFlightRef.current.delete(liveKey); // unlock on failure so retry is possible
+    } finally {
+      liveInFlightRef.current.delete(liveKey); // success: liveAltMetaMap takes over tracking
     }
   }, [handleTickerSelect, addLog, futuresPlaceOrder, binanceApiKey, binanceApiSecret]);
 
@@ -1281,8 +1335,7 @@ function AppInner() {
             onClose={(price, reason) => {
               setDrawingsByTicker(prev => ({ ...prev, [p.symbol]: [] }));
               paperTrading.closePosition(p.id, price, reason);
-              // closing long → sell sound; closing short → buy sound
-              if (p.altMeta!.direction === 'long') soundPlayer.playSell(); else soundPlayer.playBuy();
+              soundPlayer.playSl(); // AltPositionMonitor closes on SL or time-stop
             }}
           />
         )),
@@ -1433,9 +1486,11 @@ function AppInner() {
 
       {showAutoTradeSettings && (
         <AutoTradeSettingsModal
-          settings={autoTradeSettings}
-          onSave={setAutoTradeSettings}
+          paperSettings={paperAutoTradeSettings}
+          liveSettings={liveAutoTradeSettings}
+          onSave={(paper, live) => { setPaperAutoTradeSettings(paper); setLiveAutoTradeSettings(live); }}
           onClose={() => setShowAutoTradeSettings(false)}
+          initialTab={autoTradeMode}
         />
       )}
 
@@ -1443,8 +1498,9 @@ function AppInner() {
         <SoundSettingsModal
           config={soundPlayer.config}
           onUpdate={soundPlayer.updateConfig}
-          onPlayBuy={soundPlayer.playBuy}
-          onPlaySell={soundPlayer.playSell}
+          onPlayEntry={soundPlayer.playEntry}
+          onPlayTp={soundPlayer.playTp}
+          onPlaySl={soundPlayer.playSl}
           onClose={() => setShowSoundSettings(false)}
         />
       )}

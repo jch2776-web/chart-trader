@@ -4,14 +4,14 @@ import type { SoundConfig } from '../hooks/useSoundPlayer';
 interface Props {
   config: SoundConfig;
   onUpdate: (patch: Partial<SoundConfig>) => void;
-  onPlayBuy:  () => void;
-  onPlaySell: () => void;
+  onPlayEntry: () => void;
+  onPlayTp:    () => void;
+  onPlaySl:    () => void;
   onClose: () => void;
 }
 
 const MAX_FILE_MB = 2;
 
-// ── File input helper ────────────────────────────────────────────────────────
 function FileUploadRow({
   label, dataUrl, enabled, onToggle, onUpload, onClear, onPreview,
 }: {
@@ -19,7 +19,7 @@ function FileUploadRow({
   dataUrl:  string | null;
   enabled:  boolean;
   onToggle: () => void;
-  onUpload: (dataUrl: string, name: string) => void;
+  onUpload: (dataUrl: string) => void;
   onClear:  () => void;
   onPreview:() => void;
 }) {
@@ -34,21 +34,13 @@ function FileUploadRow({
       return;
     }
     const reader = new FileReader();
-    reader.onload = ev => {
-      const result = ev.target?.result as string;
-      onUpload(result, file.name);
-    };
+    reader.onload = ev => { onUpload(ev.target?.result as string); };
     reader.readAsDataURL(file);
     e.target.value = '';
   }, [onUpload]);
 
-  const filename = dataUrl
-    ? (dataUrl.length > 60 ? '(커스텀 파일)' : '(커스텀 파일)')
-    : '기본 비프음';
-
   return (
     <div style={s.row}>
-      {/* Toggle */}
       <button
         onClick={onToggle}
         title={enabled ? '사운드 끄기' : '사운드 켜기'}
@@ -60,18 +52,15 @@ function FileUploadRow({
         }} />
       </button>
 
-      {/* Label */}
       <span style={s.rowLabel}>{label}</span>
 
-      {/* File name */}
-      <span style={{ ...s.filename, color: dataUrl ? '#f0b90b' : '#5e6673' }}>{filename}</span>
+      <span style={{ ...s.filename, color: dataUrl ? '#f0b90b' : '#5e6673' }}>
+        {dataUrl ? '(커스텀 파일)' : '기본 비프음'}
+      </span>
 
-      {/* Buttons */}
       <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
         <button style={s.smBtn} onClick={onPreview} title="미리듣기">▶</button>
-        <button style={s.smBtn} onClick={() => inputRef.current?.click()} title="파일 업로드">
-          📁
-        </button>
+        <button style={s.smBtn} onClick={() => inputRef.current?.click()} title="파일 업로드">📁</button>
         {dataUrl && (
           <button style={{ ...s.smBtn, color: '#f6465d' }} onClick={onClear} title="기본으로 초기화">✕</button>
         )}
@@ -88,46 +77,52 @@ function FileUploadRow({
   );
 }
 
-// ── Main modal ───────────────────────────────────────────────────────────────
-export function SoundSettingsModal({ config, onUpdate, onPlayBuy, onPlaySell, onClose }: Props) {
+export function SoundSettingsModal({ config, onUpdate, onPlayEntry, onPlayTp, onPlaySl, onClose }: Props) {
   return (
     <div style={s.overlay} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
       <div style={s.modal}>
-        {/* Header */}
         <div style={s.header}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ fontSize: '1.3rem' }}>🔊</span>
             <div>
               <div style={s.title}>매매음 설정</div>
-              <div style={s.sub}>체결·진입 시 재생할 사운드를 설정합니다</div>
+              <div style={s.sub}>진입·익절·손절 시 재생할 사운드를 설정합니다</div>
             </div>
           </div>
           <button style={s.closeBtn} onClick={onClose}>✕</button>
         </div>
 
-        {/* Body */}
         <div style={s.body}>
           <FileUploadRow
-            label="매수음 (롱 진입 · 숏 청산)"
-            dataUrl={config.buyDataUrl}
-            enabled={config.buyEnabled}
-            onToggle={() => onUpdate({ buyEnabled: !config.buyEnabled })}
-            onUpload={(dataUrl) => onUpdate({ buyDataUrl: dataUrl })}
-            onClear={() => onUpdate({ buyDataUrl: null })}
-            onPreview={onPlayBuy}
+            label="매수음 — 포지션 진입 시"
+            dataUrl={config.entryDataUrl}
+            enabled={config.entryEnabled}
+            onToggle={() => onUpdate({ entryEnabled: !config.entryEnabled })}
+            onUpload={(dataUrl) => onUpdate({ entryDataUrl: dataUrl })}
+            onClear={() => onUpdate({ entryDataUrl: null })}
+            onPreview={onPlayEntry}
           />
           <FileUploadRow
-            label="매도음 (숏 진입 · 롱 청산)"
-            dataUrl={config.sellDataUrl}
-            enabled={config.sellEnabled}
-            onToggle={() => onUpdate({ sellEnabled: !config.sellEnabled })}
-            onUpload={(dataUrl) => onUpdate({ sellDataUrl: dataUrl })}
-            onClear={() => onUpdate({ sellDataUrl: null })}
-            onPreview={onPlaySell}
+            label="익절음 — 수익 청산 시"
+            dataUrl={config.tpDataUrl}
+            enabled={config.tpEnabled}
+            onToggle={() => onUpdate({ tpEnabled: !config.tpEnabled })}
+            onUpload={(dataUrl) => onUpdate({ tpDataUrl: dataUrl })}
+            onClear={() => onUpdate({ tpDataUrl: null })}
+            onPreview={onPlayTp}
+          />
+          <FileUploadRow
+            label="손절음 — 손실 청산 시"
+            dataUrl={config.slDataUrl}
+            enabled={config.slEnabled}
+            onToggle={() => onUpdate({ slEnabled: !config.slEnabled })}
+            onUpload={(dataUrl) => onUpdate({ slDataUrl: dataUrl })}
+            onClear={() => onUpdate({ slDataUrl: null })}
+            onPreview={onPlaySl}
           />
 
           {/* Volume */}
-          <div style={{ ...s.row, gap: 10, marginTop: 8 }}>
+          <div style={{ ...s.row, gap: 10, marginTop: 4 }}>
             <span style={s.rowLabel}>볼륨</span>
             <input
               type="range" min={0} max={1} step={0.05}
@@ -140,18 +135,15 @@ export function SoundSettingsModal({ config, onUpdate, onPlayBuy, onPlaySell, on
             </span>
           </div>
 
-          {/* Info */}
           <div style={s.info}>
-            <p style={{ margin: '0 0 4px', color: '#5e6673', fontSize: '0.76rem', lineHeight: 1.6 }}>
-              • 파일 미업로드 시 기본 비프음 재생 (매수: 고음, 매도: 저음)<br />
+            <p style={{ margin: 0, color: '#5e6673', fontSize: '0.76rem', lineHeight: 1.6 }}>
+              • 파일 미업로드 시 기본 비프음 재생 (진입: 고음, 익절: 상승음, 손절: 저음)<br />
               • 지원 형식: MP3, WAV, OGG, M4A, AAC (최대 {MAX_FILE_MB}MB)<br />
-              • 파일은 브라우저 localStorage에 저장됩니다 (서버 전송 없음)<br />
-              • 브라우저 정책상 첫 번째 재생은 사용자 클릭 이후에만 작동합니다
+              • 파일은 브라우저 localStorage에 저장됩니다 (서버 전송 없음)
             </p>
           </div>
         </div>
 
-        {/* Footer */}
         <div style={s.footer}>
           <button style={s.doneBtn} onClick={onClose}>닫기</button>
         </div>
@@ -160,7 +152,6 @@ export function SoundSettingsModal({ config, onUpdate, onPlayBuy, onPlaySell, on
   );
 }
 
-// ── Styles ───────────────────────────────────────────────────────────────────
 const s: Record<string, React.CSSProperties> = {
   overlay: {
     position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 7500,

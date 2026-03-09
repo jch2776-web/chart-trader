@@ -1,28 +1,43 @@
 import { useState, useCallback } from 'react';
 
-const STORAGE_KEY = 'trade_sound_settings_v1';
+const STORAGE_KEY = 'trade_sound_settings_v2';
 
 export interface SoundConfig {
-  buyEnabled:  boolean;
-  sellEnabled: boolean;
-  buyDataUrl:  string | null;  // base64 data URL for custom audio file
-  sellDataUrl: string | null;
-  volume:      number;         // 0.0 – 1.0
+  entryEnabled: boolean;  // 매수음 — position opened
+  tpEnabled:    boolean;  // 익절음 — TP hit
+  slEnabled:    boolean;  // 손절음 — SL / liq hit
+  entryDataUrl: string | null;
+  tpDataUrl:    string | null;
+  slDataUrl:    string | null;
+  volume:       number;   // 0.0 – 1.0
 }
 
 const DEFAULT_CONFIG: SoundConfig = {
-  buyEnabled:  true,
-  sellEnabled: true,
-  buyDataUrl:  null,
-  sellDataUrl: null,
-  volume:      0.7,
+  entryEnabled: true,
+  tpEnabled:    true,
+  slEnabled:    true,
+  entryDataUrl: null,
+  tpDataUrl:    null,
+  slDataUrl:    null,
+  volume:       0.7,
 };
 
 function loadConfig(): SoundConfig {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return DEFAULT_CONFIG;
-    return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
+    if (raw) return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
+    // Migrate from v1 (buy/sell keys)
+    const old = localStorage.getItem('trade_sound_settings_v1');
+    if (old) {
+      const v1 = JSON.parse(old) as Record<string, unknown>;
+      return {
+        ...DEFAULT_CONFIG,
+        entryEnabled: (v1.buyEnabled as boolean) ?? true,
+        entryDataUrl: (v1.buyDataUrl as string | null) ?? null,
+        volume:       (v1.volume as number) ?? 0.7,
+      };
+    }
+    return DEFAULT_CONFIG;
   } catch {
     return DEFAULT_CONFIG;
   }
@@ -32,22 +47,25 @@ function saveConfig(cfg: SoundConfig) {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg)); } catch {}
 }
 
-// Synthesise a short beep via Web Audio API (no file needed)
-function playBeep(freq: number, durationSec: number, volume: number) {
+function playBeep(freq: number, durationSec: number, volume: number, freq2?: number) {
   try {
     const ctx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
-    const osc  = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.type = 'sine';
-    osc.frequency.value = freq;
-    gain.gain.setValueAtTime(volume * 0.4, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + durationSec);
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start(ctx.currentTime);
-    osc.stop(ctx.currentTime + durationSec);
-    setTimeout(() => ctx.close(), (durationSec + 0.2) * 1000);
-  } catch { /* blocked before user gesture — silently ignore */ }
+    const play = (f: number, start: number, dur: number) => {
+      const osc  = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = f;
+      gain.gain.setValueAtTime(volume * 0.4, ctx.currentTime + start);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + start + dur);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(ctx.currentTime + start);
+      osc.stop(ctx.currentTime + start + dur);
+    };
+    play(freq, 0, durationSec);
+    if (freq2 != null) play(freq2, durationSec * 0.6, durationSec); // ascending second note
+    setTimeout(() => ctx.close(), (durationSec * 2 + 0.2) * 1000);
+  } catch { /* blocked before user gesture */ }
 }
 
 function playDataUrl(dataUrl: string, volume: number) {
@@ -69,20 +87,26 @@ export function useSoundPlayer() {
     });
   }, []);
 
-  // Always read fresh from storage so stale closures don't matter
-  const playBuy = useCallback(() => {
+  const playEntry = useCallback(() => {
     const cfg = loadConfig();
-    if (!cfg.buyEnabled) return;
-    if (cfg.buyDataUrl) playDataUrl(cfg.buyDataUrl, cfg.volume);
-    else                playBeep(880, 0.18, cfg.volume); // high A5 — bright
+    if (!cfg.entryEnabled) return;
+    if (cfg.entryDataUrl) playDataUrl(cfg.entryDataUrl, cfg.volume);
+    else                  playBeep(880, 0.15, cfg.volume); // bright A5
   }, []);
 
-  const playSell = useCallback(() => {
+  const playTp = useCallback(() => {
     const cfg = loadConfig();
-    if (!cfg.sellEnabled) return;
-    if (cfg.sellDataUrl) playDataUrl(cfg.sellDataUrl, cfg.volume);
-    else                 playBeep(440, 0.22, cfg.volume); // A4 — warm
+    if (!cfg.tpEnabled) return;
+    if (cfg.tpDataUrl) playDataUrl(cfg.tpDataUrl, cfg.volume);
+    else               playBeep(880, 0.12, cfg.volume, 1100); // ascending — cheerful
   }, []);
 
-  return { config, updateConfig, playBuy, playSell };
+  const playSl = useCallback(() => {
+    const cfg = loadConfig();
+    if (!cfg.slEnabled) return;
+    if (cfg.slDataUrl) playDataUrl(cfg.slDataUrl, cfg.volume);
+    else               playBeep(330, 0.25, cfg.volume); // low — somber
+  }, []);
+
+  return { config, updateConfig, playEntry, playTp, playSl };
 }

@@ -31,6 +31,7 @@ export interface FuturesOrder {
   origQty: number;
   stopPrice: number;
   status: string;
+  time?: number;              // ms epoch — order placement time
   algoType?: string;          // CONDITIONAL, OCO
   isAlgo?: boolean;           // true when sourced from /fapi/v1/openAlgoOrders
 }

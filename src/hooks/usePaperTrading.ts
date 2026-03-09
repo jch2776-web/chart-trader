@@ -44,7 +44,7 @@ function liqPrice(entryPrice: number, leverage: number, side: 'LONG' | 'SHORT'):
     : entryPrice * (1 + 1 / leverage);
 }
 
-export function usePaperTrading(storageKey: string) {
+export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' | 'sl' | 'liq') => void) {
   const [state, setState] = useState<PaperState>(() => load(storageKey) ?? { ...DEFAULT_STATE });
 
   useEffect(() => {
@@ -53,6 +53,8 @@ export function usePaperTrading(storageKey: string) {
 
   const stateRef = useRef(state);
   stateRef.current = state;
+  const onAutoCloseRef = useRef(onAutoClose);
+  onAutoCloseRef.current = onAutoClose;
 
   const openPosition = useCallback((
     symbol: string,
@@ -74,7 +76,10 @@ export function usePaperTrading(storageKey: string) {
       const actualCost = parseFloat((margin + actualFee).toFixed(8));
 
       // If same symbol + same side already open → average into existing position (물타기)
+      // Exception: altMeta positions must never be water-averaged — each alt entry is independent.
+      // If either the existing position or the incoming fill has altMeta, reject the fill silently.
       const existing = prev.positions.find(p => p.symbol === symbol && p.positionSide === side);
+      if (existing && (existing.altMeta || altMeta)) return prev; // block water-avg for alt positions
       if (existing) {
         const existingQty = Math.abs(existing.positionAmt);
         const newTotalQty = existingQty + qty;
@@ -221,7 +226,8 @@ export function usePaperTrading(storageKey: string) {
     }));
   }, []);
 
-  // Place a limit order (queued — executed when price reaches limitPrice)
+  // Place a limit order (queued — executed when price reaches limitPrice).
+  // Returns true if the order was accepted, false if rejected (e.g. duplicate altMeta guard).
   const placeLimitOrder = useCallback((
     symbol: string,
     side: 'BUY' | 'SELL',
@@ -234,12 +240,29 @@ export function usePaperTrading(storageKey: string) {
     slPrice?: number,
     altMeta?: AltMeta,
     triggerType: PaperOrder['triggerType'] = 'limit',
-  ) => {
+  ): boolean => {
+    // Pre-check with stateRef (latest rendered state) for a fast synchronous return value.
+    if (altMeta) {
+      const posSide = side === 'BUY' ? 'LONG' : 'SHORT';
+      const dupOrder = stateRef.current.orders.find(o => o.symbol === symbol && o.side === side && o.altMeta);
+      const dupPos   = stateRef.current.positions.find(p => p.symbol === symbol && p.positionSide === posSide && p.altMeta);
+      if (dupOrder || dupPos) return false;
+    }
     const order: PaperOrder = {
       id: uid(), symbol, side, qty, limitPrice, triggerType, leverage, marginType, reduceOnly,
       placedAt: Date.now(), tpPrice, slPrice, altMeta,
     };
-    setState(prev => ({ ...prev, orders: [...prev.orders, order] }));
+    setState(prev => {
+      // Secondary guard inside setState (covers rapid concurrent calls within same render cycle).
+      if (altMeta) {
+        const posSide = side === 'BUY' ? 'LONG' : 'SHORT';
+        const dupOrder = prev.orders.find(o => o.symbol === symbol && o.side === side && o.altMeta);
+        const dupPos   = prev.positions.find(p => p.symbol === symbol && p.positionSide === posSide && p.altMeta);
+        if (dupOrder || dupPos) return prev;
+      }
+      return { ...prev, orders: [...prev.orders, order] };
+    });
+    return true;
   }, []);
 
   const cancelOrder = useCallback((id: string) => {
@@ -260,10 +283,13 @@ export function usePaperTrading(storageKey: string) {
 
       if (isLong ? mark <= liq : mark >= liq) {
         closePosition(pos.id, liq, 'liq');
+        onAutoCloseRef.current?.('liq');
       } else if (pos.slPrice !== undefined && (isLong ? mark <= pos.slPrice : mark >= pos.slPrice)) {
         closePosition(pos.id, pos.slPrice, 'sl');
+        onAutoCloseRef.current?.('sl');
       } else if (pos.tpPrice !== undefined && (isLong ? mark >= pos.tpPrice : mark <= pos.tpPrice)) {
         closePosition(pos.id, pos.tpPrice, 'tp');
+        onAutoCloseRef.current?.('tp');
       }
     }
 
@@ -279,6 +305,10 @@ export function usePaperTrading(storageKey: string) {
         ? mark <= order.limitPrice
         : mark >= order.limitPrice;
       if (!triggered) continue;
+      // Safety guard: reject fill prices that are wildly out of range of the limit price.
+      // Ratio >100× or <0.01× indicates a corrupted price (e.g. BTC price written to an alt key).
+      const ratio = mark / order.limitPrice;
+      if (ratio > 100 || ratio < 0.01) continue;
       triggeredIds.push(order.id);
       // Fill at the current mark price (price improvement over limitPrice)
       const fillPrice = order.side === 'BUY'

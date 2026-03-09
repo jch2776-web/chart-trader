@@ -987,6 +987,12 @@ export function BottomPanel({
     return () => clearInterval(tid);
   }, []);
 
+  // Shared time formatter (MM/DD HH:MM:SS)
+  const fmtEntryTime = (ts: number) => {
+    const d = new Date(ts);
+    return `${d.toLocaleDateString('ko-KR', { month: '2-digit', day: '2-digit' })} ${d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+  };
+
   // Balance reset state (shown in tab bar)
   const [resetBalInput, setResetBalInput] = useState('');
   const [showResetBal, setShowResetBal] = useState(false);
@@ -1177,7 +1183,7 @@ export function BottomPanel({
                       </div>
                     </td>
                     <td style={{ ...s.td, color: col, fontWeight: 600, fontSize: '0.8rem' }}>{label}</td>
-                    <td style={{ ...s.td, color: '#5d6776', fontSize: '0.74rem', whiteSpace: 'nowrap' }}>{new Date(o.placedAt).toLocaleTimeString()}</td>
+                    <td style={{ ...s.td, color: '#5d6776', fontSize: '0.74rem', whiteSpace: 'nowrap' }}>{fmtEntryTime(o.placedAt)}</td>
                     <td style={s.td}>
                       <button
                         style={{ ...s.cancelBtn, color: '#f6465d', borderColor: 'rgba(246,70,93,0.3)' }}
@@ -1429,13 +1435,14 @@ export function BottomPanel({
                   <th style={s.th}>미실현 손익 (ROI)</th>
                   <th style={s.th}>TP / SL</th>
                   <th style={s.th}>유효 시간</th>
+                  <th style={s.th}>진입시간</th>
                   {isPaperMode && <th style={s.th}>청산</th>}
                 </tr>
               </thead>
               <tbody>
                 {isPaperMode ? (
                   (paperPositions?.length ?? 0) === 0 ? (
-                    <tr><td colSpan={11} style={s.empty}>모의 포지션 없음 — 위 폼에서 주문을 넣어보세요</td></tr>
+                    <tr><td colSpan={12} style={s.empty}>모의 포지션 없음 — 위 폼에서 주문을 넣어보세요</td></tr>
                   ) : paperPositions!.map(pos => {
                     const side = pos.positionAmt > 0 ? 'LONG' : 'SHORT';
                     const absAmt = Math.abs(pos.positionAmt);
@@ -1519,6 +1526,10 @@ export function BottomPanel({
                             </div>
                           ) : '—'}
                         </td>
+                        {/* 진입시간 column (paper) */}
+                        <td style={{ ...s.td, color: '#5d6776', fontSize: '0.74rem', whiteSpace: 'nowrap' }}>
+                          {rawForBadge?.entryTime ? fmtEntryTime(rawForBadge.entryTime) : '—'}
+                        </td>
                         <td style={s.td}>
                           <button
                             style={{ ...s.cancelBtn, color: '#f6465d', borderColor: 'rgba(246,70,93,0.3)' }}
@@ -1530,7 +1541,7 @@ export function BottomPanel({
                   })
                 ) : (
                   allPositions.length === 0 ? (
-                    <tr><td colSpan={10} style={s.empty}>포지션 없음</td></tr>
+                    <tr><td colSpan={11} style={s.empty}>포지션 없음</td></tr>
                   ) : allPositions.map(pos => {
                     const side = pos.positionAmt > 0 ? 'LONG' : 'SHORT';
                     const liveDir = side === 'LONG' ? 'long' : 'short';
@@ -1620,8 +1631,17 @@ export function BottomPanel({
                           </div>
                         </td>
                         {/* 유효 시간 column (live) */}
-                        <td style={{ ...s.td, fontFamily: 'monospace', fontSize: '0.74rem', color: liveMeta ? (liveRemMs > 0 ? '#848e9c' : '#f6465d') : '#3a3f4b', whiteSpace: 'nowrap' }}>
-                          {liveMeta ? liveRemStr : '—'}
+                        <td style={{ ...s.td, fontFamily: 'monospace', fontSize: '0.74rem', whiteSpace: 'nowrap' }}>
+                          {liveMeta ? (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                              <span style={{ color: '#3b8beb', fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.03em' }}>{liveMeta.scanInterval}</span>
+                              <span style={{ color: liveRemMs > 0 ? '#848e9c' : '#f6465d' }}>{liveRemStr}</span>
+                            </div>
+                          ) : '—'}
+                        </td>
+                        {/* 진입시간 column (live) */}
+                        <td style={{ ...s.td, color: '#5d6776', fontSize: '0.74rem', whiteSpace: 'nowrap' }}>
+                          {pos.entryTime ? fmtEntryTime(pos.entryTime) : (pos.updateTime ? fmtEntryTime(pos.updateTime) : '—')}
                         </td>
                       </tr>
                     );
@@ -1643,12 +1663,13 @@ export function BottomPanel({
                 <th style={s.th}>가격 (USDT)</th>
                 <th style={s.th}>수량</th>
                 <th style={s.th}>상태</th>
+                <th style={s.th}>등록시간</th>
                 <th style={s.th}>취소</th>
               </tr>
             </thead>
             <tbody>
               {allOrders.length === 0 ? (
-                <tr><td colSpan={7} style={s.empty}>미체결 주문 없음</td></tr>
+                <tr><td colSpan={8} style={s.empty}>미체결 주문 없음</td></tr>
               ) : allOrders.map(ord => {
                 const effectivePrice = ord.price > 0 ? ord.price : ord.stopPrice;
                 return (
@@ -1675,6 +1696,9 @@ export function BottomPanel({
                     </td>
                     <td style={s.td}>{ord.origQty}</td>
                     <td style={s.td}><span style={s.statusTag}>{ord.status}</span></td>
+                    <td style={{ ...s.td, color: '#5d6776', fontSize: '0.74rem', whiteSpace: 'nowrap' }}>
+                      {ord.time ? fmtEntryTime(ord.time) : '—'}
+                    </td>
                     <td style={s.td}>
                       <button
                         style={s.cancelBtn}

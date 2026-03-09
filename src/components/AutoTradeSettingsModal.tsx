@@ -1,11 +1,15 @@
 import React, { useState } from 'react';
 
+export type ScanTF = '15m' | '1h' | '4h' | '1d';
+export const ALL_SCAN_TFS: ScanTF[] = ['15m', '1h', '4h', '1d'];
+
 export interface AutoTradeSettings {
   sizeMode: 'margin' | 'risk';
   marginUsdt: number;
   riskPct: number;
   leverage: number;
   marginType: 'ISOLATED' | 'CROSSED';
+  scanIntervals: ScanTF[];
 }
 
 export const DEFAULT_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
@@ -14,148 +18,241 @@ export const DEFAULT_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
   riskPct: 2,
   leverage: 3,
   marginType: 'ISOLATED',
+  scanIntervals: ['1h', '4h', '1d'],
+};
+
+export const DEFAULT_LIVE_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
+  sizeMode: 'margin',
+  marginUsdt: 100,
+  riskPct: 2,
+  leverage: 3,
+  marginType: 'ISOLATED',
+  scanIntervals: ['1h', '4h', '1d'],
 };
 
 interface Props {
-  settings: AutoTradeSettings;
-  onSave: (s: AutoTradeSettings) => void;
+  paperSettings: AutoTradeSettings;
+  liveSettings: AutoTradeSettings;
+  onSave: (paper: AutoTradeSettings, live: AutoTradeSettings) => void;
   onClose: () => void;
+  initialTab?: 'paper' | 'live';
 }
 
-export function AutoTradeSettingsModal({ settings, onSave, onClose }: Props) {
-  const [draft, setDraft] = useState<AutoTradeSettings>({ ...settings });
+// ── Single-mode settings editor ─────────────────────────────────────────────
+function SettingsEditor({
+  draft, set, isLive,
+}: {
+  draft: AutoTradeSettings;
+  set: <K extends keyof AutoTradeSettings>(k: K, v: AutoTradeSettings[K]) => void;
+  isLive: boolean;
+}) {
+  return (
+    <>
+      {/* Leverage */}
+      <div style={s.fieldRow}>
+        <label style={s.label}>레버리지</label>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input
+            type="number"
+            min={1} max={125} step={1}
+            value={draft.leverage}
+            onChange={e => set('leverage', Math.max(1, Math.min(125, parseInt(e.target.value) || 1)))}
+            style={s.numberInput}
+          />
+          <span style={s.unit}>×</span>
+        </div>
+      </div>
 
-  const set = <K extends keyof AutoTradeSettings>(k: K, v: AutoTradeSettings[K]) =>
-    setDraft(prev => ({ ...prev, [k]: v }));
+      {/* Margin type */}
+      <div style={s.fieldRow}>
+        <label style={s.label}>마진 유형</label>
+        <div style={{ display: 'flex', gap: 6 }}>
+          {(['ISOLATED', 'CROSSED'] as const).map(m => (
+            <button
+              key={m}
+              style={{ ...s.toggleChip, ...(draft.marginType === m ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
+              onClick={() => set('marginType', m)}
+            >
+              {m === 'ISOLATED' ? '격리(Isolated)' : '교차(Cross)'}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Size mode */}
+      <div style={s.fieldRow}>
+        <label style={s.label}>사이즈 방식</label>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button
+            style={{ ...s.toggleChip, ...(draft.sizeMode === 'margin' ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
+            onClick={() => set('sizeMode', 'margin')}
+          >
+            고정 마진 (USDT)
+          </button>
+          <button
+            style={{ ...s.toggleChip, ...(draft.sizeMode === 'risk' ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
+            onClick={() => set('sizeMode', 'risk')}
+          >
+            잔고 비율 (%)
+          </button>
+        </div>
+      </div>
+
+      {/* Margin USDT */}
+      {draft.sizeMode === 'margin' && (
+        <div style={s.fieldRow}>
+          <label style={s.label}>마진 크기</label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <input
+              type="number"
+              min={1} max={100000} step={1}
+              value={draft.marginUsdt}
+              onChange={e => set('marginUsdt', Math.max(1, parseFloat(e.target.value) || 1))}
+              style={s.numberInput}
+            />
+            <span style={s.unit}>USDT</span>
+          </div>
+          <span style={s.hint}>
+            진입 포지션 크기 = {draft.marginUsdt} × {draft.leverage} = {draft.marginUsdt * draft.leverage} USDT
+          </span>
+        </div>
+      )}
+
+      {/* Risk pct */}
+      {draft.sizeMode === 'risk' && (
+        <div style={s.fieldRow}>
+          <label style={s.label}>리스크 비율</label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <input
+              type="number"
+              min={0.1} max={100} step={0.1}
+              value={draft.riskPct}
+              onChange={e => set('riskPct', Math.max(0.1, Math.min(100, parseFloat(e.target.value) || 0.1)))}
+              style={s.numberInput}
+            />
+            <span style={s.unit}>%</span>
+          </div>
+          <span style={s.hint}>잔고의 {draft.riskPct}%를 마진으로 사용</span>
+        </div>
+      )}
+
+      {/* Scan TF */}
+      <div style={s.fieldRow}>
+        <label style={s.label}>스캔 타임프레임</label>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {ALL_SCAN_TFS.map(tf => {
+            const active = draft.scanIntervals.includes(tf);
+            return (
+              <button
+                key={tf}
+                style={{ ...s.toggleChip, ...(active ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
+                onClick={() => {
+                  if (active) {
+                    if (draft.scanIntervals.length === 1) return; // at least one must be selected
+                    set('scanIntervals', draft.scanIntervals.filter(t => t !== tf));
+                  } else {
+                    const order: ScanTF[] = ['15m', '1h', '4h', '1d'];
+                    const next = [...draft.scanIntervals, tf].sort((a, b) => order.indexOf(a) - order.indexOf(b));
+                    set('scanIntervals', next);
+                  }
+                }}
+              >
+                {tf}
+              </button>
+            );
+          })}
+        </div>
+        <span style={s.hint}>선택한 타임프레임만 스캔합니다 (최소 1개 필수)</span>
+      </div>
+
+      {/* Info */}
+      <div style={s.infoBox}>
+        <p style={{ margin: 0, color: '#5e6673', fontSize: '0.76rem', lineHeight: 1.7 }}>
+          {isLive
+            ? <>• 실전 자동매매 진입 시에만 적용됩니다 (모의 설정과 독립)<br />
+               • 실전 진입 전 레버리지·마진 크기를 반드시 확인하세요<br />
+               • 높은 레버리지는 청산 위험을 크게 높입니다 — 신중하게 설정하세요</>
+            : <>• 모의 자동매매 진입 시에만 적용됩니다 (실전 설정과 독립)<br />
+               • 수동 ALT추천 진입은 진입 모달에서 별도 조정 가능합니다<br />
+               • 높은 레버리지는 청산 위험을 크게 높입니다 — 주의하세요</>
+          }
+        </p>
+      </div>
+    </>
+  );
+}
+
+// ── Main modal ───────────────────────────────────────────────────────────────
+export function AutoTradeSettingsModal({ paperSettings, liveSettings, onSave, onClose, initialTab = 'paper' }: Props) {
+  const [tab, setTab] = useState<'paper' | 'live'>(initialTab);
+  const [paperDraft, setPaperDraft] = useState<AutoTradeSettings>({ ...paperSettings });
+  const [liveDraft,  setLiveDraft]  = useState<AutoTradeSettings>({ ...liveSettings });
+
+  const setP = <K extends keyof AutoTradeSettings>(k: K, v: AutoTradeSettings[K]) =>
+    setPaperDraft(prev => ({ ...prev, [k]: v }));
+  const setL = <K extends keyof AutoTradeSettings>(k: K, v: AutoTradeSettings[K]) =>
+    setLiveDraft(prev => ({ ...prev, [k]: v }));
 
   const handleSave = () => {
-    onSave(draft);
+    onSave(paperDraft, liveDraft);
     onClose();
   };
 
-  const handleReset = () => setDraft({ ...DEFAULT_AUTO_TRADE_SETTINGS });
+  const handleReset = () => {
+    if (tab === 'paper') setPaperDraft({ ...DEFAULT_AUTO_TRADE_SETTINGS });
+    else setLiveDraft({ ...DEFAULT_LIVE_AUTO_TRADE_SETTINGS });
+  };
+
+  const isLive = tab === 'live';
 
   return (
     <div style={s.overlay} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
       <div style={s.modal}>
         {/* Header */}
-        <div style={s.header}>
+        <div style={{ ...s.header, background: isLive ? 'rgba(246,70,93,0.06)' : 'rgba(14,203,129,0.05)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ fontSize: '1.2rem' }}>⚙</span>
             <div>
               <div style={s.title}>자동매매 진입 설정</div>
-              <div style={s.sub}>ALT추천 자동매매 진입 시 사용할 기본 파라미터</div>
+              <div style={s.sub}>모의/실전 각각 독립 설정 — {isLive ? '실전' : '모의'} 탭 편집 중</div>
             </div>
           </div>
           <button style={s.closeBtn} onClick={onClose}>✕</button>
         </div>
 
+        {/* Tab switcher */}
+        <div style={s.tabBar}>
+          <button
+            style={{ ...s.tabBtn, ...(tab === 'paper' ? s.tabBtnActivePaper : {}) }}
+            onClick={() => setTab('paper')}
+          >
+            📄 모의 설정
+          </button>
+          <button
+            style={{ ...s.tabBtn, ...(tab === 'live' ? s.tabBtnActiveLive : {}) }}
+            onClick={() => setTab('live')}
+          >
+            ⚡ 실전 설정
+          </button>
+        </div>
+
         {/* Body */}
         <div style={s.body}>
-          {/* Leverage */}
-          <div style={s.fieldRow}>
-            <label style={s.label}>레버리지</label>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <input
-                type="number"
-                min={1} max={125} step={1}
-                value={draft.leverage}
-                onChange={e => set('leverage', Math.max(1, Math.min(125, parseInt(e.target.value) || 1)))}
-                style={s.numberInput}
-              />
-              <span style={s.unit}>×</span>
-            </div>
-          </div>
-
-          {/* Margin type */}
-          <div style={s.fieldRow}>
-            <label style={s.label}>마진 유형</label>
-            <div style={{ display: 'flex', gap: 6 }}>
-              {(['ISOLATED', 'CROSSED'] as const).map(m => (
-                <button
-                  key={m}
-                  style={{ ...s.toggleChip, ...(draft.marginType === m ? s.toggleChipActive : {}) }}
-                  onClick={() => set('marginType', m)}
-                >
-                  {m === 'ISOLATED' ? '격리(Isolated)' : '교차(Cross)'}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Size mode */}
-          <div style={s.fieldRow}>
-            <label style={s.label}>사이즈 방식</label>
-            <div style={{ display: 'flex', gap: 6 }}>
-              <button
-                style={{ ...s.toggleChip, ...(draft.sizeMode === 'margin' ? s.toggleChipActive : {}) }}
-                onClick={() => set('sizeMode', 'margin')}
-              >
-                고정 마진 (USDT)
-              </button>
-              <button
-                style={{ ...s.toggleChip, ...(draft.sizeMode === 'risk' ? s.toggleChipActive : {}) }}
-                onClick={() => set('sizeMode', 'risk')}
-              >
-                잔고 비율 (%)
-              </button>
-            </div>
-          </div>
-
-          {/* Margin USDT (shown only when sizeMode=margin) */}
-          {draft.sizeMode === 'margin' && (
-            <div style={s.fieldRow}>
-              <label style={s.label}>마진 크기</label>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <input
-                  type="number"
-                  min={1} max={100000} step={1}
-                  value={draft.marginUsdt}
-                  onChange={e => set('marginUsdt', Math.max(1, parseFloat(e.target.value) || 1))}
-                  style={s.numberInput}
-                />
-                <span style={s.unit}>USDT</span>
-              </div>
-              <span style={s.hint}>
-                진입 포지션 크기 = {draft.marginUsdt} × {draft.leverage} = {draft.marginUsdt * draft.leverage} USDT
-              </span>
-            </div>
-          )}
-
-          {/* Risk pct (shown only when sizeMode=risk) */}
-          {draft.sizeMode === 'risk' && (
-            <div style={s.fieldRow}>
-              <label style={s.label}>리스크 비율</label>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <input
-                  type="number"
-                  min={0.1} max={100} step={0.1}
-                  value={draft.riskPct}
-                  onChange={e => set('riskPct', Math.max(0.1, Math.min(100, parseFloat(e.target.value) || 0.1)))}
-                  style={s.numberInput}
-                />
-                <span style={s.unit}>%</span>
-              </div>
-              <span style={s.hint}>잔고의 {draft.riskPct}%를 마진으로 사용</span>
-            </div>
-          )}
-
-          {/* Info box */}
-          <div style={s.infoBox}>
-            <p style={{ margin: 0, color: '#5e6673', fontSize: '0.76rem', lineHeight: 1.7 }}>
-              • 이 설정은 ALT추천 자동매매(모의/실전 공통)에 적용됩니다<br />
-              • 수동 ALT추천 진입은 진입 모달에서 별도 조정 가능합니다<br />
-              • 높은 레버리지는 청산 위험을 크게 높입니다 — 주의하세요
-            </p>
-          </div>
+          {tab === 'paper'
+            ? <SettingsEditor draft={paperDraft} set={setP} isLive={false} />
+            : <SettingsEditor draft={liveDraft}  set={setL} isLive={true}  />
+          }
         </div>
 
         {/* Footer */}
         <div style={s.footer}>
-          <button style={s.resetBtn} onClick={handleReset}>기본값 복원</button>
+          <button style={s.resetBtn} onClick={handleReset}>{tab === 'paper' ? '모의' : '실전'} 기본값 복원</button>
           <div style={{ display: 'flex', gap: 8 }}>
             <button style={s.cancelBtn} onClick={onClose}>취소</button>
-            <button style={s.saveBtn} onClick={handleSave}>저장</button>
+            <button
+              style={{ ...s.saveBtn, ...(isLive ? s.saveBtnLive : {}) }}
+              onClick={handleSave}
+            >저장</button>
           </div>
         </div>
       </div>
@@ -170,13 +267,12 @@ const s: Record<string, React.CSSProperties> = {
   },
   modal: {
     background: '#1e222d', border: '1px solid #2a2e39', borderRadius: 10,
-    width: 'min(460px, 96vw)', display: 'flex', flexDirection: 'column',
+    width: 'min(480px, 96vw)', display: 'flex', flexDirection: 'column',
     boxShadow: '0 12px 40px rgba(0,0,0,0.6)', overflow: 'hidden',
   },
   header: {
     display: 'flex', alignItems: 'center', justifyContent: 'space-between',
     padding: '14px 20px', borderBottom: '1px solid #2a2e39',
-    background: 'rgba(14,203,129,0.05)',
   },
   title: { color: '#d1d4dc', fontWeight: 700, fontSize: '1rem' },
   sub: { color: '#5e6673', fontSize: '0.74rem', marginTop: 2 },
@@ -184,16 +280,27 @@ const s: Record<string, React.CSSProperties> = {
     background: 'none', border: 'none', color: '#5e6673', cursor: 'pointer',
     fontSize: '1rem', padding: '4px 8px', borderRadius: 4,
   },
-  body: { padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 14 },
-  fieldRow: {
-    display: 'flex', flexDirection: 'column', gap: 6,
+  tabBar: {
+    display: 'flex', borderBottom: '1px solid #2a2e39',
   },
+  tabBtn: {
+    flex: 1, background: 'none', border: 'none', cursor: 'pointer',
+    padding: '10px 0', fontSize: '0.85rem', fontWeight: 600,
+    color: '#5e6673', fontFamily: 'inherit', transition: 'all 0.15s',
+  },
+  tabBtnActivePaper: {
+    color: '#0ecb81', borderBottom: '2px solid #0ecb81', background: 'rgba(14,203,129,0.05)',
+  },
+  tabBtnActiveLive: {
+    color: '#f6465d', borderBottom: '2px solid #f6465d', background: 'rgba(246,70,93,0.05)',
+  },
+  body: { padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 14 },
+  fieldRow: { display: 'flex', flexDirection: 'column', gap: 6 },
   label: { color: '#848e9c', fontSize: '0.8rem', fontWeight: 600 },
   numberInput: {
     background: '#12151e', border: '1px solid #2a2e39', borderRadius: 5,
     color: '#d1d4dc', fontSize: '0.92rem', padding: '6px 10px',
-    width: 100, fontFamily: '"SF Mono", Consolas, monospace',
-    outline: 'none',
+    width: 100, fontFamily: '"SF Mono", Consolas, monospace', outline: 'none',
   } as React.CSSProperties,
   unit: { color: '#5e6673', fontSize: '0.85rem' },
   hint: { color: '#3a4558', fontSize: '0.74rem', marginTop: 2 },
@@ -203,12 +310,13 @@ const s: Record<string, React.CSSProperties> = {
     padding: '5px 12px', fontFamily: 'inherit', transition: 'all 0.15s',
   },
   toggleChipActive: {
-    borderColor: 'rgba(14,203,129,0.55)', color: '#0ecb81',
-    background: 'rgba(14,203,129,0.1)',
+    borderColor: 'rgba(14,203,129,0.55)', color: '#0ecb81', background: 'rgba(14,203,129,0.1)',
+  },
+  toggleChipActiveLive: {
+    borderColor: 'rgba(246,70,93,0.55)', color: '#f6465d', background: 'rgba(246,70,93,0.1)',
   },
   infoBox: {
-    background: '#12151e', borderRadius: 5, padding: '10px 14px',
-    border: '1px solid #2a2e39',
+    background: '#12151e', borderRadius: 5, padding: '10px 14px', border: '1px solid #2a2e39',
   },
   footer: {
     display: 'flex', justifyContent: 'space-between', alignItems: 'center',
@@ -216,17 +324,18 @@ const s: Record<string, React.CSSProperties> = {
   },
   resetBtn: {
     background: 'none', border: '1px solid #2a2e39', borderRadius: 5,
-    color: '#5e6673', cursor: 'pointer', fontSize: '0.8rem',
-    padding: '6px 12px', fontFamily: 'inherit',
+    color: '#5e6673', cursor: 'pointer', fontSize: '0.8rem', padding: '6px 12px', fontFamily: 'inherit',
   },
   cancelBtn: {
     background: 'none', border: '1px solid #2a2e39', borderRadius: 5,
-    color: '#848e9c', cursor: 'pointer', fontSize: '0.85rem',
-    padding: '7px 16px', fontFamily: 'inherit',
+    color: '#848e9c', cursor: 'pointer', fontSize: '0.85rem', padding: '7px 16px', fontFamily: 'inherit',
   },
   saveBtn: {
     background: 'rgba(14,203,129,0.1)', border: '1px solid rgba(14,203,129,0.4)',
     borderRadius: 5, color: '#0ecb81', cursor: 'pointer', fontWeight: 700,
     fontSize: '0.88rem', padding: '7px 22px', fontFamily: 'inherit',
+  },
+  saveBtnLive: {
+    background: 'rgba(246,70,93,0.1)', border: '1px solid rgba(246,70,93,0.4)', color: '#f6465d',
   },
 };

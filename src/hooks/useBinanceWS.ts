@@ -28,8 +28,10 @@ export function useBinanceWS(
     const stream = `${symbol.toLowerCase()}@kline_${interval}`;
     const ws = new WebSocket(`${WS_BASE}/${stream}`);
     wsRef.current = ws;
+    let closed = false; // guard: prevent stale buffered messages after ws.close()
 
     ws.onmessage = (ev) => {
+      if (closed) return; // discard messages queued before close completed
       try {
         const msg: KlineMsg = JSON.parse(ev.data);
         const k = msg.k;
@@ -50,6 +52,7 @@ export function useBinanceWS(
     ws.onerror = (e) => console.error('WS error', e);
 
     return () => {
+      closed = true; // set BEFORE ws.close() so any already-queued messages are discarded
       ws.close();
     };
   }, [symbol, interval]);

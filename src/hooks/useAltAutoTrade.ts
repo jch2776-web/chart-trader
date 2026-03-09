@@ -5,7 +5,7 @@ import type { ScanCandidate, ScanInterval } from '../components/AltScanner/break
 const AUTO_TRADE_KEY   = 'alt_auto_trade_active';
 const SCORE_THRESHOLD  = 90;
 const TOP_N_PER_TF     = 2;
-const SCAN_INTERVALS: ScanInterval[] = ['1h', '4h', '1d'];
+const DEFAULT_SCAN_INTERVALS: ScanInterval[] = ['1h', '4h', '1d'];
 const BETWEEN_SCAN_MS  = 2000;
 
 // Rate-limit settings for automated (unattended) scanning.
@@ -30,11 +30,13 @@ export function useAltAutoTrade({
   onEnterTrade,
   onLog,
   enterLabel = '진입',
+  scanIntervals,
 }: {
   symbols: string[];
   onEnterTrade: (candidate: ScanCandidate) => void;
   onLog?: (msg: string, type: AutoTradeLog['type']) => void;
   enterLabel?: string;
+  scanIntervals?: ScanInterval[];
 }) {
   const [isActive, setIsActiveState] = useState<boolean>(() => {
     try { return localStorage.getItem(AUTO_TRADE_KEY) === 'true'; } catch { return false; }
@@ -45,18 +47,20 @@ export function useAltAutoTrade({
   const [nextRunTime, setNextRunTime] = useState<number | null>(null);
 
   // Refs so callbacks always see fresh values without stale closures
-  const isActiveRef     = useRef(isActive);
-  const symbolsRef      = useRef(symbols);
-  const onEnterRef      = useRef(onEnterTrade);
-  const onLogRef        = useRef(onLog);
-  const enterLabelRef   = useRef(enterLabel);
-  const scanningRef     = useRef(false);
-  const lastRunHourRef  = useRef<number>(-1); // epoch-hours of last completed run
-  isActiveRef.current   = isActive;
-  symbolsRef.current    = symbols;
-  onEnterRef.current    = onEnterTrade;
-  onLogRef.current      = onLog;
-  enterLabelRef.current = enterLabel;
+  const isActiveRef        = useRef(isActive);
+  const symbolsRef         = useRef(symbols);
+  const onEnterRef         = useRef(onEnterTrade);
+  const onLogRef           = useRef(onLog);
+  const enterLabelRef      = useRef(enterLabel);
+  const scanIntervalsRef   = useRef(scanIntervals ?? DEFAULT_SCAN_INTERVALS);
+  const scanningRef        = useRef(false);
+  const lastRunHourRef     = useRef<number>(-1); // epoch-hours of last completed run
+  isActiveRef.current      = isActive;
+  symbolsRef.current       = symbols;
+  onEnterRef.current       = onEnterTrade;
+  onLogRef.current         = onLog;
+  enterLabelRef.current    = enterLabel;
+  scanIntervalsRef.current = scanIntervals && scanIntervals.length > 0 ? scanIntervals : DEFAULT_SCAN_INTERVALS;
 
   const addLog = useCallback((msg: string, type: AutoTradeLog['type'] = 'info') => {
     setLogs(prev => [{ id: ++logSeq, time: Date.now(), msg, type }, ...prev].slice(0, 200));
@@ -83,17 +87,19 @@ export function useAltAutoTrade({
     setScanning(true);
     const startTime = Date.now();
     setLastRunTime(startTime);
-    // Estimated time: AUTO_DELAY_MS + ~250ms HTTP per symbol, 3 TF, 5s between
+    const activeIntervals = scanIntervalsRef.current;
+    const numTf = activeIntervals.length;
+    // Estimated time: AUTO_DELAY_MS + ~250ms HTTP per symbol, per TF, with wait between TFs
     const estSecPerTf = Math.ceil(syms.length * (AUTO_DELAY_MS + 250) / AUTO_CONCURRENCY / 1000);
-    const estTotalSec = estSecPerTf * 3 + (BETWEEN_SCAN_MS / 1000) * 2;
-    addLog(`🚀 자동 스캔 시작 — ${syms.length}개 심볼 × 3개 타임프레임 (예상 소요 약 ${estTotalSec}초, 속도제한: 동시${AUTO_CONCURRENCY}개·간격${AUTO_DELAY_MS}ms)`);
+    const estTotalSec = estSecPerTf * numTf + (BETWEEN_SCAN_MS / 1000) * Math.max(0, numTf - 1);
+    addLog(`🚀 자동 스캔 시작 — ${syms.length}개 심볼 × ${numTf}개 타임프레임(${activeIntervals.join(',')}) (예상 소요 약 ${estTotalSec}초, 속도제한: 동시${AUTO_CONCURRENCY}개·간격${AUTO_DELAY_MS}ms)`);
 
     let totalEntered = 0;
     // Deduplicate across timeframes: each symbol+direction is entered at most once per run
     const enteredThisRun = new Set<string>();
 
-    for (let i = 0; i < SCAN_INTERVALS.length; i++) {
-      const interval = SCAN_INTERVALS[i];
+    for (let i = 0; i < activeIntervals.length; i++) {
+      const interval = activeIntervals[i];
 
       if (i > 0) {
         addLog(`⏳ ${BETWEEN_SCAN_MS / 1000}초 대기 후 ${interval} 스캔 시작...`);
