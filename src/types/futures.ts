@@ -1,3 +1,5 @@
+import type { Interval } from './candle';
+
 export interface FuturesPosition {
   symbol: string;
   positionSide: 'LONG' | 'SHORT' | 'BOTH';
@@ -20,6 +22,28 @@ export interface LiveHistoryEntry {
   time: number;     // ms timestamp
   tradeId: string;
   info: string;
+}
+
+export type LiveCloseReason = 'time' | 'invalid' | 'manual' | 'tp' | 'sl' | 'unknown';
+
+export interface LiveTradeHistoryEntry {
+  id: string;
+  symbol: string;
+  positionSide: 'LONG' | 'SHORT';
+  qty: number;
+  leverage: number | null;
+  entryPrice: number | null;
+  exitPrice: number | null;
+  pnl: number | null;
+  fees: number | null;
+  entryTime: number | null;
+  exitTime: number;
+  closeReason: LiveCloseReason;
+  interval?: Interval;
+  candidateScore?: number | null;
+  plannedEntry?: number | null;
+  plannedTP?: number | null;
+  plannedSL?: number | null;
 }
 
 export interface FuturesOrder {

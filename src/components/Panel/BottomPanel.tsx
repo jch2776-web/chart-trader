@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect, useMemo } from 'react';
-import type { FuturesPosition, FuturesOrder, LiveHistoryEntry } from '../../types/futures';
+import type { FuturesPosition, FuturesOrder, LiveTradeHistoryEntry } from '../../types/futures';
 import type { ClientSlMap } from '../../hooks/useBinanceFutures';
 import type { PaperHistoryEntry, PaperPosition, PaperOrder, AltMeta } from '../../types/paperTrading';
 import { downloadExcel } from '../../utils/exportExcel';
@@ -29,10 +29,24 @@ interface Props {
   onPaperClearHistory?: () => void;
   paperInitialBalance?: number;
   onOpenAltPosition?: (meta: AltMeta) => void;
+  onOpenAltInMain?: (meta: AltMeta) => void;
   liveAltMetaMap?: Record<string, AltMeta>;
   // Live trading history
-  liveHistory?: LiveHistoryEntry[];
-  onFetchLiveHistory?: (startTime?: number, endTime?: number) => Promise<void>;
+  liveHistory?: LiveTradeHistoryEntry[];
+  onLiveCloseMarket?: (
+    symbol: string,
+    direction: 'long' | 'short',
+    closeSide: 'BUY' | 'SELL',
+    qty: number,
+    positionSide: 'LONG' | 'SHORT' | 'BOTH',
+  ) => Promise<void>;
+  onLiveCloseCurrentPrice?: (
+    symbol: string,
+    direction: 'long' | 'short',
+    closeSide: 'BUY' | 'SELL',
+    qty: number,
+    limitPrice: number,
+  ) => Promise<void>;
 }
 
 type Tab = 'positions' | 'orders' | 'paper-orders' | 'paper-history' | 'paper-asset' | 'live-history' | 'live-asset';
@@ -87,6 +101,47 @@ function orderTypeLabel(type: string) {
     TRAILING_STOP_MARKET: 'Trailing Stop',
   };
   return m[type] ?? type;
+}
+
+type UnifiedHistoryReason = PaperHistoryEntry['closeReason'] | 'time' | 'invalid' | 'unknown';
+
+interface UnifiedHistoryRow {
+  id: string;
+  symbol: string;
+  positionSide: 'LONG' | 'SHORT';
+  qty: number;
+  leverage: number | null;
+  entryPrice: number | null;
+  exitPrice: number | null;
+  pnl: number | null;
+  fees: number | null;
+  entryTime: number | null;
+  exitTime: number;
+  closeReason: UnifiedHistoryReason;
+  interval?: string;
+  candidateScore?: number | null;
+  plannedEntry?: number | null;
+  plannedTP?: number | null;
+  plannedSL?: number | null;
+}
+
+function reasonLabel(reason: UnifiedHistoryReason): string {
+  if (reason === 'tp') return '익절';
+  if (reason === 'sl') return '손절';
+  if (reason === 'liq') return '청산';
+  if (reason === 'expired' || reason === 'time') return '타임스탑';
+  if (reason === 'invalid') return '구조무효';
+  if (reason === 'manual') return '수동';
+  return '미확인';
+}
+
+function reasonColorByReason(reason: UnifiedHistoryReason): string {
+  if (reason === 'tp') return '#0ecb81';
+  if (reason === 'liq') return '#f59e42';
+  if (reason === 'expired' || reason === 'time') return '#f0b90b';
+  if (reason === 'invalid') return '#3b8beb';
+  if (reason === 'manual') return '#b9c1d0';
+  return '#848e9c';
 }
 
 // ── Horizontal bar meter (price slider) ──────────────────────────────────────
@@ -529,37 +584,38 @@ function PaperAssetChart({ history, initialBalance }: { history: PaperHistoryEnt
 
 
 // ── Live Asset Chart ──────────────────────────────────────────────────────────
-function LiveAssetChart({ history }: { history: LiveHistoryEntry[] }) {
+function LiveAssetChart({ history }: { history: LiveTradeHistoryEntry[] }) {
   const [period, setPeriod] = useState<AssetPeriod>('1M');
 
-  const sorted = useMemo(() => [...history].sort((a, b) => a.time - b.time), [history]);
+  const sorted = useMemo(() => [...history].sort((a, b) => a.exitTime - b.exitTime), [history]);
   const cutMs  = useMemo(() => (period === 'ALL' ? 0 : Date.now() - PERIOD_OFFSETS[period]), [period]);
 
   const baselineCumPnl = useMemo(() => {
     let acc = 0;
-    for (const h of sorted) { if (h.time < cutMs) acc += h.income; }
+    for (const h of sorted) { if (h.exitTime < cutMs) acc += h.pnl ?? 0; }
     return acc;
   }, [sorted, cutMs]);
 
   const { filtered, cumPnlPts, tradeCountPts, winRatePts } = useMemo(() => {
-    const filtered = sorted.filter(h => h.time >= cutMs);
+    const filtered = sorted.filter(h => h.exitTime >= cutMs);
     const cumPnlPts: AssetPt[] = [];
     const tradeCountPts: AssetPt[] = [];
     const winRatePts: AssetPt[] = [];
     let cumPnl = baselineCumPnl;
     let wins = 0;
     filtered.forEach((h, i) => {
-      cumPnl += h.income;
-      if (h.income > 0) wins++;
-      cumPnlPts.push({ time: h.time, value: cumPnl });
-      tradeCountPts.push({ time: h.time, value: i + 1 });
-      winRatePts.push({ time: h.time, value: (wins / (i + 1)) * 100 });
+      const pnl = h.pnl ?? 0;
+      cumPnl += pnl;
+      if (pnl > 0) wins++;
+      cumPnlPts.push({ time: h.exitTime, value: cumPnl });
+      tradeCountPts.push({ time: h.exitTime, value: i + 1 });
+      winRatePts.push({ time: h.exitTime, value: (wins / (i + 1)) * 100 });
     });
     return { filtered, cumPnlPts, tradeCountPts, winRatePts };
   }, [sorted, cutMs, baselineCumPnl]);
 
-  const totalPnl  = filtered.reduce((s, h) => s + h.income, 0);
-  const winCount  = filtered.filter(h => h.income > 0).length;
+  const totalPnl  = filtered.reduce((s, h) => s + (h.pnl ?? 0), 0);
+  const winCount  = filtered.filter(h => (h.pnl ?? 0) > 0).length;
   const winRate   = filtered.length > 0 ? (winCount / filtered.length) * 100 : 0;
   const pnlColor2 = totalPnl >= 0 ? '#0ecb81' : '#f6465d';
 
@@ -968,15 +1024,16 @@ export function BottomPanel({
   isPaperMode, paperPositions, paperRawPositions, paperBalance,
   paperOrders, paperHistory, paperInitialBalance,
   onPaperClosePosition, onPaperSetTPSL, onPaperResetBalance,
-  onPaperCancelOrder, onPaperClearHistory, onOpenAltPosition, liveAltMetaMap,
-  liveHistory, onFetchLiveHistory,
+  onPaperCancelOrder, onPaperClearHistory, onOpenAltPosition, onOpenAltInMain, liveAltMetaMap,
+  liveHistory, onLiveCloseMarket, onLiveCloseCurrentPrice,
 }: Props) {
   const [tab, setTab] = useState<Tab>('positions');
 
   // Date range filter for history tabs
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo,   setDateTo]   = useState('');
-  const [histFetching, setHistFetching] = useState(false);
+  const [paperHistoryLimit, setPaperHistoryLimit] = useState<number | null>(10);
+  const [liveHistoryLimit, setLiveHistoryLimit] = useState<number | null>(10);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [tpslModal, setTpslModal] = useState<TPSLModal | null>(null);
   const lastY = useRef(0);
@@ -986,6 +1043,71 @@ export function BottomPanel({
     const tid = setInterval(() => setNowMs(Date.now()), 1000);
     return () => clearInterval(tid);
   }, []);
+  useEffect(() => {
+    if (tab === 'paper-history') setPaperHistoryLimit(10);
+    if (tab === 'live-history') setLiveHistoryLimit(10);
+  }, [tab]);
+
+  const fromTs = dateFrom ? new Date(dateFrom).getTime() : 0;
+  const toTs = dateTo ? new Date(dateTo).getTime() + 86399999 : Number.POSITIVE_INFINITY;
+
+  const paperHistoryRows = useMemo<UnifiedHistoryRow[]>(
+    () => (paperHistory ?? []).map(h => ({
+      id: h.id,
+      symbol: h.symbol,
+      positionSide: h.positionSide,
+      qty: h.qty,
+      leverage: h.leverage,
+      entryPrice: h.entryPrice,
+      exitPrice: h.exitPrice,
+      pnl: h.pnl,
+      fees: h.fees,
+      entryTime: h.entryTime,
+      exitTime: h.exitTime,
+      closeReason: h.closeReason,
+      interval: h.interval,
+      candidateScore: h.candidateScore ?? null,
+      plannedEntry: h.plannedEntry ?? null,
+      plannedTP: h.plannedTP ?? null,
+      plannedSL: h.plannedSL ?? null,
+    })),
+    [paperHistory],
+  );
+
+  const liveHistoryRows = useMemo<UnifiedHistoryRow[]>(
+    () => (liveHistory ?? []).map(h => ({
+      id: h.id,
+      symbol: h.symbol,
+      positionSide: h.positionSide,
+      qty: h.qty,
+      leverage: h.leverage,
+      entryPrice: h.entryPrice,
+      exitPrice: h.exitPrice,
+      pnl: h.pnl,
+      fees: h.fees,
+      entryTime: h.entryTime,
+      exitTime: h.exitTime,
+      closeReason: h.closeReason,
+      interval: h.interval,
+      candidateScore: h.candidateScore ?? null,
+      plannedEntry: h.plannedEntry ?? null,
+      plannedTP: h.plannedTP ?? null,
+      plannedSL: h.plannedSL ?? null,
+    })),
+    [liveHistory],
+  );
+
+  const filteredPaperHistory = useMemo(
+    () => paperHistoryRows.filter(h => h.exitTime >= fromTs && h.exitTime <= toTs).sort((a, b) => b.exitTime - a.exitTime),
+    [paperHistoryRows, fromTs, toTs],
+  );
+  const filteredLiveHistory = useMemo(
+    () => liveHistoryRows.filter(h => h.exitTime >= fromTs && h.exitTime <= toTs).sort((a, b) => b.exitTime - a.exitTime),
+    [liveHistoryRows, fromTs, toTs],
+  );
+
+  const visiblePaperHistory = paperHistoryLimit == null ? filteredPaperHistory : filteredPaperHistory.slice(0, paperHistoryLimit);
+  const visibleLiveHistory = liveHistoryLimit == null ? filteredLiveHistory : filteredLiveHistory.slice(0, liveHistoryLimit);
 
   // Shared time formatter (MM/DD HH:MM:SS)
   const fmtEntryTime = (ts: number) => {
@@ -1043,6 +1165,172 @@ export function BottomPanel({
       : clientSlPrice;
     setTpslModal({ position: pos, existingTP, existingSL });
   };
+
+  const renderTradeHistory = (
+    mode: 'paper' | 'live',
+    filteredRows: UnifiedHistoryRow[],
+    visibleRows: UnifiedHistoryRow[],
+    limit: number | null,
+    setLimit: (v: number | null) => void,
+  ) => (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px 4px', borderBottom: '1px solid #1a2535' }}>
+        <span style={{ fontSize: '0.72rem', color: '#848e9c' }}>기간:</span>
+        <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
+          style={{ ...s.paperInput, width: 130, fontSize: '0.74rem', padding: '2px 6px' }} />
+        <span style={{ fontSize: '0.72rem', color: '#848e9c' }}>~</span>
+        <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
+          style={{ ...s.paperInput, width: 130, fontSize: '0.74rem', padding: '2px 6px' }} />
+        <button
+          style={{ ...s.cancelBtn, color: '#f0b90b', borderColor: 'rgba(240,185,11,0.35)' }}
+          onClick={() => {
+            const dataRows: ExcelCell[][] = filteredRows.map(h => {
+              const margin = h.entryPrice != null && h.leverage != null && h.leverage > 0
+                ? (h.entryPrice * h.qty / h.leverage)
+                : null;
+              const roi = margin != null && margin > 0 && h.pnl != null ? (h.pnl / margin) * 100 : null;
+              const pnlText = h.pnl != null ? `${h.pnl >= 0 ? '+' : ''}${h.pnl.toFixed(4)}` : '-';
+              return [
+                { value: h.symbol },
+                { value: h.positionSide, color: h.positionSide === 'LONG' ? 'green' : 'red' },
+                { value: h.qty, align: 'right' },
+                { value: h.leverage != null ? `${h.leverage}x` : '-', align: 'center' },
+                { value: margin != null ? margin.toFixed(2) : '-', align: 'right' },
+                { value: h.entryPrice != null ? h.entryPrice : '-', align: 'right' },
+                { value: h.exitPrice != null ? h.exitPrice : '-', align: 'right' },
+                { value: pnlText, color: h.pnl != null ? (h.pnl >= 0 ? 'green' : 'red') : 'gray', bold: true, align: 'right' },
+                { value: roi != null ? `${roi >= 0 ? '+' : ''}${roi.toFixed(2)}%` : '-', color: roi != null ? (roi >= 0 ? 'green' : 'red') : 'gray', align: 'right' },
+                { value: h.fees != null ? `-${h.fees.toFixed(4)}` : '-', color: 'orange', align: 'right' },
+                { value: reasonLabel(h.closeReason), color: reasonColorByReason(h.closeReason) },
+                { value: h.interval ?? '—', align: 'center' },
+                { value: h.candidateScore != null ? h.candidateScore.toFixed(1) : '-', align: 'right' },
+                { value: h.plannedTP != null ? h.plannedTP : '-', align: 'right' },
+                { value: h.plannedSL != null ? h.plannedSL : '-', align: 'right' },
+                { value: h.entryTime ? fmtEntryTime(h.entryTime) : '-' },
+                { value: fmtEntryTime(h.exitTime) },
+              ] as ExcelCell[];
+            });
+            downloadExcel(`${mode === 'paper' ? '모의거래' : '실전거래'}_히스토리_${dateFrom || '전체'}_${dateTo || '전체'}.xls`, [
+              { label: '심볼', width: 14 }, { label: '방향', width: 8 }, { label: '수량', width: 12 },
+              { label: '레버리지', width: 8 }, { label: '투입마진(USDT)', width: 14 },
+              { label: '진입가(USDT)', width: 14 }, { label: '청산가(USDT)', width: 14 },
+              { label: '실현손익(USDT)', width: 16 }, { label: 'ROI(%)', width: 10 },
+              { label: '수수료(USDT)', width: 14 }, { label: '사유', width: 10 },
+              { label: '타임프레임', width: 10 },
+              { label: 'Score', width: 8 }, { label: '계획TP', width: 12 }, { label: '계획SL', width: 12 },
+              { label: '진입시간', width: 20 }, { label: '종료시간', width: 20 },
+            ], dataRows);
+          }}
+        >
+          엑셀 내보내기
+        </button>
+        <div style={{ marginLeft: 8, display: 'flex', gap: 6 }}>
+          <button
+            style={{ ...s.cancelBtn, color: '#d1d4dc', borderColor: 'rgba(132,142,156,0.35)' }}
+            onClick={() => setLimit(50)}
+          >
+            더보기
+          </button>
+          <button
+            style={{ ...s.cancelBtn, color: '#d1d4dc', borderColor: 'rgba(132,142,156,0.35)' }}
+            onClick={() => setLimit(null)}
+          >
+            전체보기
+          </button>
+          {limit !== 10 && (
+            <button
+              style={{ ...s.cancelBtn, color: '#d1d4dc', borderColor: 'rgba(132,142,156,0.35)' }}
+              onClick={() => setLimit(10)}
+            >
+              최근10개
+            </button>
+          )}
+        </div>
+        <span style={{ marginLeft: 6, fontSize: '0.72rem', color: '#5d6776' }}>
+          {limit == null ? `${filteredRows.length}/${filteredRows.length}` : `${Math.min(filteredRows.length, limit)}/${filteredRows.length}`}
+        </span>
+        <div style={{ flex: 1 }} />
+        {mode === 'paper' && (paperHistory?.length ?? 0) > 0 && (
+          <button style={{ ...s.cancelBtn, color: '#f6465d', borderColor: 'rgba(246,70,93,0.3)' }} onClick={onPaperClearHistory}>
+            전체 삭제
+          </button>
+        )}
+      </div>
+      <table style={s.table}>
+        <thead>
+          <tr>
+            <th style={s.th}>심볼</th>
+            <th style={s.th}>방향</th>
+            <th style={s.th}>수량</th>
+            <th style={s.th}>레버리지</th>
+            <th style={s.th}>투입마진 (USDT)</th>
+            <th style={s.th}>진입가 (USDT)</th>
+            <th style={s.th}>청산가 (USDT)</th>
+            <th style={s.th}>실현손익 (USDT) / ROI</th>
+            <th style={s.th}>수수료 (USDT)</th>
+            <th style={s.th}>사유</th>
+            <th style={s.th}>타임프레임</th>
+            <th style={s.th}>Score</th>
+            <th style={s.th}>계획 TP</th>
+            <th style={s.th}>계획 SL</th>
+            <th style={s.th}>진입시간</th>
+            <th style={s.th}>종료시간</th>
+          </tr>
+        </thead>
+        <tbody>
+          {visibleRows.length === 0 ? (
+            <tr><td colSpan={16} style={s.empty}>거래 히스토리 없음</td></tr>
+          ) : visibleRows.map(h => {
+            const margin = h.entryPrice != null && h.leverage != null && h.leverage > 0
+              ? (h.entryPrice * h.qty / h.leverage)
+              : null;
+            const roi = margin != null && margin > 0 && h.pnl != null ? (h.pnl / margin) * 100 : null;
+            const pnlCol = h.pnl == null ? '#848e9c' : (h.pnl >= 0 ? '#0ecb81' : '#f6465d');
+            return (
+              <tr key={h.id} style={s.tr}>
+                <td style={s.td}>
+                  <div style={s.symbolCell}>
+                    <CoinLogo symbol={h.symbol} />
+                    <div style={{ ...s.symbolText, ...s.symbolClickable }} onClick={() => onSelectTicker(h.symbol)}>
+                      <span style={s.symbolName}>{extractCoin(h.symbol)}</span>
+                      <span style={s.symbolFull}>{h.symbol}</span>
+                    </div>
+                  </div>
+                </td>
+                <td style={s.td}><span style={{ ...s.sideBadge, background: h.positionSide === 'LONG' ? 'rgba(14,203,129,0.12)' : 'rgba(246,70,93,0.12)', color: h.positionSide === 'LONG' ? '#0ecb81' : '#f6465d' }}>{h.positionSide}</span></td>
+                <td style={s.td}>{fmtQty(h.qty)}</td>
+                <td style={s.td}>{h.leverage != null ? `${h.leverage}x` : '—'}</td>
+                <td style={s.td}><div style={s.priceCell}><span>{margin != null ? fmtPrice(margin) : '—'}</span><span style={s.priceUnit}>USDT</span></div></td>
+                <td style={s.td}><div style={s.priceCell}><span>{h.entryPrice != null ? fmtPrice(h.entryPrice) : '—'}</span><span style={s.priceUnit}>USDT</span></div></td>
+                <td style={s.td}><div style={s.priceCell}><span>{h.exitPrice != null ? fmtPrice(h.exitPrice) : '—'}</span><span style={s.priceUnit}>USDT</span></div></td>
+                <td style={{ ...s.td, color: pnlCol, fontWeight: 700 }}>
+                  <div style={s.pnlCell}>
+                    <span>{h.pnl != null ? `${h.pnl >= 0 ? '+' : ''}${fmtPrice(h.pnl)} USDT` : '—'}</span>
+                    <span style={{ ...s.roiTag, color: pnlCol }}>{roi != null ? `${roi >= 0 ? '+' : ''}${roi.toFixed(2)}%` : '—'}</span>
+                  </div>
+                </td>
+                <td style={{ ...s.td, color: '#f59e42', fontSize: '0.73rem' }}>
+                  <div style={s.priceCell}><span>{h.fees != null ? `−${fmtPrice(h.fees)}` : '—'}</span><span style={s.priceUnit}>USDT</span></div>
+                </td>
+                <td style={{ ...s.td, color: reasonColorByReason(h.closeReason), fontWeight: 600 }}>{reasonLabel(h.closeReason)}</td>
+                <td style={{ ...s.td, textAlign: 'center' }}>
+                  {h.interval
+                    ? <span style={{ color: '#3b8beb', fontWeight: 700, fontSize: '0.8rem', background: 'rgba(59,139,235,0.12)', borderRadius: 4, padding: '2px 7px' }}>{h.interval}</span>
+                    : <span style={{ color: '#3a4558', fontSize: '0.75rem' }}>—</span>
+                  }
+                </td>
+                <td style={s.td}>{h.candidateScore != null ? h.candidateScore.toFixed(1) : '—'}</td>
+                <td style={s.td}>{h.plannedTP != null ? fmtPrice(h.plannedTP) : '—'}</td>
+                <td style={s.td}>{h.plannedSL != null ? fmtPrice(h.plannedSL) : '—'}</td>
+                <td style={{ ...s.td, color: '#5d6776', fontSize: '0.74rem', whiteSpace: 'nowrap' }}>{h.entryTime ? fmtEntryTime(h.entryTime) : '—'}</td>
+                <td style={{ ...s.td, color: '#5d6776', fontSize: '0.74rem', whiteSpace: 'nowrap' }}>{fmtEntryTime(h.exitTime)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
 
   return (
     <div style={{ ...s.container, height }}>
@@ -1199,124 +1487,7 @@ export function BottomPanel({
 
         {/* Paper history tab */}
         {isPaperMode && tab === 'paper-history' && (
-          <div>
-            {/* Filter / Export toolbar */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px 4px', borderBottom: '1px solid #1a2535' }}>
-              <span style={{ fontSize: '0.72rem', color: '#848e9c' }}>기간:</span>
-              <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
-                style={{ ...s.paperInput, width: 130, fontSize: '0.74rem', padding: '2px 6px' }} />
-              <span style={{ fontSize: '0.72rem', color: '#848e9c' }}>~</span>
-              <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
-                style={{ ...s.paperInput, width: 130, fontSize: '0.74rem', padding: '2px 6px' }} />
-              <button style={{ ...s.cancelBtn, color: '#f0b90b', borderColor: 'rgba(240,185,11,0.35)' }}
-                onClick={() => {
-                  const from = dateFrom ? new Date(dateFrom).getTime() : 0;
-                  const to   = dateTo   ? new Date(dateTo).getTime() + 86399999 : Infinity;
-                  const fmtT = (ts: number) => new Date(ts).toLocaleString('ko-KR');
-                  const dataRows: ExcelCell[][] = (paperHistory ?? [])
-                    .filter(h => h.exitTime >= from && h.exitTime <= to)
-                    .map(h => {
-                      const margin = h.entryPrice * h.qty / h.leverage;
-                      const roi    = margin > 0 ? (h.pnl / margin * 100).toFixed(2) : '0';
-                      const reason = h.closeReason === 'tp' ? '익절' : h.closeReason === 'sl' ? '손절' : h.closeReason === 'liq' ? '청산' : h.closeReason === 'expired' ? '타임스탑' : '수동';
-                      const reasonClr = h.closeReason === 'tp' ? 'green' : h.closeReason === 'expired' ? 'orange' : 'red';
-                      const pnlClr = h.pnl >= 0 ? 'green' : 'red';
-                      return [
-                        { value: h.symbol },
-                        { value: h.positionSide, color: h.positionSide === 'LONG' ? 'green' : 'red' },
-                        { value: h.qty, align: 'right' },
-                        { value: `${h.leverage}x`, align: 'center' },
-                        { value: margin.toFixed(2), align: 'right' },
-                        { value: h.entryPrice, align: 'right' },
-                        { value: h.exitPrice, align: 'right' },
-                        { value: `${h.pnl >= 0 ? '+' : ''}${h.pnl.toFixed(4)}`, color: pnlClr, bold: true, align: 'right' },
-                        { value: `${Number(roi) >= 0 ? '+' : ''}${roi}%`, color: pnlClr, align: 'right' },
-                        { value: `-${h.fees.toFixed(4)}`, color: 'orange', align: 'right' },
-                        { value: reason, color: reasonClr },
-                        { value: h.interval ?? '—', align: 'center' },
-                        { value: fmtT(h.entryTime) },
-                        { value: fmtT(h.exitTime) },
-                      ] as ExcelCell[];
-                    });
-                  downloadExcel(`모의거래_히스토리_${dateFrom||'전체'}_${dateTo||'전체'}.xls`, [
-                    { label: '심볼', width: 14 }, { label: '방향', width: 8 }, { label: '수량', width: 12 },
-                    { label: '레버리지', width: 8 }, { label: '투입마진(USDT)', width: 14 },
-                    { label: '진입가(USDT)', width: 14 }, { label: '청산가(USDT)', width: 14 },
-                    { label: '실현손익(USDT)', width: 16, }, { label: 'ROI(%)', width: 10 },
-                    { label: '수수료(USDT)', width: 14 }, { label: '사유', width: 8 },
-                    { label: '타임프레임', width: 10 },
-                    { label: '진입시간', width: 20 }, { label: '종료시간', width: 20 },
-                  ], dataRows);
-                }}>엑셀 내보내기</button>
-              <div style={{ flex: 1 }} />
-              {(paperHistory?.length ?? 0) > 0 && (
-                <button style={{ ...s.cancelBtn, color: '#f6465d', borderColor: 'rgba(246,70,93,0.3)' }} onClick={onPaperClearHistory}>전체 삭제</button>
-              )}
-            </div>
-            <table style={s.table}>
-              <thead>
-                <tr>
-                  <th style={s.th}>심볼</th>
-                  <th style={s.th}>방향</th>
-                  <th style={s.th}>수량</th>
-                  <th style={s.th}>레버리지</th>
-                  <th style={s.th}>투입마진 (USDT)</th>
-                  <th style={s.th}>진입가 (USDT)</th>
-                  <th style={s.th}>청산가 (USDT)</th>
-                  <th style={s.th}>실현손익 (USDT) / ROI</th>
-                  <th style={s.th}>수수료 (USDT)</th>
-                  <th style={s.th}>사유</th>
-                  <th style={s.th}>타임프레임</th>
-                  <th style={s.th}>진입시간</th>
-                  <th style={s.th}>종료시간</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(paperHistory?.length ?? 0) === 0 ? (
-                  <tr><td colSpan={13} style={s.empty}>거래 히스토리 없음</td></tr>
-                ) : paperHistory!.map(h => {
-                  const reasonLabel = h.closeReason === 'tp' ? '익절' : h.closeReason === 'sl' ? '손절' : h.closeReason === 'liq' ? '청산' : h.closeReason === 'expired' ? '타임스탑' : '수동';
-                  const reasonColor = h.closeReason === 'tp' ? '#0ecb81' : h.closeReason === 'liq' ? '#f59e42' : h.closeReason === 'expired' ? '#f0b90b' : '#f6465d';
-                  const histMargin = h.entryPrice * h.qty / h.leverage;
-                  const roi = histMargin > 0 ? (h.pnl / histMargin) * 100 : 0;
-                  const pnlCol = h.pnl >= 0 ? '#0ecb81' : '#f6465d';
-                  const fmtTime = (ts: number) => {
-                    const d = new Date(ts);
-                    return `${d.toLocaleDateString('ko-KR', { month: '2-digit', day: '2-digit' })} ${d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
-                  };
-                  return (
-                    <tr key={h.id} style={s.tr}>
-                      <td style={s.td}><span style={s.symbolName}>{extractCoin(h.symbol)}<span style={{ fontSize: '0.68rem', color: '#5d6776', marginLeft: 3 }}>{h.symbol}</span></span></td>
-                      <td style={s.td}><span style={{ ...s.sideBadge, background: h.positionSide === 'LONG' ? 'rgba(14,203,129,0.12)' : 'rgba(246,70,93,0.12)', color: h.positionSide === 'LONG' ? '#0ecb81' : '#f6465d' }}>{h.positionSide}</span></td>
-                      <td style={s.td}>{fmtQty(h.qty)}</td>
-                      <td style={s.td}>{h.leverage}x</td>
-                      <td style={s.td}><div style={s.priceCell}><span>{fmtPrice(histMargin)}</span><span style={s.priceUnit}>USDT</span></div></td>
-                      <td style={s.td}><div style={s.priceCell}><span>{fmtPrice(h.entryPrice)}</span><span style={s.priceUnit}>USDT</span></div></td>
-                      <td style={s.td}><div style={s.priceCell}><span>{fmtPrice(h.exitPrice)}</span><span style={s.priceUnit}>USDT</span></div></td>
-                      <td style={{ ...s.td, color: pnlCol, fontWeight: 700 }}>
-                        <div style={s.pnlCell}>
-                          <span>{h.pnl >= 0 ? '+' : ''}{fmtPrice(h.pnl)} USDT</span>
-                          <span style={{ ...s.roiTag, color: pnlCol }}>{roi >= 0 ? '+' : ''}{roi.toFixed(2)}%</span>
-                        </div>
-                      </td>
-                      <td style={{ ...s.td, color: '#f59e42', fontSize: '0.73rem' }}>
-                        <div style={s.priceCell}><span>−{fmtPrice(h.fees)}</span><span style={s.priceUnit}>USDT</span></div>
-                      </td>
-                      <td style={{ ...s.td, color: reasonColor, fontWeight: 600 }}>{reasonLabel}</td>
-                      <td style={{ ...s.td, textAlign: 'center' }}>
-                        {h.interval
-                          ? <span style={{ color: '#3b8beb', fontWeight: 700, fontSize: '0.8rem', background: 'rgba(59,139,235,0.12)', borderRadius: 4, padding: '2px 7px' }}>{h.interval}</span>
-                          : <span style={{ color: '#3a4558', fontSize: '0.75rem' }}>—</span>
-                        }
-                      </td>
-                      <td style={{ ...s.td, color: '#5d6776', fontSize: '0.74rem', whiteSpace: 'nowrap' }}>{fmtTime(h.entryTime)}</td>
-                      <td style={{ ...s.td, color: '#5d6776', fontSize: '0.74rem', whiteSpace: 'nowrap' }}>{fmtTime(h.exitTime)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          renderTradeHistory('paper', filteredPaperHistory, visiblePaperHistory, paperHistoryLimit, setPaperHistoryLimit)
         )}
 
         {/* Paper asset tab */}
@@ -1329,88 +1500,7 @@ export function BottomPanel({
 
         {/* Live history tab */}
         {!isPaperMode && tab === 'live-history' && (
-          <div>
-            {/* Filter / Fetch / Export toolbar */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px 4px', borderBottom: '1px solid #1a2535' }}>
-              <span style={{ fontSize: '0.72rem', color: '#848e9c' }}>기간:</span>
-              <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
-                style={{ ...s.paperInput, width: 130, fontSize: '0.74rem', padding: '2px 6px' }} />
-              <span style={{ fontSize: '0.72rem', color: '#848e9c' }}>~</span>
-              <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
-                style={{ ...s.paperInput, width: 130, fontSize: '0.74rem', padding: '2px 6px' }} />
-              <button style={{ ...s.cancelBtn, color: '#3b8beb', borderColor: 'rgba(59,139,235,0.35)' }}
-                disabled={histFetching}
-                onClick={async () => {
-                  setHistFetching(true);
-                  try {
-                    const from = dateFrom ? new Date(dateFrom).getTime() : undefined;
-                    const to   = dateTo   ? new Date(dateTo).getTime() + 86399999 : undefined;
-                    await onFetchLiveHistory?.(from, to);
-                  } finally { setHistFetching(false); }
-                }}>{histFetching ? '조회 중...' : '조회'}</button>
-              <button style={{ ...s.cancelBtn, color: '#f0b90b', borderColor: 'rgba(240,185,11,0.35)' }}
-                onClick={() => {
-                  const dataRows: ExcelCell[][] = [...(liveHistory ?? [])]
-                    .sort((a, b) => b.time - a.time)
-                    .map(h => [
-                      { value: h.symbol },
-                      { value: `${h.income >= 0 ? '+' : ''}${h.income.toFixed(4)}`, color: h.income >= 0 ? 'green' : 'red', bold: true, align: 'right' },
-                      { value: h.asset, align: 'center' },
-                      { value: h.tradeId, color: 'gray' },
-                      { value: new Date(h.time).toLocaleString('ko-KR') },
-                    ] as ExcelCell[]);
-                  downloadExcel(`실전거래_히스토리_${dateFrom||'전체'}_${dateTo||'전체'}.xls`, [
-                    { label: '심볼', width: 14 },
-                    { label: '실현손익 (USDT)', width: 18 },
-                    { label: '자산', width: 8 },
-                    { label: '거래 ID', width: 16 },
-                    { label: '시간', width: 22 },
-                  ], dataRows);
-                }}>엑셀 내보내기</button>
-            </div>
-            <table style={s.table}>
-              <thead>
-                <tr>
-                  <th style={s.th}>심볼</th>
-                  <th style={s.th}>실현손익 (USDT)</th>
-                  <th style={s.th}>자산</th>
-                  <th style={s.th}>거래 ID</th>
-                  <th style={s.th}>시간</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(liveHistory?.length ?? 0) === 0 ? (
-                  <tr><td colSpan={5} style={s.empty}>기간을 설정하고 조회 버튼을 눌러주세요</td></tr>
-                ) : [...(liveHistory ?? [])].sort((a, b) => b.time - a.time).map(h => {
-                  const pnlCol = h.income >= 0 ? '#0ecb81' : '#f6465d';
-                  const d = new Date(h.time);
-                  const fmtT = `${d.toLocaleDateString('ko-KR', { month: '2-digit', day: '2-digit' })} ${d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
-                  return (
-                    <tr key={h.tranId} style={s.tr}>
-                      <td style={s.td}>
-                        <div style={s.symbolCell}>
-                          <CoinLogo symbol={h.symbol} />
-                          <div style={{ ...s.symbolText, ...s.symbolClickable }} onClick={() => onSelectTicker(h.symbol)}>
-                            <span style={s.symbolName}>{extractCoin(h.symbol)}</span>
-                            <span style={s.symbolFull}>{h.symbol}</span>
-                          </div>
-                        </div>
-                      </td>
-                      <td style={{ ...s.td, color: pnlCol, fontWeight: 700 }}>
-                        <div style={s.priceCell}>
-                          <span>{h.income >= 0 ? '+' : ''}{h.income.toLocaleString('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 4 })}</span>
-                          <span style={s.priceUnit}>{h.asset}</span>
-                        </div>
-                      </td>
-                      <td style={{ ...s.td, color: '#848e9c' }}>{h.asset}</td>
-                      <td style={{ ...s.td, color: '#5d6776', fontSize: '0.72rem' }}>{h.tradeId}</td>
-                      <td style={{ ...s.td, color: '#5d6776', fontSize: '0.74rem', whiteSpace: 'nowrap' }}>{fmtT}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          renderTradeHistory('live', filteredLiveHistory, visibleLiveHistory, liveHistoryLimit, setLiveHistoryLimit)
         )}
 
         {/* Live asset tab */}
@@ -1436,7 +1526,7 @@ export function BottomPanel({
                   <th style={s.th}>TP / SL</th>
                   <th style={s.th}>유효 시간</th>
                   <th style={s.th}>진입시간</th>
-                  {isPaperMode && <th style={s.th}>청산</th>}
+                  <th style={s.th}>청산</th>
                 </tr>
               </thead>
               <tbody>
@@ -1464,7 +1554,7 @@ export function BottomPanel({
                           <div style={s.symbolCell}>
                             <CoinLogo symbol={pos.symbol} />
                             <div style={{ ...s.symbolText, ...s.symbolClickable }}
-                              onClick={() => onSelectTicker(pos.symbol)} title={`${pos.symbol} 차트로 이동`}>
+                              onClick={() => altMeta ? onOpenAltInMain?.(altMeta) : onSelectTicker(pos.symbol)} title={`${pos.symbol} 차트로 이동`}>
                               <span style={s.symbolName}>{extractCoin(pos.symbol)}</span>
                               <span style={s.symbolFull}>{pos.symbol}</span>
                             </div>
@@ -1541,7 +1631,7 @@ export function BottomPanel({
                   })
                 ) : (
                   allPositions.length === 0 ? (
-                    <tr><td colSpan={11} style={s.empty}>포지션 없음</td></tr>
+                    <tr><td colSpan={12} style={s.empty}>포지션 없음</td></tr>
                   ) : allPositions.map(pos => {
                     const side = pos.positionAmt > 0 ? 'LONG' : 'SHORT';
                     const liveDir = side === 'LONG' ? 'long' : 'short';
@@ -1575,7 +1665,7 @@ export function BottomPanel({
                           <div style={s.symbolCell}>
                             <CoinLogo symbol={pos.symbol} />
                             <div style={{ ...s.symbolText, ...s.symbolClickable }}
-                              onClick={() => onSelectTicker(pos.symbol)} title={`${pos.symbol} 차트로 이동`}>
+                              onClick={() => liveMeta ? onOpenAltInMain?.(liveMeta) : onSelectTicker(pos.symbol)} title={`${pos.symbol} 차트로 이동`}>
                               <span style={s.symbolName}>{extractCoin(pos.symbol)}</span>
                               <span style={s.symbolFull}>{pos.symbol}</span>
                             </div>
@@ -1642,6 +1732,51 @@ export function BottomPanel({
                         {/* 진입시간 column (live) */}
                         <td style={{ ...s.td, color: '#5d6776', fontSize: '0.74rem', whiteSpace: 'nowrap' }}>
                           {pos.entryTime ? fmtEntryTime(pos.entryTime) : (pos.updateTime ? fmtEntryTime(pos.updateTime) : '—')}
+                        </td>
+                        <td style={s.td}>
+                          <div style={{ display: 'flex', gap: 6, justifyContent: 'center' }}>
+                            <button
+                              style={{ ...s.cancelBtn, color: '#f6465d', borderColor: 'rgba(246,70,93,0.35)' }}
+                              onClick={async () => {
+                                const ok = window.confirm(`${pos.symbol} 포지션을 시장가로 청산할까요?`);
+                                if (!ok) return;
+                                try {
+                                  await onLiveCloseMarket?.(
+                                    pos.symbol,
+                                    liveDir,
+                                    closeSideForPos,
+                                    absAmt,
+                                    pos.positionSide,
+                                  );
+                                } catch (e) {
+                                  window.alert(e instanceof Error ? e.message : '시장가 청산 실패');
+                                }
+                              }}
+                            >
+                              시장가 청산
+                            </button>
+                            <button
+                              style={{ ...s.cancelBtn, color: '#f0b90b', borderColor: 'rgba(240,185,11,0.35)' }}
+                              onClick={async () => {
+                                const curPx = pos.markPrice > 0 ? pos.markPrice : pos.entryPrice;
+                                const ok = window.confirm(`${pos.symbol} 포지션을 현재가(IOC)로 청산할까요?\n가격: ${fmtPrice(curPx)}`);
+                                if (!ok) return;
+                                try {
+                                  await onLiveCloseCurrentPrice?.(
+                                    pos.symbol,
+                                    liveDir,
+                                    closeSideForPos,
+                                    absAmt,
+                                    curPx,
+                                  );
+                                } catch (e) {
+                                  window.alert(e instanceof Error ? e.message : '현재가 청산 실패');
+                                }
+                              }}
+                            >
+                              현재가 청산
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     );

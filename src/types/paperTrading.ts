@@ -1,11 +1,16 @@
 import type { Drawing } from './drawing';
+import type { Interval } from './candle';
 
 export interface AltMeta {
   source: 'altscanner';
   candidateId: string;
   symbol: string;
   direction: 'long' | 'short';
-  scanInterval: string;
+  candidateScore: number;
+  plannedEntry: number;
+  plannedTP: number | null;
+  plannedSL: number | null;
+  scanInterval: Interval;
   validUntilTime: number;
   slPrice: number;            // invalidation threshold (used by AltPositionMonitor)
   drawingsSnapshot: Drawing[];
@@ -60,6 +65,10 @@ export interface PaperHistoryEntry {
   exitTime: number;
   closeReason: 'manual' | 'tp' | 'sl' | 'liq' | 'expired';
   interval?: string;          // timeframe of entry candle (e.g. '15m', '1h') — ALT추천 positions only
+  candidateScore?: number | null;
+  plannedEntry?: number | null;
+  plannedTP?: number | null;
+  plannedSL?: number | null;
 }
 
 export interface PaperState {

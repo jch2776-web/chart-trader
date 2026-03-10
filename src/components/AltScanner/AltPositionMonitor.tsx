@@ -4,9 +4,29 @@ import type { PaperHistoryEntry } from '../../types/paperTrading';
 import type { AltMeta } from '../../types/paperTrading';
 import { useBinanceWS } from '../../hooks/useBinanceWS';
 
+export interface TimeStopRequestPayload {
+  mode: 'paper' | 'live';
+  symbol: string;
+  direction: 'long' | 'short';
+  scanInterval: Interval;
+  currentSl: number;
+  candidateId: string;
+  metaKey?: string;
+  qty: number;
+  positionSide: 'LONG' | 'SHORT' | 'BOTH';
+  closeSide: 'BUY' | 'SELL';
+  lastClosePrice: number;
+  requestedAt: number;
+  paperPosId?: string;
+}
+
 interface Props {
   meta: AltMeta;
-  onClose: (price: number, reason: PaperHistoryEntry['closeReason']) => void;
+  qty: number;
+  positionSide: 'LONG' | 'SHORT';
+  paperPosId: string;
+  onClose: (price: number, reason: Extract<PaperHistoryEntry['closeReason'], 'sl'>) => void;
+  onTimeStopRequest: (payload: TimeStopRequestPayload) => void;
 }
 
 /**
@@ -17,23 +37,40 @@ interface Props {
  *
  * Renders nothing — mount one per alt-scanned paper position.
  */
-export function AltPositionMonitor({ meta, onClose }: Props) {
+export function AltPositionMonitor({ meta, qty, positionSide, paperPosId, onClose, onTimeStopRequest }: Props) {
+  const timeStopRequestedRef = useRef(false);
   const handleCandle = useCallback((candle: Candle, isClosed: boolean) => {
     if (!isClosed) return;
-
-    // ── Time-stop ──────────────────────────────────────────────────────────
-    if (Date.now() > meta.validUntilTime) {
-      onClose(candle.close, 'expired');
-      return;
-    }
 
     // ── Structural invalidation (close breaches SL) ────────────────────────
     if (meta.direction === 'long' && candle.close < meta.slPrice) {
       onClose(candle.close, 'sl');
-    } else if (meta.direction === 'short' && candle.close > meta.slPrice) {
-      onClose(candle.close, 'sl');
+      return;
     }
-  }, [meta, onClose]);
+    if (meta.direction === 'short' && candle.close > meta.slPrice) {
+      onClose(candle.close, 'sl');
+      return;
+    }
+
+    // ── Time-stop request (single-shot) ────────────────────────────────────
+    if (Date.now() > meta.validUntilTime && !timeStopRequestedRef.current) {
+      timeStopRequestedRef.current = true;
+      onTimeStopRequest({
+        mode: 'paper',
+        symbol: meta.symbol,
+        direction: meta.direction,
+        scanInterval: meta.scanInterval as Interval,
+        currentSl: meta.slPrice,
+        candidateId: meta.candidateId,
+        qty,
+        positionSide,
+        closeSide: meta.direction === 'long' ? 'SELL' : 'BUY',
+        lastClosePrice: candle.close,
+        requestedAt: Date.now(),
+        paperPosId,
+      });
+    }
+  }, [meta, qty, positionSide, paperPosId, onClose, onTimeStopRequest]);
 
   useBinanceWS(meta.symbol, meta.scanInterval as Interval, handleCandle);
 
@@ -50,8 +87,10 @@ interface LiveProps {
     closeSide: 'BUY' | 'SELL',
     qty: number,
     positionSide: 'LONG' | 'SHORT' | 'BOTH',
-    reason: 'time-stop' | 'sl',
+    reason: 'sl',
   ) => void;
+  onTimeStopRequest: (payload: TimeStopRequestPayload) => void;
+  metaKey: string;
 }
 
 /**
@@ -60,28 +99,45 @@ interface LiveProps {
  *   1. now > validUntilTime  (time-stop)
  *   2. close crosses slPrice in loss direction  (structural invalidation)
  */
-export function LiveAltPositionMonitor({ meta, positionSide, qty, onCloseMarket }: LiveProps) {
+export function LiveAltPositionMonitor({ meta, positionSide, qty, onCloseMarket, onTimeStopRequest, metaKey }: LiveProps) {
   const closeSide: 'BUY' | 'SELL' = meta.direction === 'long' ? 'SELL' : 'BUY';
-  // Prevent double-firing if WS delivers the same closed candle twice
+  // Prevent double-firing for immediate SL close if WS duplicates closed candles.
   const firedRef = useRef(false);
+  // Time-stop request must be deduplicated separately from SL auto-close.
+  const timeStopRequestedRef = useRef(false);
 
   const handleCandle = useCallback((candle: Candle, isClosed: boolean) => {
-    if (!isClosed || firedRef.current) return;
+    if (!isClosed) return;
 
-    if (Date.now() > meta.validUntilTime) {
+    if (!firedRef.current && meta.direction === 'long' && candle.close < meta.slPrice) {
       firedRef.current = true;
-      onCloseMarket(meta.symbol, closeSide, qty, positionSide, 'time-stop');
+      onCloseMarket(meta.symbol, closeSide, qty, positionSide, 'sl');
+      return;
+    }
+    if (!firedRef.current && meta.direction === 'short' && candle.close > meta.slPrice) {
+      firedRef.current = true;
+      onCloseMarket(meta.symbol, closeSide, qty, positionSide, 'sl');
       return;
     }
 
-    if (meta.direction === 'long' && candle.close < meta.slPrice) {
-      firedRef.current = true;
-      onCloseMarket(meta.symbol, closeSide, qty, positionSide, 'sl');
-    } else if (meta.direction === 'short' && candle.close > meta.slPrice) {
-      firedRef.current = true;
-      onCloseMarket(meta.symbol, closeSide, qty, positionSide, 'sl');
+    if (Date.now() > meta.validUntilTime && !timeStopRequestedRef.current) {
+      timeStopRequestedRef.current = true;
+      onTimeStopRequest({
+        mode: 'live',
+        symbol: meta.symbol,
+        direction: meta.direction,
+        scanInterval: meta.scanInterval as Interval,
+        currentSl: meta.slPrice,
+        candidateId: meta.candidateId,
+        metaKey,
+        qty,
+        positionSide,
+        closeSide,
+        lastClosePrice: candle.close,
+        requestedAt: Date.now(),
+      });
     }
-  }, [meta, closeSide, qty, positionSide, onCloseMarket]);
+  }, [meta, closeSide, qty, positionSide, onCloseMarket, onTimeStopRequest, metaKey]);
 
   useBinanceWS(meta.symbol, meta.scanInterval as Interval, handleCandle);
 

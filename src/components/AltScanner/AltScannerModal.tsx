@@ -25,7 +25,11 @@ export interface AltTradeParams {
   riskPct: number;              // e.g. 2 = 2% of balance at risk
   // AltScanner meta — attached to the paper/live position for monitoring
   candidateId: string;
-  scanInterval: string;
+  candidateScore: number;
+  plannedEntry: number;
+  plannedTP: number | null;
+  plannedSL: number | null;
+  scanInterval: Interval;
   validUntilTime: number;
   drawingsSnapshot: Drawing[];
   // Signal classification — used for conditional entry logic
@@ -249,6 +253,10 @@ function TradingInfoPanel({
     entryPrice: c.entryPrice, slPrice: c.slPrice,
     tpPrice: c.tpPrice, tp1Price: c.tp1Price,
     candidateId: `${c.symbol}_${c.direction}_${c.asOfCloseTime}`,
+    candidateScore: c.score,
+    plannedEntry: c.entryPrice,
+    plannedTP: c.tpPrice ?? null,
+    plannedSL: c.slPrice ?? null,
     scanInterval: c.interval,
     validUntilTime: c.validUntilTime,
     drawingsSnapshot,

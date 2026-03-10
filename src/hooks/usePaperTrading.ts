@@ -154,6 +154,10 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
         exitTime: Date.now(),
         closeReason: reason,
         interval: pos.altMeta?.scanInterval,
+        candidateScore: pos.altMeta?.candidateScore ?? null,
+        plannedEntry: pos.altMeta?.plannedEntry ?? null,
+        plannedTP: pos.altMeta?.plannedTP ?? null,
+        plannedSL: pos.altMeta?.plannedSL ?? null,
       };
       return {
         ...prev,
@@ -199,6 +203,10 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
         exitTime: Date.now(),
         closeReason: reason,
         interval: pos.altMeta?.scanInterval,
+        candidateScore: pos.altMeta?.candidateScore ?? null,
+        plannedEntry: pos.altMeta?.plannedEntry ?? null,
+        plannedTP: pos.altMeta?.plannedTP ?? null,
+        plannedSL: pos.altMeta?.plannedSL ?? null,
       };
       const isFull = qty >= totalQty;
       return {
@@ -223,6 +231,16 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
       positions: prev.positions.map(p =>
         p.id === id ? { ...p, tpPrice, slPrice } : p,
       ),
+    }));
+  }, []);
+
+  const updateAltMeta = useCallback((id: string, patch: Partial<AltMeta>) => {
+    setState(prev => ({
+      ...prev,
+      positions: prev.positions.map(p => {
+        if (p.id !== id || !p.altMeta) return p;
+        return { ...p, altMeta: { ...p.altMeta, ...patch } };
+      }),
     }));
   }, []);
 
@@ -422,6 +440,7 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
     closePosition,
     partialClosePosition,
     setTPSL,
+    updateAltMeta,
     placeLimitOrder,
     cancelOrder,
     checkPrices,

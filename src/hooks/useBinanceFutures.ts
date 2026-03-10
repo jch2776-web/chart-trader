@@ -331,14 +331,16 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
         symbol:    o.symbol,
         orderId:   String(o.algoId),
         side:      o.side as 'BUY' | 'SELL',
-        type:      o.type,
+        type:      o.orderType ?? o.type,
         price:     parseFloat(o.price ?? '0'),
         origQty:   parseFloat(o.totalQty ?? o.origQty ?? o.quantity ?? '0'),
         stopPrice: parseFloat(o.triggerPrice ?? o.stopPrice ?? '0'),
         status:    o.algoStatus ?? o.status ?? 'NEW',
         algoType:  o.algoType ?? 'CONDITIONAL',
         isAlgo:    true,
-        time:      typeof o.bookTime === 'number' ? o.bookTime : (typeof o.time === 'number' ? o.time : undefined),
+        time:      typeof o.createTime === 'number'
+          ? o.createTime
+          : (typeof o.bookTime === 'number' ? o.bookTime : (typeof o.time === 'number' ? o.time : undefined)),
       }));
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -382,14 +384,16 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
         symbol:    o.symbol,
         orderId:   String(o.algoId),
         side:      o.side as 'BUY' | 'SELL',
-        type:      o.type,
+        type:      o.orderType ?? o.type,
         price:     parseFloat(o.price ?? '0'),
         origQty:   parseFloat(o.totalQty ?? o.origQty ?? o.quantity ?? '0'),
         stopPrice: parseFloat(o.triggerPrice ?? o.stopPrice ?? '0'),
         status:    o.algoStatus ?? o.status ?? 'NEW',
         algoType:  o.algoType ?? 'CONDITIONAL',
         isAlgo:    true,
-        time:      typeof o.bookTime === 'number' ? o.bookTime : (typeof o.time === 'number' ? o.time : undefined),
+        time:      typeof o.createTime === 'number'
+          ? o.createTime
+          : (typeof o.bookTime === 'number' ? o.bookTime : (typeof o.time === 'number' ? o.time : undefined)),
       }));
 
       setPositions(mapped);
@@ -483,6 +487,7 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
     marginType: 'CROSSED' | 'ISOLATED',
     reduceOnly = false,
     symbolOverride?: string,
+    timeInForce: 'GTC' | 'IOC' | 'FOK' = 'GTC',
   ): Promise<void> => {
     const key = apiKeyRef.current;
     const secret = apiSecretRef.current;
@@ -524,7 +529,7 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
     // 4. Place order
     await fetchSigned('/fapi/v1/order', key, secret, {
       symbol: sym, side,
-      type: 'LIMIT', timeInForce: 'GTC',
+      type: 'LIMIT', timeInForce,
       quantity: qtyStr,
       price: priceStr,
       ...(reduceOnly ? { reduceOnly: 'true' } : {}),
