@@ -31,6 +31,7 @@ interface Props {
   onOpenAltPosition?: (meta: AltMeta) => void;
   onOpenAltInMain?: (meta: AltMeta) => void;
   liveAltMetaMap?: Record<string, AltMeta>;
+  liveAltOrderTagMap?: Record<string, 'ALT-AUTO TP' | 'ALT-AUTO SL'>;
   // Live trading history
   liveHistory?: LiveTradeHistoryEntry[];
   onLiveCloseMarket?: (
@@ -1025,7 +1026,7 @@ export function BottomPanel({
   paperOrders, paperHistory, paperInitialBalance,
   onPaperClosePosition, onPaperSetTPSL, onPaperResetBalance,
   onPaperCancelOrder, onPaperClearHistory, onOpenAltPosition, onOpenAltInMain, liveAltMetaMap,
-  liveHistory, onLiveCloseMarket, onLiveCloseCurrentPrice,
+  liveAltOrderTagMap, liveHistory, onLiveCloseMarket, onLiveCloseCurrentPrice,
 }: Props) {
   const [tab, setTab] = useState<Tab>('positions');
 
@@ -1036,7 +1037,10 @@ export function BottomPanel({
   const [liveHistoryLimit, setLiveHistoryLimit] = useState<number | null>(10);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [tpslModal, setTpslModal] = useState<TPSLModal | null>(null);
+  const [liveCurrentCloseState, setLiveCurrentCloseState] = useState<Record<string, { kind: 'pending' | 'sent' | 'success' | 'not_filled' | 'failed'; message: string }>>({});
   const lastY = useRef(0);
+  const allPositionsRef = useRef<FuturesPosition[]>(allPositions);
+  allPositionsRef.current = allPositions;
   // 1-second tick for ALT meta countdown
   const [nowMs, setNowMs] = useState(Date.now());
   useEffect(() => {
@@ -1648,6 +1652,9 @@ export function BottomPanel({
                     const margin = pos.entryPrice > 0 ? absAmt * pos.entryPrice / pos.leverage : 0;
                     const roi = margin > 0 ? (pos.unrealizedProfit / margin) * 100 : 0;
                     const closeSideForPos = side === 'LONG' ? 'SELL' : 'BUY';
+                    const iocCloseKey = `${pos.symbol}_${pos.positionSide}_ioc`;
+                    const iocStatus = liveCurrentCloseState[iocCloseKey];
+                    const iocBusy = iocStatus?.kind === 'pending' || iocStatus?.kind === 'sent';
                     const tpOrder = allOrders.find(o => o.symbol === pos.symbol && o.side === closeSideForPos &&
                       (o.type === 'TAKE_PROFIT_MARKET' || o.type === 'TAKE_PROFIT' ||
                         (o.type === 'LIMIT' && ((side === 'LONG' && o.price > pos.entryPrice) || (side === 'SHORT' && o.price < pos.entryPrice)))));
@@ -1734,48 +1741,90 @@ export function BottomPanel({
                           {pos.entryTime ? fmtEntryTime(pos.entryTime) : (pos.updateTime ? fmtEntryTime(pos.updateTime) : '—')}
                         </td>
                         <td style={s.td}>
-                          <div style={{ display: 'flex', gap: 6, justifyContent: 'center' }}>
-                            <button
-                              style={{ ...s.cancelBtn, color: '#f6465d', borderColor: 'rgba(246,70,93,0.35)' }}
-                              onClick={async () => {
-                                const ok = window.confirm(`${pos.symbol} 포지션을 시장가로 청산할까요?`);
-                                if (!ok) return;
-                                try {
-                                  await onLiveCloseMarket?.(
-                                    pos.symbol,
-                                    liveDir,
-                                    closeSideForPos,
-                                    absAmt,
-                                    pos.positionSide,
-                                  );
-                                } catch (e) {
-                                  window.alert(e instanceof Error ? e.message : '시장가 청산 실패');
-                                }
-                              }}
-                            >
-                              시장가 청산
-                            </button>
-                            <button
-                              style={{ ...s.cancelBtn, color: '#f0b90b', borderColor: 'rgba(240,185,11,0.35)' }}
-                              onClick={async () => {
-                                const curPx = pos.markPrice > 0 ? pos.markPrice : pos.entryPrice;
-                                const ok = window.confirm(`${pos.symbol} 포지션을 현재가(IOC)로 청산할까요?\n가격: ${fmtPrice(curPx)}`);
-                                if (!ok) return;
-                                try {
-                                  await onLiveCloseCurrentPrice?.(
-                                    pos.symbol,
-                                    liveDir,
-                                    closeSideForPos,
-                                    absAmt,
-                                    curPx,
-                                  );
-                                } catch (e) {
-                                  window.alert(e instanceof Error ? e.message : '현재가 청산 실패');
-                                }
-                              }}
-                            >
-                              현재가 청산
-                            </button>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'center' }}>
+                            <div style={{ display: 'flex', gap: 6, justifyContent: 'center' }}>
+                              <button
+                                style={{ ...s.cancelBtn, color: '#f6465d', borderColor: 'rgba(246,70,93,0.35)' }}
+                                onClick={async () => {
+                                  const ok = window.confirm(`${pos.symbol} 포지션을 시장가로 청산할까요?`);
+                                  if (!ok) return;
+                                  try {
+                                    await onLiveCloseMarket?.(
+                                      pos.symbol,
+                                      liveDir,
+                                      closeSideForPos,
+                                      absAmt,
+                                      pos.positionSide,
+                                    );
+                                  } catch (e) {
+                                    window.alert(e instanceof Error ? e.message : '시장가 청산 실패');
+                                  }
+                                }}
+                              >
+                                시장가 청산
+                              </button>
+                              <button
+                                style={{ ...s.cancelBtn, color: '#f0b90b', borderColor: 'rgba(240,185,11,0.35)' }}
+                                disabled={iocBusy}
+                                onClick={async () => {
+                                  const curPx = pos.markPrice > 0 ? pos.markPrice : pos.entryPrice;
+                                  const ok = window.confirm(`${pos.symbol} 포지션을 현재가(IOC)로 청산할까요?\n가격: ${fmtPrice(curPx)}`);
+                                  if (!ok) return;
+                                  setLiveCurrentCloseState(prev => ({
+                                    ...prev,
+                                    [iocCloseKey]: { kind: 'pending', message: '요청 전송 중...' },
+                                  }));
+                                  try {
+                                    await onLiveCloseCurrentPrice?.(
+                                      pos.symbol,
+                                      liveDir,
+                                      closeSideForPos,
+                                      absAmt,
+                                      curPx,
+                                    );
+                                    setLiveCurrentCloseState(prev => ({
+                                      ...prev,
+                                      [iocCloseKey]: { kind: 'sent', message: '주문 전송됨(IOC 체결 확인 중)...' },
+                                    }));
+                                    window.setTimeout(() => {
+                                      const stillOpen = allPositionsRef.current.some(p =>
+                                        p.symbol === pos.symbol &&
+                                        p.positionSide === pos.positionSide &&
+                                        Math.abs(p.positionAmt) > 0,
+                                      );
+                                      setLiveCurrentCloseState(prev => ({
+                                        ...prev,
+                                        [iocCloseKey]: stillOpen
+                                          ? { kind: 'not_filled', message: 'IOC 만료/미체결: 포지션이 아직 열려 있습니다.' }
+                                          : { kind: 'success', message: '체결 완료: 포지션 종료 확인.' },
+                                      }));
+                                    }, 1800);
+                                  } catch (e) {
+                                    setLiveCurrentCloseState(prev => ({
+                                      ...prev,
+                                      [iocCloseKey]: { kind: 'failed', message: e instanceof Error ? e.message : '현재가 청산 실패' },
+                                    }));
+                                  }
+                                }}
+                              >
+                                {iocBusy ? '전송중...' : '현재가 청산'}
+                              </button>
+                            </div>
+                            {iocStatus && (
+                              <div style={{
+                                fontSize: '0.68rem',
+                                color:
+                                  iocStatus.kind === 'failed' ? '#f6465d' :
+                                  iocStatus.kind === 'success' ? '#0ecb81' :
+                                  iocStatus.kind === 'not_filled' ? '#f0b90b' :
+                                  '#9aa4b5',
+                                lineHeight: 1.35,
+                                maxWidth: 230,
+                                textAlign: 'center',
+                              }}>
+                                {iocStatus.message}
+                              </div>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -1807,6 +1856,7 @@ export function BottomPanel({
                 <tr><td colSpan={8} style={s.empty}>미체결 주문 없음</td></tr>
               ) : allOrders.map(ord => {
                 const effectivePrice = ord.price > 0 ? ord.price : ord.stopPrice;
+                const altAutoTag = liveAltOrderTagMap?.[ord.orderId];
                 return (
                   <tr key={ord.orderId} style={s.tr}>
                     <td style={s.td}>
@@ -1821,7 +1871,25 @@ export function BottomPanel({
                         </span>
                       </div>
                     </td>
-                    <td style={s.td}><span style={s.typeTag}>{orderTypeLabel(ord.type)}</span></td>
+                    <td style={s.td}>
+                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                        <span style={s.typeTag}>{orderTypeLabel(ord.type)}</span>
+                        {altAutoTag && (
+                          <span style={{
+                            fontSize: '0.6rem',
+                            fontWeight: 700,
+                            color: altAutoTag.includes('SL') ? '#f6465d' : '#0ecb81',
+                            background: altAutoTag.includes('SL') ? 'rgba(246,70,93,0.14)' : 'rgba(14,203,129,0.14)',
+                            border: altAutoTag.includes('SL') ? '1px solid rgba(246,70,93,0.35)' : '1px solid rgba(14,203,129,0.35)',
+                            borderRadius: 3,
+                            padding: '1px 5px',
+                            lineHeight: 1.2,
+                          }}>
+                            {altAutoTag}
+                          </span>
+                        )}
+                      </div>
+                    </td>
                     <td style={{ ...s.td, color: sideColor(ord.side), fontWeight: 700 }}>{ord.side}</td>
                     <td style={s.td}>
                       <div style={s.priceCell}>

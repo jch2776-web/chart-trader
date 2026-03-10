@@ -46,6 +46,20 @@ export interface LiveTradeHistoryEntry {
   plannedSL?: number | null;
 }
 
+export interface FuturesUserTrade {
+  id: string;
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  price: number;
+  qty: number;
+  quoteQty: number;
+  commission: number;
+  commissionAsset: string;
+  realizedPnl: number;
+  time: number;
+  positionSide: 'LONG' | 'SHORT' | 'BOTH';
+}
+
 export interface FuturesOrder {
   symbol: string;
   orderId: string;
@@ -56,6 +70,7 @@ export interface FuturesOrder {
   stopPrice: number;
   status: string;
   time?: number;              // ms epoch — order placement time
+  positionSide?: 'LONG' | 'SHORT' | 'BOTH';
   algoType?: string;          // CONDITIONAL, OCO
   isAlgo?: boolean;           // true when sourced from /fapi/v1/openAlgoOrders
 }

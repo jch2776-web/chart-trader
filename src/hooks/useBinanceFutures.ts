@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import type { FuturesPosition, FuturesOrder, LiveHistoryEntry } from '../types/futures';
+import type { FuturesPosition, FuturesOrder, LiveHistoryEntry, FuturesUserTrade } from '../types/futures';
 
 const BASE = 'https://fapi.binance.com';
 
@@ -12,6 +12,18 @@ export interface ClientSL {
   positionSide: 'LONG' | 'SHORT' | 'BOTH';
 }
 export type ClientSlMap = Record<string, ClientSL>; // key: `${symbol}_${positionSide}`
+
+export interface PlacedTPSLOrderRef {
+  orderId: string;
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  kind: 'TP' | 'SL';
+  positionSide: 'LONG' | 'SHORT' | 'BOTH';
+}
+
+export interface PlaceTPSLOptions {
+  onPlacedOrders?: (orders: PlacedTPSLOrderRef[]) => void;
+}
 
 function loadClientSlMap(): ClientSlMap {
   try { return JSON.parse(localStorage.getItem(CLIENT_SL_KEY) ?? '{}'); } catch { return {}; }
@@ -325,6 +337,7 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
         stopPrice: parseFloat(o.stopPrice),
         status:    o.status,
         time:      typeof o.time === 'number' ? o.time : undefined,
+        positionSide: (o.positionSide as 'LONG' | 'SHORT' | 'BOTH' | undefined) ?? undefined,
       }));
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const mappedAlgoOrders: FuturesOrder[] = algoOrdRes.map((o: any) => ({
@@ -341,6 +354,7 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
         time:      typeof o.createTime === 'number'
           ? o.createTime
           : (typeof o.bookTime === 'number' ? o.bookTime : (typeof o.time === 'number' ? o.time : undefined)),
+        positionSide: (o.positionSide as 'LONG' | 'SHORT' | 'BOTH' | undefined) ?? undefined,
       }));
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -374,6 +388,7 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
         stopPrice: parseFloat(o.stopPrice),
         status:    o.status,
         time:      typeof o.time === 'number' ? o.time : undefined,
+        positionSide: (o.positionSide as 'LONG' | 'SHORT' | 'BOTH' | undefined) ?? undefined,
       }));
       // 전체 심볼 Algo 주문 — symbol 파라미터 없이 조회하면 모든 심볼 반환
       // 응답이 배열이 아닌 경우(계정 미지원 등) 빈 배열로 폴백
@@ -394,6 +409,7 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
         time:      typeof o.createTime === 'number'
           ? o.createTime
           : (typeof o.bookTime === 'number' ? o.bookTime : (typeof o.time === 'number' ? o.time : undefined)),
+        positionSide: (o.positionSide as 'LONG' | 'SHORT' | 'BOTH' | undefined) ?? undefined,
       }));
 
       setPositions(mapped);
@@ -595,6 +611,7 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
     tpPrice?: number,
     slPrice?: number,
     positionSide: 'LONG' | 'SHORT' | 'BOTH' = 'BOTH',
+    options?: PlaceTPSLOptions,
   ): Promise<void> => {
     const key = apiKeyRef.current;
     const secret = apiSecretRef.current;
@@ -612,6 +629,20 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
       recvWindow: 10000,
       ...(isHedge ? { positionSide } : { reduceOnly: 'true' }),
     };
+    const placedRefs: PlacedTPSLOrderRef[] = [];
+    const pushPlaced = (raw: unknown, kind: 'TP' | 'SL') => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const obj: any = raw as any;
+      const idRaw = obj?.orderId ?? obj?.algoId;
+      if (idRaw == null) return;
+      placedRefs.push({
+        orderId: String(idRaw),
+        symbol,
+        side: closeSide,
+        kind,
+        positionSide,
+      });
+    };
 
     // -4120 "STOP_ORDER_SWITCH_ALGO" 에러 판별
     const isSwitchToAlgoErr = (e: unknown) => {
@@ -621,13 +652,12 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
 
     // 기존 /fapi/v1/order 조건부 주문 시도:
     // 성공 시 true, -4120 전환 에러 시 false, 그 외 에러는 throw
-    const tryOrder = async (params: Record<string, string | number>): Promise<boolean> => {
+    const tryOrder = async (params: Record<string, string | number>): Promise<unknown | null> => {
       try {
-        await fetchSigned('/fapi/v1/order', key, secret, params, 'POST');
-        return true;
+        return await fetchSigned('/fapi/v1/order', key, secret, params, 'POST');
       } catch (e) {
         if (!isSwitchToAlgoErr(e)) throw e;
-        return false;
+        return null;
       }
     };
 
@@ -635,38 +665,47 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
     // 조건부 주문 실패 시 → 일반 LIMIT 주문으로 fallback
     // (LONG TP: 현재가 위에 resting SELL, SHORT TP: 현재가 아래에 resting BUY → TP와 동일 효과)
     const placeTP = async (priceStr: string): Promise<void> => {
-      if (await tryOrder({ ...closingParams, type: 'TAKE_PROFIT_MARKET', stopPrice: priceStr })) return;
-      if (await tryOrder({ ...closingParams, type: 'TAKE_PROFIT', stopPrice: priceStr, price: priceStr, timeInForce: 'GTC' })) return;
-      if (await tryOrder({ ...closingParams, type: 'TAKE_PROFIT_MARKET', stopPrice: priceStr, workingType: 'MARK_PRICE' })) return;
+      const direct1 = await tryOrder({ ...closingParams, type: 'TAKE_PROFIT_MARKET', stopPrice: priceStr });
+      if (direct1) { pushPlaced(direct1, 'TP'); return; }
+      const direct2 = await tryOrder({ ...closingParams, type: 'TAKE_PROFIT', stopPrice: priceStr, price: priceStr, timeInForce: 'GTC' });
+      if (direct2) { pushPlaced(direct2, 'TP'); return; }
+      const direct3 = await tryOrder({ ...closingParams, type: 'TAKE_PROFIT_MARKET', stopPrice: priceStr, workingType: 'MARK_PRICE' });
+      if (direct3) { pushPlaced(direct3, 'TP'); return; }
       // 신규 정책(-4120) 계정: Algo 조건부 주문으로 재시도
       try {
-        await fetchSigned('/fapi/v1/algoOrder', key, secret, {
+        const algo = await fetchSigned('/fapi/v1/algoOrder', key, secret, {
           ...closingParams,
           algoType: 'CONDITIONAL',
           type: 'TAKE_PROFIT_MARKET',
           triggerPrice: priceStr,
         }, 'POST');
+        pushPlaced(algo, 'TP');
       } catch {
         // 최후 수단: 일반 LIMIT 주문 (익절가에 GTC 청산 주문)
-        await fetchSigned('/fapi/v1/order', key, secret, {
+        const limit = await fetchSigned('/fapi/v1/order', key, secret, {
           ...closingParams, type: 'LIMIT', price: priceStr, timeInForce: 'GTC',
         }, 'POST');
+        pushPlaced(limit, 'TP');
       }
     };
 
     // ── 손절가(SL) 주문 ────────────────────────────────────────────────────────
     // 조건부 주문 실패 시: Algo 주문 재시도 → 마지막으로 앱 감시 SL fallback
     const placeSL = async (priceStr: string): Promise<void> => {
-      if (await tryOrder({ ...closingParams, type: 'STOP_MARKET', stopPrice: priceStr })) return;
-      if (await tryOrder({ ...closingParams, type: 'STOP', stopPrice: priceStr, price: priceStr, timeInForce: 'GTC' })) return;
-      if (await tryOrder({ ...closingParams, type: 'STOP_MARKET', stopPrice: priceStr, workingType: 'MARK_PRICE' })) return;
+      const direct1 = await tryOrder({ ...closingParams, type: 'STOP_MARKET', stopPrice: priceStr });
+      if (direct1) { pushPlaced(direct1, 'SL'); return; }
+      const direct2 = await tryOrder({ ...closingParams, type: 'STOP', stopPrice: priceStr, price: priceStr, timeInForce: 'GTC' });
+      if (direct2) { pushPlaced(direct2, 'SL'); return; }
+      const direct3 = await tryOrder({ ...closingParams, type: 'STOP_MARKET', stopPrice: priceStr, workingType: 'MARK_PRICE' });
+      if (direct3) { pushPlaced(direct3, 'SL'); return; }
       try {
-        await fetchSigned('/fapi/v1/algoOrder', key, secret, {
+        const algo = await fetchSigned('/fapi/v1/algoOrder', key, secret, {
           ...closingParams,
           algoType: 'CONDITIONAL',
           type: 'STOP_MARKET',
           triggerPrice: priceStr,
         }, 'POST');
+        pushPlaced(algo, 'SL');
       } catch {
         // Algo 주문도 실패하면 앱 감시 SL로 저장
         setClientSL(symbol, positionSide, parseFloat(priceStr), closeSide);
@@ -682,9 +721,39 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
       removeClientSL(symbol, positionSide);
     }
     await Promise.all(promises);
+    options?.onPlacedOrders?.(placedRefs);
     await new Promise(resolve => setTimeout(resolve, 600));
     await fetchData();
   }, [fetchData]);
+
+  const fetchUserTrades = useCallback(async (
+    symbol: string,
+    startTime?: number,
+    endTime?: number,
+    limit = 1000,
+  ): Promise<FuturesUserTrade[]> => {
+    const key = apiKeyRef.current;
+    const secret = apiSecretRef.current;
+    if (!key || !secret) throw new Error('API 키가 설정되지 않았습니다');
+    const params: Record<string, string | number> = { symbol, limit: Math.min(Math.max(limit, 1), 1000) };
+    if (startTime) params.startTime = startTime;
+    if (endTime) params.endTime = endTime;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const rows = await fetchSigned<any[]>('/fapi/v1/userTrades', key, secret, params);
+    return rows.map((t) => ({
+      id: String(t.id ?? t.tradeId ?? ''),
+      symbol: t.symbol,
+      side: t.side as 'BUY' | 'SELL',
+      price: parseFloat(t.price ?? '0'),
+      qty: parseFloat(t.qty ?? '0'),
+      quoteQty: parseFloat(t.quoteQty ?? '0'),
+      commission: parseFloat(t.commission ?? '0'),
+      commissionAsset: String(t.commissionAsset ?? ''),
+      realizedPnl: parseFloat(t.realizedPnl ?? '0'),
+      time: Number(t.time ?? 0),
+      positionSide: (t.positionSide as 'LONG' | 'SHORT' | 'BOTH' | undefined) ?? 'BOTH',
+    }));
+  }, []);
 
   const fetchIncomeHistory = useCallback(async (startTime?: number, endTime?: number): Promise<LiveHistoryEntry[]> => {
     const key = apiKeyRef.current;
@@ -706,5 +775,5 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
     }));
   }, []);
 
-  return { positions, orders, allPositions, allOrders, balance, loading, error, refetch: fetchData, placeOrder, cancelOrder, placeTPSL, closeMarket, clientSlMap, removeClientSL, fetchIncomeHistory };
+  return { positions, orders, allPositions, allOrders, balance, loading, error, refetch: fetchData, placeOrder, cancelOrder, placeTPSL, closeMarket, clientSlMap, removeClientSL, fetchIncomeHistory, fetchUserTrades };
 }
