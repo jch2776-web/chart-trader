@@ -177,6 +177,12 @@ const buildAltManagedDrawingId = (candidateId: string, sourceId: string, idx: nu
   `${altCandidatePrefix(candidateId)}${sourceId || String(idx)}`;
 const isAltManagedDrawingForCandidate = (drawingId: string, candidateId: string) =>
   drawingId.startsWith(altCandidatePrefix(candidateId));
+const normalizeAutoTradeCadence = (v?: number) => Math.max(15, Math.round(v ?? 60));
+const normalizeAutoTradeSettings = (base: AutoTradeSettings, saved: Partial<AutoTradeSettings> | null | undefined): AutoTradeSettings => ({
+  ...base,
+  ...(saved ?? {}),
+  scanCadenceMinutes: normalizeAutoTradeCadence(saved?.scanCadenceMinutes ?? base.scanCadenceMinutes),
+});
 
 // ── Resizable divider between panels ─────────────────────────────────────────
 function ResizeDivider({ onDelta }: { onDelta: (delta: number) => void }) {
@@ -356,8 +362,8 @@ function AppInner() {
     try {
       const legacy = localStorage.getItem(uk('alt_auto_trade_settings'));
       const saved = JSON.parse(localStorage.getItem(uk('alt_auto_trade_settings_paper')) ?? legacy ?? 'null');
-      return saved ? { ...DEFAULT_AUTO_TRADE_SETTINGS, ...saved } : DEFAULT_AUTO_TRADE_SETTINGS;
-    } catch { return DEFAULT_AUTO_TRADE_SETTINGS; }
+      return normalizeAutoTradeSettings(DEFAULT_AUTO_TRADE_SETTINGS, saved);
+    } catch { return normalizeAutoTradeSettings(DEFAULT_AUTO_TRADE_SETTINGS, null); }
   });
   const paperAutoTradeSettingsRef = useRef<AutoTradeSettings>(paperAutoTradeSettings);
   paperAutoTradeSettingsRef.current = paperAutoTradeSettings;
@@ -368,8 +374,8 @@ function AppInner() {
   const [liveAutoTradeSettings, setLiveAutoTradeSettings] = useState<AutoTradeSettings>(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(uk('alt_auto_trade_settings_live')) ?? 'null');
-      return saved ? { ...DEFAULT_LIVE_AUTO_TRADE_SETTINGS, ...saved } : DEFAULT_LIVE_AUTO_TRADE_SETTINGS;
-    } catch { return DEFAULT_LIVE_AUTO_TRADE_SETTINGS; }
+      return normalizeAutoTradeSettings(DEFAULT_LIVE_AUTO_TRADE_SETTINGS, saved);
+    } catch { return normalizeAutoTradeSettings(DEFAULT_LIVE_AUTO_TRADE_SETTINGS, null); }
   });
   const liveAutoTradeSettingsRef = useRef<AutoTradeSettings>(liveAutoTradeSettings);
   liveAutoTradeSettingsRef.current = liveAutoTradeSettings;
@@ -1358,6 +1364,7 @@ function AppInner() {
     },
     enterLabel: autoTradeMode === 'live' ? '실전진입' : '모의진입',
     scanIntervals: (autoTradeMode === 'live' ? liveAutoTradeSettings : paperAutoTradeSettings).scanIntervals,
+    cadenceMinutes: (autoTradeMode === 'live' ? liveAutoTradeSettings : paperAutoTradeSettings).scanCadenceMinutes,
   });
   altAutoTradeSetActiveRef.current = altAutoTrade.setActive;
 
@@ -2638,6 +2645,7 @@ function AppInner() {
         onToggleAutoTrade={() => altAutoTrade.setActive(!altAutoTrade.isActive)}
         onTriggerAutoTradeNow={altAutoTrade.triggerNow}
         autoTradeMode={autoTradeMode}
+        autoTradeCadenceMinutes={(autoTradeMode === 'live' ? liveAutoTradeSettings : paperAutoTradeSettings).scanCadenceMinutes}
         onChangeAutoTradeMode={handleChangeAutoTradeMode}
         isMobile={isMobile}
         mobilePanel={mobilePanel}
@@ -2650,7 +2658,10 @@ function AppInner() {
         <AutoTradeSettingsModal
           paperSettings={paperAutoTradeSettings}
           liveSettings={liveAutoTradeSettings}
-          onSave={(paper, live) => { setPaperAutoTradeSettings(paper); setLiveAutoTradeSettings(live); }}
+          onSave={(paper, live) => {
+            setPaperAutoTradeSettings(normalizeAutoTradeSettings(DEFAULT_AUTO_TRADE_SETTINGS, paper));
+            setLiveAutoTradeSettings(normalizeAutoTradeSettings(DEFAULT_LIVE_AUTO_TRADE_SETTINGS, live));
+          }}
           onClose={() => setShowAutoTradeSettings(false)}
           initialTab={autoTradeMode}
         />

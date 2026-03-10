@@ -32,6 +32,7 @@ interface Props {
   onToggleAutoTrade?: () => void;
   onTriggerAutoTradeNow?: () => void;
   autoTradeMode?: 'paper' | 'live';
+  autoTradeCadenceMinutes?: number;
   onChangeAutoTradeMode?: (m: 'paper' | 'live') => void;
   isMobile?: boolean;
   mobilePanel?: 'none' | 'tickers' | 'settings';
@@ -53,13 +54,15 @@ export function Toolbar({
   indicators, onToggleIndicator,
   onOpenBoard, onOpenUserBoard, onOpenSecurityFaq, onOpenAltScanner, onOpenSoundSettings, onOpenAutoTradeSettings,
   isAutoTradeActive, autoTradeScanning, onToggleAutoTrade, onTriggerAutoTradeNow,
-  autoTradeMode = 'paper', onChangeAutoTradeMode,
+  autoTradeMode = 'paper', autoTradeCadenceMinutes = 60, onChangeAutoTradeMode,
   isMobile, mobilePanel, onToggleMobilePanel,
   errorLogs = [], onClearErrors,
 }: Props) {
   const toggleMode = (m: DrawingMode) => {
     onDrawingModeChange(drawingMode === m ? 'none' : m);
   };
+  const cadence = Math.max(15, Math.round(autoTradeCadenceMinutes || 60));
+  const cadenceLabel = cadence >= 60 && cadence % 60 === 0 ? `${cadence / 60}시간` : `${cadence}분`;
 
   return (
     <div style={styles.toolbar}>
@@ -258,7 +261,9 @@ export function Toolbar({
       {/* Auto trade toggle */}
       <button
         onClick={onToggleAutoTrade}
-        title={isAutoTradeActive ? '자동매매 끄기' : '자동매매 켜기 (매 정각 1h→4h→1d 스캔, 90점+ 상위 2개 자동 진입)'}
+        title={isAutoTradeActive
+          ? `자동매매 끄기 (현재 주기: ${cadenceLabel})`
+          : `자동매매 켜기 (${cadenceLabel} 경계마다 스캔, 90점+ 상위 2개 진입)`}
         style={{
           ...styles.featureBtn,
           ...(isAutoTradeActive ? (autoTradeMode === 'live' ? styles.featureBtnRed : styles.featureBtnGreen) : {}),
@@ -291,7 +296,7 @@ export function Toolbar({
       <button
         style={styles.featureBtn}
         onClick={onOpenAutoTradeSettings}
-        title="자동매매 진입 설정 (레버리지 · 마진 크기)"
+        title={`자동매매 진입 설정 (레버리지 · 마진 · 무인 스캔 주기: ${cadenceLabel})`}
       >
         ⚙ 자동설정
       </button>

@@ -147,6 +147,288 @@ function reasonColorByReason(reason: UnifiedHistoryReason): string {
   return '#848e9c';
 }
 
+interface MetricSummary {
+  count: number;
+  winRate: number;
+  totalPnl: number;
+  avgPnl: number;
+  avgRoi: number | null;
+}
+
+interface DominanceProxyState {
+  loading: boolean;
+  error: string | null;
+  byDay: Record<string, number>;
+  updatedAt: number | null;
+}
+
+const ALT_INTERVAL_ORDER: Record<string, number> = {
+  '15m': 1,
+  '1h': 2,
+  '4h': 3,
+  '1d': 4,
+};
+const ALT_DOM_PROXY_CACHE_KEY = 'alt_dom_proxy_ethbtc_v1';
+const ALT_DOM_PROXY_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+
+function fmtShortInterval(iv?: string) {
+  if (!iv) return '—';
+  return iv;
+}
+
+function calcTradeRoi(row: UnifiedHistoryRow): number | null {
+  if (row.pnl == null || row.entryPrice == null || row.leverage == null || row.leverage <= 0 || row.qty <= 0) return null;
+  const margin = (row.entryPrice * row.qty) / row.leverage;
+  if (!isFinite(margin) || margin <= 0) return null;
+  return (row.pnl / margin) * 100;
+}
+
+function summarizeRows(rows: UnifiedHistoryRow[]): MetricSummary {
+  if (rows.length === 0) return { count: 0, winRate: 0, totalPnl: 0, avgPnl: 0, avgRoi: null };
+  const totalPnl = rows.reduce((s, r) => s + (r.pnl ?? 0), 0);
+  const wins = rows.filter(r => (r.pnl ?? 0) > 0).length;
+  const roiRows = rows.map(calcTradeRoi).filter((v): v is number => v != null && isFinite(v));
+  return {
+    count: rows.length,
+    winRate: (wins / rows.length) * 100,
+    totalPnl,
+    avgPnl: totalPnl / rows.length,
+    avgRoi: roiRows.length > 0 ? roiRows.reduce((s, v) => s + v, 0) / roiRows.length : null,
+  };
+}
+
+function dayKey(ts: number): string {
+  return new Date(ts).toISOString().slice(0, 10);
+}
+
+function pearsonCorrelation(points: Array<{ x: number; y: number }>): number | null {
+  const n = points.length;
+  if (n < 3) return null;
+  const sx = points.reduce((s, p) => s + p.x, 0);
+  const sy = points.reduce((s, p) => s + p.y, 0);
+  const sxx = points.reduce((s, p) => s + p.x * p.x, 0);
+  const syy = points.reduce((s, p) => s + p.y * p.y, 0);
+  const sxy = points.reduce((s, p) => s + p.x * p.y, 0);
+  const num = n * sxy - sx * sy;
+  const den = Math.sqrt((n * sxx - sx * sx) * (n * syy - sy * sy));
+  if (!isFinite(den) || den <= 1e-12) return null;
+  return num / den;
+}
+
+function useAltDominanceProxy(): DominanceProxyState {
+  const [state, setState] = useState<DominanceProxyState>({ loading: true, error: null, byDay: {}, updatedAt: null });
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      try {
+        const now = Date.now();
+        try {
+          const cachedRaw = localStorage.getItem(ALT_DOM_PROXY_CACHE_KEY);
+          if (cachedRaw) {
+            const cached = JSON.parse(cachedRaw) as { updatedAt?: number; byDay?: Record<string, number> };
+            if (cached.updatedAt && cached.byDay && now - cached.updatedAt < ALT_DOM_PROXY_CACHE_TTL_MS) {
+              if (!cancelled) {
+                setState({ loading: false, error: null, byDay: cached.byDay, updatedAt: cached.updatedAt });
+              }
+              return;
+            }
+          }
+        } catch {
+          // cache parse failure should not block fetch
+        }
+        const [btcRes, ethRes] = await Promise.all([
+          fetch('https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1d&limit=500'),
+          fetch('https://fapi.binance.com/fapi/v1/klines?symbol=ETHUSDT&interval=1d&limit=500'),
+        ]);
+        if (!btcRes.ok || !ethRes.ok) throw new Error('dominance_proxy_http_error');
+        const btcRows = await btcRes.json() as Array<[number, string, string, string, string, string, number, string, number, string, string, string]>;
+        const ethRows = await ethRes.json() as Array<[number, string, string, string, string, string, number, string, number, string, string, string]>;
+        const btcMap = new Map<string, number>();
+        for (const row of btcRows) {
+          const close = parseFloat(row[4]);
+          if (!isFinite(close) || close <= 0) continue;
+          btcMap.set(dayKey(row[0]), close);
+        }
+        const byDay: Record<string, number> = {};
+        for (const row of ethRows) {
+          const ethClose = parseFloat(row[4]);
+          if (!isFinite(ethClose) || ethClose <= 0) continue;
+          const dk = dayKey(row[0]);
+          const btcClose = btcMap.get(dk);
+          if (!btcClose || btcClose <= 0) continue;
+          byDay[dk] = ethClose / btcClose; // proxy: ETH/BTC relative strength
+        }
+        if (!cancelled) {
+          setState({ loading: false, error: null, byDay, updatedAt: now });
+        }
+        try {
+          localStorage.setItem(ALT_DOM_PROXY_CACHE_KEY, JSON.stringify({ updatedAt: now, byDay }));
+        } catch {
+          // ignore cache write errors
+        }
+      } catch {
+        if (!cancelled) {
+          setState({ loading: false, error: 'proxy_fetch_failed', byDay: {}, updatedAt: null });
+        }
+      }
+    };
+    void run();
+    return () => { cancelled = true; };
+  }, []);
+  return state;
+}
+
+function AnalyticsSummaryCards({ summary }: { summary: MetricSummary }) {
+  const pnlColor2 = summary.totalPnl >= 0 ? '#0ecb81' : '#f6465d';
+  return (
+    <div style={{ display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 }}>
+      <span style={{ fontSize: '0.74rem', color: '#4a5568' }}>거래수 <b style={{ color: '#d4d9e1' }}>{summary.count}</b></span>
+      <span style={{ fontSize: '0.74rem', color: '#4a5568' }}>승률 <b style={{ color: '#d4d9e1' }}>{summary.winRate.toFixed(1)}%</b></span>
+      <span style={{ fontSize: '0.74rem', color: '#4a5568' }}>총 손익 <b style={{ color: pnlColor2 }}>{summary.totalPnl >= 0 ? '+' : ''}{summary.totalPnl.toFixed(2)} USDT</b></span>
+      <span style={{ fontSize: '0.74rem', color: '#4a5568' }}>평균 손익 <b style={{ color: summary.avgPnl >= 0 ? '#0ecb81' : '#f6465d' }}>{summary.avgPnl >= 0 ? '+' : ''}{summary.avgPnl.toFixed(2)} USDT</b></span>
+      <span style={{ fontSize: '0.74rem', color: '#4a5568' }}>평균 ROI <b style={{ color: '#d4d9e1' }}>{summary.avgRoi != null ? `${summary.avgRoi >= 0 ? '+' : ''}${summary.avgRoi.toFixed(2)}%` : '—'}</b></span>
+    </div>
+  );
+}
+
+function AltAnalyticsSection({ rows, mode }: { rows: UnifiedHistoryRow[]; mode: 'paper' | 'live' }) {
+  const dominance = useAltDominanceProxy();
+  const altRows = useMemo(() => rows.filter(r => r.isAltTrade), [rows]);
+  const totalSummary = useMemo(() => summarizeRows(altRows), [altRows]);
+  const timeframeRows = useMemo(() => {
+    const grouped = new Map<string, UnifiedHistoryRow[]>();
+    for (const row of altRows) {
+      const key = row.interval ?? 'unknown';
+      grouped.set(key, [...(grouped.get(key) ?? []), row]);
+    }
+    return Array.from(grouped.entries())
+      .map(([interval, groupedRows]) => ({ interval, ...summarizeRows(groupedRows) }))
+      .sort((a, b) => (ALT_INTERVAL_ORDER[a.interval] ?? 999) - (ALT_INTERVAL_ORDER[b.interval] ?? 999));
+  }, [altRows]);
+  const closeTypeRows = useMemo(() => {
+    const manualRows = altRows.filter(r => r.closeReason === 'manual');
+    const autoRows = altRows.filter(r => r.closeReason !== 'manual');
+    return [
+      { key: 'manual', label: '수동 청산', ...summarizeRows(manualRows) },
+      { key: 'auto', label: '자동/시스템 청산', ...summarizeRows(autoRows) },
+    ];
+  }, [altRows]);
+  const closeReasonRows = useMemo(() => {
+    const grouped = new Map<string, UnifiedHistoryRow[]>();
+    for (const row of altRows) {
+      const key = row.closeReason ?? 'unknown';
+      grouped.set(key, [...(grouped.get(key) ?? []), row]);
+    }
+    return Array.from(grouped.entries())
+      .map(([reason, groupedRows]) => ({ reason: reasonLabel(reason as UnifiedHistoryReason), reasonRaw: reason, ...summarizeRows(groupedRows) }))
+      .sort((a, b) => b.count - a.count);
+  }, [altRows]);
+  const correlation = useMemo(() => {
+    if (Object.keys(dominance.byDay).length === 0) return { n: 0, value: null as number | null };
+    const points: Array<{ x: number; y: number }> = [];
+    for (const row of altRows) {
+      const roi = calcTradeRoi(row);
+      if (roi == null || !isFinite(roi)) continue;
+      const ts = row.entryTime ?? row.exitTime;
+      const proxy = dominance.byDay[dayKey(ts)];
+      if (!isFinite(proxy)) continue;
+      points.push({ x: proxy, y: roi });
+    }
+    return { n: points.length, value: pearsonCorrelation(points) };
+  }, [altRows, dominance.byDay]);
+
+  return (
+    <div style={{ marginTop: 14, borderTop: '1px solid #1a2535', paddingTop: 10 }}>
+      <div style={{ fontSize: '0.78rem', color: '#3b8beb', fontWeight: 700, letterSpacing: '0.02em', marginBottom: 8 }}>
+        ALT추천 누적 통계 ({mode === 'paper' ? '모의' : '실전'})
+      </div>
+      {altRows.length === 0 ? (
+        <div style={{ fontSize: '0.75rem', color: '#5d6776', padding: '8px 0' }}>ALT추천 종료 히스토리가 없어 통계를 계산할 수 없습니다.</div>
+      ) : (
+        <>
+          <AnalyticsSummaryCards summary={totalSummary} />
+
+          <div style={{ overflowX: 'auto', marginBottom: 8 }}>
+            <table style={s.table}>
+              <thead>
+                <tr>
+                  <th style={s.th}>타임프레임</th>
+                  <th style={s.th}>거래수</th>
+                  <th style={s.th}>승률</th>
+                  <th style={s.th}>총 손익</th>
+                  <th style={s.th}>평균 손익</th>
+                  <th style={s.th}>평균 ROI</th>
+                </tr>
+              </thead>
+              <tbody>
+                {timeframeRows.map(row => (
+                  <tr key={row.interval} style={s.tr}>
+                    <td style={s.td}>{fmtShortInterval(row.interval === 'unknown' ? undefined : row.interval)}</td>
+                    <td style={s.td}>{row.count}</td>
+                    <td style={s.td}>{row.winRate.toFixed(1)}%</td>
+                    <td style={{ ...s.td, color: row.totalPnl >= 0 ? '#0ecb81' : '#f6465d' }}>{row.totalPnl >= 0 ? '+' : ''}{row.totalPnl.toFixed(2)}</td>
+                    <td style={{ ...s.td, color: row.avgPnl >= 0 ? '#0ecb81' : '#f6465d' }}>{row.avgPnl >= 0 ? '+' : ''}{row.avgPnl.toFixed(2)}</td>
+                    <td style={s.td}>{row.avgRoi != null ? `${row.avgRoi >= 0 ? '+' : ''}${row.avgRoi.toFixed(2)}%` : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(260px, 1fr) minmax(260px, 1fr)', gap: 10 }}>
+            <div style={{ border: '1px solid #223247', borderRadius: 6, padding: '8px 10px', background: 'rgba(17,24,39,0.35)' }}>
+              <div style={{ color: '#9aa4b5', fontSize: '0.74rem', marginBottom: 6 }}>수동 vs 자동 청산</div>
+              {closeTypeRows.map(row => (
+                <div key={row.key} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, fontSize: '0.73rem', marginBottom: 4 }}>
+                  <span style={{ color: '#c9d0db' }}>{row.label}</span>
+                  <span style={{ color: '#5d6776' }}>{row.count}건</span>
+                  <span style={{ color: '#d4d9e1' }}>{row.winRate.toFixed(1)}%</span>
+                  <span style={{ color: row.totalPnl >= 0 ? '#0ecb81' : '#f6465d' }}>{row.totalPnl >= 0 ? '+' : ''}{row.totalPnl.toFixed(2)}</span>
+                </div>
+              ))}
+            </div>
+            <div style={{ border: '1px solid #223247', borderRadius: 6, padding: '8px 10px', background: 'rgba(17,24,39,0.35)' }}>
+              <div style={{ color: '#9aa4b5', fontSize: '0.74rem', marginBottom: 6 }}>종료 사유 분해</div>
+              {closeReasonRows.map(row => (
+                <div key={row.reasonRaw} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, fontSize: '0.73rem', marginBottom: 4 }}>
+                  <span style={{ color: reasonColorByReason(row.reasonRaw as UnifiedHistoryReason) }}>{row.reason}</span>
+                  <span style={{ color: '#5d6776' }}>{row.count}건</span>
+                  <span style={{ color: '#d4d9e1' }}>{row.winRate.toFixed(1)}%</span>
+                  <span style={{ color: row.totalPnl >= 0 ? '#0ecb81' : '#f6465d' }}>{row.totalPnl >= 0 ? '+' : ''}{row.totalPnl.toFixed(2)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ marginTop: 10, border: '1px solid #2a2e39', borderRadius: 6, padding: '8px 10px', background: 'rgba(19,23,34,0.45)' }}>
+            <div style={{ color: '#f0b90b', fontSize: '0.74rem', fontWeight: 700, marginBottom: 5 }}>알트코인 도미넌스-수익률 상관 (Proxy)</div>
+            <div style={{ color: '#6f7c91', fontSize: '0.71rem', marginBottom: 6 }}>
+              프록시 정의: 일봉 기준 <code style={{ color: '#d4d9e1' }}>ETHUSDT / BTCUSDT</code> 비율(ALT 상대강도). Binance 공개 데이터로 계산됩니다.
+            </div>
+            {dominance.loading ? (
+              <div style={{ color: '#5d6776', fontSize: '0.73rem' }}>프록시 데이터 로딩 중...</div>
+            ) : dominance.error ? (
+              <div style={{ color: '#5d6776', fontSize: '0.73rem' }}>프록시 데이터를 불러오지 못했습니다. (다른 통계는 정상 동작)</div>
+            ) : correlation.value == null ? (
+              <div style={{ color: '#5d6776', fontSize: '0.73rem' }}>상관계수 계산에 필요한 데이터가 부족합니다. (매칭 표본 {correlation.n}건)</div>
+            ) : (
+              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: '0.74rem' }}>
+                <span style={{ color: '#d4d9e1' }}>표본: {correlation.n}건</span>
+                <span style={{ color: correlation.value >= 0 ? '#0ecb81' : '#f6465d' }}>
+                  Pearson r = {correlation.value >= 0 ? '+' : ''}{correlation.value.toFixed(3)}
+                </span>
+                <span style={{ color: '#9aa4b5' }}>
+                  {correlation.value > 0.3 ? '양(+) 상관 경향' : correlation.value < -0.3 ? '음(-) 상관 경향' : '약한 상관'}
+                </span>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── Horizontal bar meter (price slider) ──────────────────────────────────────
 interface TickDef { pct: number; label: string; major: boolean; }
 
@@ -265,7 +547,6 @@ const CHART_H = 68;
 
 function AssetLineChart({ pts, gradId, showZeroLine, color, label, period, fmtTooltip }: AssetLineChartProps) {
   const lineRef = useRef<SVGPathElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
   // Hover stores pixel coords (relative to container) for HTML tooltip
   const [hover, setHover] = useState<{ pxX: number; pxY: number; idx: number } | null>(null);
 
@@ -343,10 +624,9 @@ function AssetLineChart({ pts, gradId, showZeroLine, color, label, period, fmtTo
   const hoverSvgY = hover ? screenPts[hover.idx].y : 0;
   const hoverPt   = hover ? pts[hover.idx] : null;
 
-  // Tooltip position in px — flip to left when near right edge
-  const containerW = containerRef.current?.offsetWidth ?? 200;
+  // Tooltip position in px — conservative flip threshold for compact panel widths
   const tooltipLeft = hover
-    ? (hover.pxX > containerW * 0.55 ? hover.pxX - 118 : hover.pxX + 8)
+    ? (hover.pxX > 180 ? hover.pxX - 118 : hover.pxX + 8)
     : 0;
 
   // Y-axis label formatter (compact: k/M suffix)
@@ -371,7 +651,7 @@ function AssetLineChart({ pts, gradId, showZeroLine, color, label, period, fmtTo
   }
 
   return (
-    <div ref={containerRef} style={{ flex: 1, minWidth: 0, position: 'relative' }}>
+    <div style={{ flex: 1, minWidth: 0, position: 'relative' }}>
       <div style={{ fontSize: '0.6rem', color: '#4a5568', marginBottom: 3, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase' }}>{label}</div>
       {/* preserveAspectRatio="none" + fixed px height = no scaling surprises */}
       <svg
@@ -438,7 +718,29 @@ function PaperAssetChart({ history, initialBalance }: { history: PaperHistoryEnt
   const [period, setPeriod] = useState<AssetPeriod>('1M');
 
   const sorted = useMemo(() => [...history].sort((a, b) => a.exitTime - b.exitTime), [history]);
-  // eslint-disable-next-line react-hooks/purity
+  const analyticsRows = useMemo<UnifiedHistoryRow[]>(
+    () => sorted.map(h => ({
+      id: h.id,
+      symbol: h.symbol,
+      positionSide: h.positionSide,
+      qty: h.qty,
+      leverage: h.leverage,
+      entryPrice: h.entryPrice,
+      exitPrice: h.exitPrice,
+      pnl: h.pnl,
+      fees: h.fees,
+      entryTime: h.entryTime,
+      exitTime: h.exitTime,
+      closeReason: h.closeReason,
+      interval: h.interval,
+      isAltTrade: h.isAltTrade,
+      candidateScore: h.candidateScore ?? null,
+      plannedEntry: h.plannedEntry ?? null,
+      plannedTP: h.plannedTP ?? null,
+      plannedSL: h.plannedSL ?? null,
+    })),
+    [sorted],
+  );
   const cutMs = useMemo(() => (period === 'ALL' ? 0 : Date.now() - PERIOD_OFFSETS[period]), [period]);
 
   const baselineCumPnl = useMemo(() => {
@@ -581,6 +883,8 @@ function PaperAssetChart({ history, initialBalance }: { history: PaperHistoryEnt
         />
       </div>
 
+      <AltAnalyticsSection rows={analyticsRows} mode="paper" />
+
     </div>
   );
 }
@@ -591,6 +895,29 @@ function LiveAssetChart({ history }: { history: LiveTradeHistoryEntry[] }) {
   const [period, setPeriod] = useState<AssetPeriod>('1M');
 
   const sorted = useMemo(() => [...history].sort((a, b) => a.exitTime - b.exitTime), [history]);
+  const analyticsRows = useMemo<UnifiedHistoryRow[]>(
+    () => sorted.map(h => ({
+      id: h.id,
+      symbol: h.symbol,
+      positionSide: h.positionSide,
+      qty: h.qty,
+      leverage: h.leverage,
+      entryPrice: h.entryPrice,
+      exitPrice: h.exitPrice,
+      pnl: h.pnl,
+      fees: h.fees,
+      entryTime: h.entryTime,
+      exitTime: h.exitTime,
+      closeReason: h.closeReason,
+      interval: h.interval,
+      isAltTrade: h.isAltTrade,
+      candidateScore: h.candidateScore ?? null,
+      plannedEntry: h.plannedEntry ?? null,
+      plannedTP: h.plannedTP ?? null,
+      plannedSL: h.plannedSL ?? null,
+    })),
+    [sorted],
+  );
   const cutMs  = useMemo(() => (period === 'ALL' ? 0 : Date.now() - PERIOD_OFFSETS[period]), [period]);
 
   const baselineCumPnl = useMemo(() => {
@@ -657,6 +984,7 @@ function LiveAssetChart({ history }: { history: LiveTradeHistoryEntry[] }) {
         <AssetLineChart pts={winRatePts} gradId="lg-winrate" color="#a78bfa" label="승률 추이" period={period}
           fmtTooltip={v => `${v.toFixed(1)}%`} />
       </div>
+      <AltAnalyticsSection rows={analyticsRows} mode="live" />
     </div>
   );
 }

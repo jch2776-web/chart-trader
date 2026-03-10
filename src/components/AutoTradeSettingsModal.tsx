@@ -10,6 +10,22 @@ export interface AutoTradeSettings {
   leverage: number;
   marginType: 'ISOLATED' | 'CROSSED';
   scanIntervals: ScanTF[];
+  scanCadenceMinutes?: number;
+}
+
+const CADENCE_PRESETS = [15, 30, 60, 120, 240] as const;
+const DEFAULT_SCAN_CADENCE_MINUTES = 60;
+
+function normalizeCadenceMinutes(v?: number): number {
+  if (!Number.isFinite(v)) return DEFAULT_SCAN_CADENCE_MINUTES;
+  return Math.max(15, Math.round(v!));
+}
+
+function tfToMinutes(tf: ScanTF): number {
+  if (tf === '15m') return 15;
+  if (tf === '1h') return 60;
+  if (tf === '4h') return 240;
+  return 1440;
 }
 
 export const DEFAULT_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
@@ -19,6 +35,7 @@ export const DEFAULT_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
   leverage: 3,
   marginType: 'ISOLATED',
   scanIntervals: ['1h', '4h', '1d'],
+  scanCadenceMinutes: DEFAULT_SCAN_CADENCE_MINUTES,
 };
 
 export const DEFAULT_LIVE_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
@@ -28,6 +45,7 @@ export const DEFAULT_LIVE_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
   leverage: 3,
   marginType: 'ISOLATED',
   scanIntervals: ['1h', '4h', '1d'],
+  scanCadenceMinutes: DEFAULT_SCAN_CADENCE_MINUTES,
 };
 
 interface Props {
@@ -46,6 +64,9 @@ function SettingsEditor({
   set: <K extends keyof AutoTradeSettings>(k: K, v: AutoTradeSettings[K]) => void;
   isLive: boolean;
 }) {
+  const cadence = normalizeCadenceMinutes(draft.scanCadenceMinutes);
+  const minTfMinutes = Math.min(...draft.scanIntervals.map(tfToMinutes));
+  const cadenceFasterThanMinTf = cadence < minTfMinutes;
   return (
     <>
       {/* Leverage */}
@@ -165,6 +186,28 @@ function SettingsEditor({
         <span style={s.hint}>선택한 타임프레임만 스캔합니다 (최소 1개 필수)</span>
       </div>
 
+      {/* Unattended cadence */}
+      <div style={s.fieldRow}>
+        <label style={s.label}>무인 스캔 주기</label>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {CADENCE_PRESETS.map(mins => (
+            <button
+              key={mins}
+              style={{ ...s.toggleChip, ...(cadence === mins ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
+              onClick={() => set('scanCadenceMinutes', mins)}
+            >
+              {mins >= 60 ? `${mins / 60}h` : `${mins}m`}
+            </button>
+          ))}
+        </div>
+        <span style={s.hint}>무인 자동매매 스캔 경계 주기 (최소 15분, 기본 60분)</span>
+        <span style={{ ...s.hint, color: cadenceFasterThanMinTf ? '#f0b90b' : '#5e6673' }}>
+          {cadenceFasterThanMinTf
+            ? `주의: 현재 주기(${cadence}분)가 최소 스캔 봉(${Math.floor(minTfMinutes / 60) >= 1 && minTfMinutes % 60 === 0 ? `${minTfMinutes / 60}h` : `${minTfMinutes}m`})보다 짧아 중복 스캔이 늘 수 있습니다.`
+            : '짧은 주기는 API 사용량을 늘릴 수 있습니다.'}
+        </span>
+      </div>
+
       {/* Info */}
       <div style={s.infoBox}>
         <p style={{ margin: 0, color: '#5e6673', fontSize: '0.76rem', lineHeight: 1.7 }}>
@@ -185,8 +228,14 @@ function SettingsEditor({
 // ── Main modal ───────────────────────────────────────────────────────────────
 export function AutoTradeSettingsModal({ paperSettings, liveSettings, onSave, onClose, initialTab = 'paper' }: Props) {
   const [tab, setTab] = useState<'paper' | 'live'>(initialTab);
-  const [paperDraft, setPaperDraft] = useState<AutoTradeSettings>({ ...paperSettings });
-  const [liveDraft,  setLiveDraft]  = useState<AutoTradeSettings>({ ...liveSettings });
+  const [paperDraft, setPaperDraft] = useState<AutoTradeSettings>({
+    ...paperSettings,
+    scanCadenceMinutes: normalizeCadenceMinutes(paperSettings.scanCadenceMinutes),
+  });
+  const [liveDraft,  setLiveDraft]  = useState<AutoTradeSettings>({
+    ...liveSettings,
+    scanCadenceMinutes: normalizeCadenceMinutes(liveSettings.scanCadenceMinutes),
+  });
 
   const setP = <K extends keyof AutoTradeSettings>(k: K, v: AutoTradeSettings[K]) =>
     setPaperDraft(prev => ({ ...prev, [k]: v }));
@@ -194,7 +243,10 @@ export function AutoTradeSettingsModal({ paperSettings, liveSettings, onSave, on
     setLiveDraft(prev => ({ ...prev, [k]: v }));
 
   const handleSave = () => {
-    onSave(paperDraft, liveDraft);
+    onSave(
+      { ...paperDraft, scanCadenceMinutes: normalizeCadenceMinutes(paperDraft.scanCadenceMinutes) },
+      { ...liveDraft, scanCadenceMinutes: normalizeCadenceMinutes(liveDraft.scanCadenceMinutes) },
+    );
     onClose();
   };
 

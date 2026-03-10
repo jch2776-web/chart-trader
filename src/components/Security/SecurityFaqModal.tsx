@@ -172,6 +172,9 @@ const ITEMS: FaqItem[] = [
       <>
         모든 가격·차트 데이터는 <strong>바이낸스(Binance) 공개 API</strong>에서
         브라우저가 직접 가져옵니다. 중간 서버(프록시)가 없습니다.<br /><br />
+        자산현황의 일부 통계(ALT 도미넌스 프록시)는 Binance 일봉
+        <code> BTCUSDT / ETHUSDT </code> 공개 데이터를 추가 조회해
+        브라우저 내에서 계산하며, 결과는 localStorage 캐시에만 저장됩니다.<br /><br />
         데이터 흐름:<br />
         <code>브라우저 ↔ fapi.binance.com (REST / WebSocket)</code><br /><br />
         따라서 바이낸스 서비스 장애 또는 API 정책 변경 시 일부 기능이 동작하지 않을 수 있습니다.
