@@ -383,18 +383,26 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const mappedAllPositions: FuturesPosition[] = allPosRes
         .filter((p: any) => parseFloat(p.positionAmt) !== 0)
-        .map((p: any) => ({
-          symbol:           p.symbol,
-          positionSide:     p.positionSide as 'LONG' | 'SHORT' | 'BOTH',
-          positionAmt:      parseFloat(p.positionAmt),
-          entryPrice:       parseFloat(p.entryPrice),
-          markPrice:        parseFloat(p.markPrice),
-          unrealizedProfit: parseFloat(p.unRealizedProfit ?? p.unrealizedProfit ?? '0'),
-          leverage:         parseFloat(p.leverage),
-          liquidationPrice: parseFloat(p.liquidationPrice),
-          marginType:       p.marginType as 'isolated' | 'cross',
-          updateTime:       typeof p.updateTime === 'number' ? p.updateTime : undefined,
-        }));
+        .map((p: any) => {
+          const positionAmt = parseFloat(p.positionAmt);
+          const positionSide = p.positionSide as 'LONG' | 'SHORT' | 'BOTH';
+          return {
+            symbol:           p.symbol,
+            positionSide,
+            positionAmt,
+            entryPrice:       parseFloat(p.entryPrice),
+            markPrice:        parseFloat(p.markPrice),
+            unrealizedProfit: parseFloat(p.unRealizedProfit ?? p.unrealizedProfit ?? '0'),
+            leverage:         parseFloat(p.leverage),
+            liquidationPrice: parseFloat(p.liquidationPrice),
+            marginType:       p.marginType as 'isolated' | 'cross',
+            updateTime:       typeof p.updateTime === 'number' ? p.updateTime : undefined,
+            // tradeRes is ticker-scoped; safely enrich only the currently queried symbol
+            entryTime:        p.symbol === tickerRef.current
+              ? findEntryTime(tradeRes, positionAmt, positionSide)
+              : undefined,
+          };
+        });
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const mappedAllOrders: FuturesOrder[] = allOrdRes.map((o: any) => ({

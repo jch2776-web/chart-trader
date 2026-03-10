@@ -171,6 +171,12 @@ const DEFAULT_SETTINGS: TradeSettings = {
 };
 
 const CHART_INTERVALS: readonly Interval[] = ['1m', '3m', '5m', '15m', '1h', '4h', '1d'];
+const ALT_DRAWING_PREFIX = 'altm:';
+const altCandidatePrefix = (candidateId: string) => `${ALT_DRAWING_PREFIX}${candidateId}:`;
+const buildAltManagedDrawingId = (candidateId: string, sourceId: string, idx: number) =>
+  `${altCandidatePrefix(candidateId)}${sourceId || String(idx)}`;
+const isAltManagedDrawingForCandidate = (drawingId: string, candidateId: string) =>
+  drawingId.startsWith(altCandidatePrefix(candidateId));
 
 // ── Resizable divider between panels ─────────────────────────────────────────
 function ResizeDivider({ onDelta }: { onDelta: (delta: number) => void }) {
@@ -1001,13 +1007,57 @@ function AppInner() {
     }
   }, [refetchCandles, setCandles]);
 
+  const mergeAltManagedDrawings = useCallback((meta: AltMeta) => {
+    const candidateId = meta.candidateId;
+    setDrawingsByTicker(prev => {
+      const current = prev[meta.symbol] ?? [];
+      const keep = current.filter(d => !isAltManagedDrawingForCandidate(d.id, candidateId));
+      const injected = meta.drawingsSnapshot.map((d, idx) => ({
+        ...d,
+        id: buildAltManagedDrawingId(candidateId, d.id, idx),
+        ticker: meta.symbol,
+      })) as Drawing[];
+      const merged = Array.from(new Map([...keep, ...injected].map(d => [d.id, d])).values());
+      return { ...prev, [meta.symbol]: merged };
+    });
+  }, []);
+
+  const removeAltManagedDrawingsForCandidate = useCallback((symbol: string, candidateId: string) => {
+    setDrawingsByTicker(prev => {
+      const current = prev[symbol] ?? [];
+      const next = current.filter(d => !isAltManagedDrawingForCandidate(d.id, candidateId));
+      if (next.length === current.length) return prev;
+      const updated = { ...prev };
+      if (next.length > 0) updated[symbol] = next;
+      else delete updated[symbol];
+      return updated;
+    });
+  }, []);
+
   const openAltInMain = useCallback((meta: AltMeta) => {
     if (CHART_INTERVALS.includes(meta.scanInterval as Interval)) {
       handleIntervalChange(meta.scanInterval as Interval);
     }
-    setDrawingsByTicker(prev => ({ ...prev, [meta.symbol]: meta.drawingsSnapshot }));
+    mergeAltManagedDrawings(meta);
     handleTickerSelect(meta.symbol, true);
-  }, [handleIntervalChange, handleTickerSelect]);
+  }, [handleIntervalChange, handleTickerSelect, mergeAltManagedDrawings]);
+
+  // Paper ALT positions: when a position is fully removed, cleanup only that candidate's managed drawings.
+  const prevPaperAltByIdRef = useRef<Record<string, AltMeta>>({});
+  React.useEffect(() => {
+    const prev = prevPaperAltByIdRef.current;
+    const next: Record<string, AltMeta> = {};
+    const currentIds = new Set(paperTrading.positions.map(p => p.id));
+    for (const [id, meta] of Object.entries(prev)) {
+      if (!currentIds.has(id)) {
+        removeAltManagedDrawingsForCandidate(meta.symbol, meta.candidateId);
+      }
+    }
+    for (const p of paperTrading.positions) {
+      if (p.altMeta) next[p.id] = p.altMeta;
+    }
+    prevPaperAltByIdRef.current = next;
+  }, [paperTrading.positions, removeAltManagedDrawingsForCandidate]);
 
   // ── Drawings: save per-ticker ─────────────────────────────────────────
   const handleDrawingsChange = useCallback((newDrawings: Drawing[]) => {
@@ -1866,7 +1916,6 @@ function AppInner() {
           : undefined;
         if (pos) {
           const closePx = markPricesMapRef.current[req.symbol] ?? req.lastClosePrice ?? currentPriceRef.current ?? pos.entryPrice;
-          setDrawingsByTicker(prev => ({ ...prev, [req.symbol]: [] }));
           paperTradingRef.current.closePosition(pos.id, closePx, 'expired');
           addLog('info', `[ALT모의] ${req.symbol} 타임스탑 청산 (${trigger === 'confirm' ? '사용자 확인' : '5분 자동'})`);
           soundPlayer.playSl();
@@ -2277,6 +2326,7 @@ function AppInner() {
         plannedTP: meta.plannedTP,
         plannedSL: meta.plannedSL,
       });
+      removeAltManagedDrawingsForCandidate(meta.symbol, meta.candidateId);
       if (closeReason === 'tp') soundPlayer.playTp();
       else if (closeReason === 'sl' || closeReason === 'invalid' || closeReason === 'time') soundPlayer.playSl();
       cleanupKeys.push(key);
@@ -2320,7 +2370,7 @@ function AppInner() {
         return next;
       });
     }
-  }, [futuresAllPositions, liveAltMetaMap, liveCloseMetaSnapshotMap, inferLiveCloseReason, cleanupAltOrphanOrders, enrichLiveHistoryRowFromTrades, soundPlayer]);
+  }, [futuresAllPositions, liveAltMetaMap, liveCloseMetaSnapshotMap, inferLiveCloseReason, cleanupAltOrphanOrders, enrichLiveHistoryRowFromTrades, soundPlayer, removeAltManagedDrawingsForCandidate]);
 
   const handleLiveCloseMarket = useCallback(async (
     symbol: string,
@@ -2358,17 +2408,31 @@ function AppInner() {
         Math.abs(p.positionAmt) > 0 &&
         (direction === 'long' ? p.positionAmt > 0 : p.positionAmt < 0),
       );
+      const trackedFromRef = liveTrackedRef.current[key];
+      const fallbackTracked = pos ? {
+        qty: Math.abs(pos.positionAmt),
+        entryPrice: pos.entryPrice,
+        leverage: pos.leverage,
+        positionSide: pos.positionSide,
+        entryTime: pos.entryTime,
+      } : trackedFromRef ? {
+        qty: trackedFromRef.qty,
+        entryPrice: trackedFromRef.entryPrice,
+        leverage: trackedFromRef.leverage,
+        positionSide: trackedFromRef.positionSide,
+        entryTime: trackedFromRef.entryTime,
+      } : {
+        qty,
+        entryPrice: metaSnapshot.plannedEntry,
+        leverage: 1,
+        positionSide: direction === 'long' ? 'LONG' as const : 'SHORT' as const,
+        entryTime: metaSnapshot.liveEntryTime ?? metaSnapshot.liveEntrySubmittedAt,
+      };
       setLiveCloseMetaSnapshotMap(prev => ({
         ...prev,
         [key]: {
           meta: metaSnapshot,
-          tracked: pos ? {
-            qty: Math.abs(pos.positionAmt),
-            entryPrice: pos.entryPrice,
-            leverage: pos.leverage,
-            positionSide: pos.positionSide,
-            entryTime: pos.entryTime,
-          } : prev[key]?.tracked,
+          tracked: fallbackTracked,
           capturedAt: Date.now(),
         },
       }));
@@ -2413,7 +2477,6 @@ function AppInner() {
             positionSide={p.positionSide}
             paperPosId={p.id}
             onClose={(price, reason) => {
-              setDrawingsByTicker(prev => ({ ...prev, [p.symbol]: [] }));
               paperTrading.closePosition(p.id, price, reason);
               soundPlayer.playSl();
             }}
@@ -2803,7 +2866,6 @@ function AppInner() {
           onPaperClosePosition={(entryTime) => {
             const raw = paperTrading.positions.find(p => p.entryTime === entryTime);
             if (raw) {
-              if (raw.altMeta) setDrawingsByTicker(prev => ({ ...prev, [raw.symbol]: [] }));
               paperTrading.closePosition(raw.id, markPricesMapRef.current[raw.symbol] ?? currentPrice ?? 0, 'manual');
             }
           }}
