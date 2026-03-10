@@ -39,6 +39,7 @@ export interface LiveTradeHistoryEntry {
   entryTime: number | null;
   exitTime: number;
   closeReason: LiveCloseReason;
+  isAltTrade?: boolean;
   interval?: Interval;
   candidateScore?: number | null;
   plannedEntry?: number | null;

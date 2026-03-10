@@ -89,6 +89,10 @@ interface PendingLiveTPSL {
   sl?: number;
   plannedQty: number;
   createdAt: number;
+  entryOrderId?: string;
+  entryOrderStatus?: string;
+  entrySubmittedAt?: number;
+  positionOpenedAt?: number;
 }
 
 interface LiveAltOrderRegistryEntry {
@@ -97,6 +101,8 @@ interface LiveAltOrderRegistryEntry {
   closeSide: 'BUY' | 'SELL';
   positionSide: 'LONG' | 'SHORT' | 'BOTH';
   orders: PlacedTPSLOrderRef[];
+  entryOrderId?: string;
+  entrySubmittedAt?: number;
   updatedAt: number;
 }
 
@@ -110,6 +116,18 @@ interface LiveTrackedAltPosition {
   positionSide: 'LONG' | 'SHORT' | 'BOTH';
   entryTime?: number;
   seenOpen: boolean;
+}
+
+interface LiveCloseMetaSnapshot {
+  meta: AltMeta;
+  tracked?: {
+    qty: number;
+    entryPrice: number;
+    leverage: number;
+    positionSide: 'LONG' | 'SHORT' | 'BOTH';
+    entryTime?: number;
+  };
+  capturedAt: number;
 }
 
 interface TimeStopEvalResult {
@@ -254,6 +272,13 @@ function AppInner() {
   React.useEffect(() => {
     try { localStorage.setItem(uk('live-alt-meta'), JSON.stringify(liveAltMetaMap)); } catch {}
   }, [liveAltMetaMap]);
+  // Close-click snapshot map: preserves ALT metadata for history even if liveAltMetaMap is cleaned early.
+  const [liveCloseMetaSnapshotMap, setLiveCloseMetaSnapshotMap] = useState<Record<string, LiveCloseMetaSnapshot>>(() => {
+    try { return JSON.parse(localStorage.getItem(uk('live-close-meta-snapshot-map')) ?? '{}'); } catch { return {}; }
+  });
+  React.useEffect(() => {
+    try { localStorage.setItem(uk('live-close-meta-snapshot-map'), JSON.stringify(liveCloseMetaSnapshotMap)); } catch {}
+  }, [liveCloseMetaSnapshotMap]);
 
   // Pending live TP/SL: placed after entry order fills (persisted across reload)
   const [pendingLiveTPSLMap, setPendingLiveTPSLMap] = useState<Record<string, PendingLiveTPSL>>(() => {
@@ -685,6 +710,10 @@ function AppInner() {
     removeClientSL: futuresRemoveClientSL,
     fetchUserTrades: futuresFetchUserTrades,
   } = useBinanceFutures(binanceApiKey, binanceApiSecret, ticker);
+  const futuresAllPositionsRef = useRef(futuresAllPositions);
+  futuresAllPositionsRef.current = futuresAllPositions;
+  const futuresAllOrdersRef = useRef(futuresAllOrders);
+  futuresAllOrdersRef.current = futuresAllOrders;
 
   // ── Live trading history ──────────────────────────────────────────────
   const [liveHistory, setLiveHistory] = useState<LiveTradeHistoryEntry[]>(() => {
@@ -702,6 +731,13 @@ function AppInner() {
       for (const ord of entry.orders) {
         out[ord.orderId] = ord.kind === 'TP' ? 'ALT-AUTO TP' : 'ALT-AUTO SL';
       }
+    }
+    return out;
+  }, [liveAltOrderRegistry]);
+  const liveAltEntryOrderTagMap = React.useMemo(() => {
+    const out: Record<string, true> = {};
+    for (const entry of Object.values(liveAltOrderRegistry)) {
+      if (entry.entryOrderId) out[entry.entryOrderId] = true;
     }
     return out;
   }, [liveAltOrderRegistry]);
@@ -723,6 +759,31 @@ function AppInner() {
         closeSide,
         positionSide,
         orders: dedup,
+        entryOrderId: prev[liveKey]?.entryOrderId,
+        entrySubmittedAt: prev[liveKey]?.entrySubmittedAt,
+        updatedAt: Date.now(),
+      },
+    }));
+  }, []);
+  const upsertLiveAltEntryOrderRegistry = useCallback((
+    liveKey: string,
+    symbol: string,
+    direction: 'long' | 'short',
+    closeSide: 'BUY' | 'SELL',
+    positionSide: 'LONG' | 'SHORT' | 'BOTH',
+    entryOrderId: string,
+    entrySubmittedAt: number,
+  ) => {
+    setLiveAltOrderRegistry(prev => ({
+      ...prev,
+      [liveKey]: {
+        symbol,
+        direction,
+        closeSide,
+        positionSide,
+        orders: prev[liveKey]?.orders ?? [],
+        entryOrderId,
+        entrySubmittedAt,
         updatedAt: Date.now(),
       },
     }));
@@ -1321,7 +1382,7 @@ function AppInner() {
     const leverage = params.leverage ?? 10;
     const liveMarginType: 'CROSSED' | 'ISOLATED' = params.marginType ?? 'ISOLATED';
     const balance = futuresBalanceRef.current;
-    // For trendline PENDING: use triggerPriceAtNextClose as effective entry (binance can't do candle-close conditional)
+    // Keep the existing sizing basis as-is (planned entry / pending trigger).
     const isTrendlinePending =
       params.breakoutType === 'trendline' &&
       params.candidateStatus === 'PENDING' &&
@@ -1348,7 +1409,7 @@ function AppInner() {
       return;
     }
 
-    const liveMeta: AltMeta = {
+    const baseLiveMeta: AltMeta = {
       source: 'altscanner',
       candidateId: params.candidateId,
       symbol: params.symbol,
@@ -1363,36 +1424,136 @@ function AppInner() {
       drawingsSnapshot: params.drawingsSnapshot,
     };
 
-    if (isTrendlinePending) {
-      addLog('info', `[ALT실전] ${params.symbol} 추세선 PENDING — 바이낸스 지정가 @ ${effectiveEntryPrice.toFixed(4)} (봉마감 조건부 불가, 지정가로 대체)`);
-    }
-
     handleTickerSelect(params.symbol);
     setIsPaperMode(false);
     setShowAltScanner(false);
 
+    let ackOrderId: string | undefined;
+    let ackStatusRaw: string | undefined;
+    let ackTime: number | undefined;
+    const requestStartedAt = Date.now();
+    addLog('info', `[ALT실전] 진입 요청 시작 — ${side} ${qty} ${params.symbol} (fill 우선: MARKET)`);
+
     try {
-      await futuresPlaceOrder(side, effectiveEntryPrice, qty, leverage, liveMarginType, false, params.symbol);
-      addLog('info', `[ALT실전] 진입 주문 — ${side} ${qty} ${params.symbol} @ ${effectiveEntryPrice}`);
+      await futuresPlaceOrder(side, effectiveEntryPrice, qty, leverage, liveMarginType, false, params.symbol, 'GTC', {
+        orderType: 'MARKET',
+        onAck: (ack) => {
+          ackOrderId = ack.orderId || undefined;
+          ackStatusRaw = ack.status;
+          ackTime = ack.time;
+        },
+      });
+
+      const ackStatus = ackStatusRaw ?? 'UNKNOWN';
+      const submittedAt = ackTime ?? Date.now();
+
+      addLog('info', `[ALT실전] 진입 주문 접수 — ${params.symbol} status:${ackStatus}${ackOrderId ? ` #${ackOrderId}` : ''}`);
+      if (ackStatus === 'REJECTED' || ackStatus === 'CANCELED' || ackStatus === 'EXPIRED') {
+        addLog('error', `[ALT실전] 진입 주문 미체결 종료 — ${params.symbol} status:${ackStatus}`);
+        return;
+      }
+
+      const liveMeta: AltMeta = {
+        ...baseLiveMeta,
+        liveEntryOrderId: ackOrderId,
+        liveEntrySubmittedAt: submittedAt,
+      };
       soundPlayer.playEntry();
       setLiveAltMetaMap(prev => ({ ...prev, [liveKey]: liveMeta }));
-      // Register pending TP/SL — applied once the position is confirmed open via allPositions update
+      if (ackOrderId) {
+        upsertLiveAltEntryOrderRegistry(
+          liveKey,
+          params.symbol,
+          params.direction,
+          closeSide,
+          params.direction === 'long' ? 'LONG' : 'SHORT',
+          ackOrderId,
+          submittedAt,
+        );
+      }
+
+      // Register pending TP/SL — applied once the position is confirmed open via allPositions update.
       setPendingLiveTPSLMap(prev => ({
         ...prev,
         [liveKey]: {
-          symbol: params.symbol, direction: params.direction, closeSide,
-          tp: params.tpPrice, sl: params.slPrice,
-          plannedQty: qty, createdAt: Date.now(),
+          symbol: params.symbol,
+          direction: params.direction,
+          closeSide,
+          tp: params.tpPrice,
+          sl: params.slPrice,
+          plannedQty: qty,
+          createdAt: Date.now(),
+          entryOrderId: ackOrderId,
+          entryOrderStatus: ackStatus,
+          entrySubmittedAt: submittedAt,
         },
       }));
-      addLog('info', `[ALT실전] TP/SL 대기 등록 — 포지션 확인 후 자동 적용`);
+      addLog('info', `[ALT실전] TP/SL 대기 등록 — 포지션 체결 확인 후 자동 적용`);
+
+      // Best-effort entry fill metadata (real trade time/fee) for later history enrichment.
+      void (async () => {
+        try {
+          const start = Math.max(0, submittedAt - 2 * 60 * 1000);
+          const end = Date.now() + 2 * 60 * 1000;
+          const rows = await futuresFetchUserTrades(params.symbol, start, end, 200);
+          const openRows = rows
+            .filter(t => t.symbol === params.symbol && t.side === side && t.time >= start)
+            .sort((a, b) => a.time - b.time);
+          if (openRows.length === 0) return;
+          const entryTime = openRows[0].time;
+          const usdtOnly = openRows.every(r => (r.commissionAsset ?? '').toUpperCase() === 'USDT');
+          const entryFee = usdtOnly
+            ? parseFloat(openRows.reduce((sum, r) => sum + r.commission, 0).toFixed(8))
+            : null;
+          setLiveAltMetaMap(prev => {
+            const cur = prev[liveKey];
+            if (!cur) return prev;
+            return {
+              ...prev,
+              [liveKey]: {
+                ...cur,
+                liveEntryTime: entryTime,
+                liveEntryFee: entryFee,
+              },
+            };
+          });
+        } catch {
+          // no-op: keep base metadata when enrichment is unavailable
+        }
+      })();
+
+      // Explicit UX feedback: filled / still-open / unknown.
+      void (async () => {
+        await new Promise(resolve => setTimeout(resolve, 900));
+        const opened = futuresAllPositionsRef.current.find(p =>
+          p.symbol === params.symbol &&
+          Math.abs(p.positionAmt) > 0 &&
+          (params.direction === 'long' ? p.positionAmt > 0 : p.positionAmt < 0),
+        );
+        if (opened) {
+          addLog('order', `[ALT실전] 포지션 오픈 확인 — ${params.symbol} ${params.direction.toUpperCase()} ${Math.abs(opened.positionAmt)}`);
+          return;
+        }
+        const openOrder = ackOrderId
+          ? futuresAllOrdersRef.current.find(o => o.symbol === params.symbol && String(o.orderId) === String(ackOrderId))
+          : futuresAllOrdersRef.current.find(o => o.symbol === params.symbol && o.side === side);
+        if (openOrder) {
+          addLog('info', `[ALT실전] 진입 주문 대기중 — ${params.symbol} status:${openOrder.status}`);
+          return;
+        }
+        addLog('info', `[ALT실전] 진입 주문 접수됨 — ${params.symbol} 포지션 오픈 확인 대기 (미체결/만료 여부 확인 필요)`);
+      })();
     } catch (e) {
       addLog('error', `[ALT실전] 진입 실패: ${e instanceof Error ? e.message : 'unknown'}`);
-      liveInFlightRef.current.delete(liveKey); // unlock on failure so retry is possible
     } finally {
-      liveInFlightRef.current.delete(liveKey); // success: liveAltMetaMap takes over tracking
+      // Success path is tracked by liveAltMetaMap; unlock in-flight guard either way.
+      liveInFlightRef.current.delete(liveKey);
+      const elapsed = Date.now() - requestStartedAt;
+      if (elapsed > 4000) {
+        addLog('info', `[ALT실전] 진입 처리 완료 (${(elapsed / 1000).toFixed(1)}s)`);
+      }
     }
-  }, [handleTickerSelect, addLog, futuresPlaceOrder, binanceApiKey, binanceApiSecret]);
+  }, [handleTickerSelect, addLog, futuresPlaceOrder, binanceApiKey, binanceApiSecret, soundPlayer, upsertLiveAltEntryOrderRegistry, futuresFetchUserTrades]);
 
   // Connect forward ref so handleAutoTradeScan can call handleAltLiveTrade
   handleAltLiveTradeRef.current = handleAltLiveTrade;
@@ -1415,22 +1576,66 @@ function AppInner() {
     const pending = Object.entries(pendingLiveTPSLMap);
     if (pending.length === 0) return;
     const EXPIRE_MS = 15 * 60 * 1000;
+    const LEGACY_STALE_MS = 30 * 60 * 1000;
     const now = Date.now();
     for (const [key, entry] of pending) {
-      // Discard entries older than 15 minutes
-      if (now - entry.createdAt > EXPIRE_MS) {
-        addLog('error', `[ALT실전] TP/SL 대기 만료(15분) — ${entry.symbol} 수동 설정 필요`);
-        setPendingLiveTPSLMap(prev => { const n = { ...prev }; delete n[key]; return n; });
-        continue;
-      }
-      if (inFlightTPSLRef.current.has(key)) continue;
       // Check if a matching position is now open
       const pos = futuresAllPositions.find(p =>
         p.symbol === entry.symbol &&
         Math.abs(p.positionAmt) > 0 &&
         (entry.direction === 'long' ? p.positionAmt > 0 : p.positionAmt < 0),
       );
-      if (!pos) continue;
+      if (!pos) {
+        const entryOrder = entry.entryOrderId
+          ? futuresAllOrders.find(o => o.symbol === entry.symbol && String(o.orderId) === String(entry.entryOrderId))
+          : undefined;
+        if (entryOrder) {
+          // Entry order still pending: TP/SL timeout must not run yet.
+          continue;
+        }
+        if (entry.entryOrderId) {
+          const graceElapsed = now - (entry.entrySubmittedAt ?? entry.createdAt);
+          if (graceElapsed < 30 * 1000) {
+            // Fill/position reflection can lag briefly after order acknowledgement.
+            continue;
+          }
+          addLog('info', `[ALT실전] ${entry.symbol} 진입 주문 미체결/취소/만료 — TP/SL 대기 해제`);
+          setPendingLiveTPSLMap(prev => { const n = { ...prev }; delete n[key]; return n; });
+          setLiveAltMetaMap(prev => { const n = { ...prev }; delete n[key]; return n; });
+          setLiveAltOrderRegistry(prev => { const n = { ...prev }; delete n[key]; return n; });
+          setLiveCloseMetaSnapshotMap(prev => { const n = { ...prev }; delete n[key]; return n; });
+          delete liveCloseReasonHintRef.current[key];
+          continue;
+        }
+        // Backward-compat cleanup for very old pending records created before entry-order tracking.
+        if (now - entry.createdAt > LEGACY_STALE_MS) {
+          setPendingLiveTPSLMap(prev => { const n = { ...prev }; delete n[key]; return n; });
+          setLiveAltMetaMap(prev => { const n = { ...prev }; delete n[key]; return n; });
+          setLiveAltOrderRegistry(prev => { const n = { ...prev }; delete n[key]; return n; });
+          setLiveCloseMetaSnapshotMap(prev => { const n = { ...prev }; delete n[key]; return n; });
+          delete liveCloseReasonHintRef.current[key];
+        }
+        continue;
+      }
+
+      const openedAt = entry.positionOpenedAt ?? now;
+      if (!entry.positionOpenedAt) {
+        setPendingLiveTPSLMap(prev => {
+          const cur = prev[key];
+          if (!cur || cur.positionOpenedAt) return prev;
+          return { ...prev, [key]: { ...cur, positionOpenedAt: openedAt } };
+        });
+        addLog('info', `[ALT실전] ${entry.symbol} 포지션 체결 확인 — TP/SL 등록 시작`);
+      }
+
+      // Only enforce timeout after position actually opened.
+      if (now - openedAt > EXPIRE_MS) {
+        addLog('error', `[ALT실전] TP/SL 설정 지연 만료(15분) — ${entry.symbol} 포지션은 열려 있음, 수동 설정 필요`);
+        setPendingLiveTPSLMap(prev => { const n = { ...prev }; delete n[key]; return n; });
+        continue;
+      }
+
+      if (inFlightTPSLRef.current.has(key)) continue;
       const actualQty = Math.abs(pos.positionAmt);
       inFlightTPSLRef.current.add(key);
       futuresPlaceTPSLRef.current(
@@ -1462,7 +1667,7 @@ function AppInner() {
         })
         .finally(() => { inFlightTPSLRef.current.delete(key); });
     }
-  }, [futuresAllPositions, pendingLiveTPSLMap, addLog, upsertLiveAltOrderRegistry]);
+  }, [futuresAllPositions, futuresAllOrders, pendingLiveTPSLMap, addLog, upsertLiveAltOrderRegistry]);
 
   const inferLiveCloseReason = useCallback((meta: AltMeta, exitPrice: number | null): LiveCloseReason => {
     if (exitPrice == null || !isFinite(exitPrice) || exitPrice <= 0) return 'unknown';
@@ -1922,7 +2127,8 @@ function AppInner() {
   ) => {
     try {
       const fallbackStart = exitTime - 7 * 24 * 60 * 60 * 1000;
-      const startTime = Math.max(0, (tracked.entryTime ?? fallbackStart) - 12 * 60 * 60 * 1000);
+      const entryHint = tracked.entryTime ?? meta.liveEntryTime ?? meta.liveEntrySubmittedAt ?? null;
+      const startTime = Math.max(0, (entryHint ?? fallbackStart) - 12 * 60 * 60 * 1000);
       const trades = await futuresFetchUserTrades(meta.symbol, startTime, exitTime + 2 * 60 * 1000, 1000);
       if (trades.length === 0) return;
 
@@ -1949,7 +2155,7 @@ function AppInner() {
           remaining += Math.abs(t.qty);
         }
       }
-      const entryTime = foundEntryTime ?? tracked.entryTime ?? null;
+      const entryTime = foundEntryTime ?? tracked.entryTime ?? meta.liveEntryTime ?? meta.liveEntrySubmittedAt ?? null;
 
       const consumeFee = (rows: FuturesUserTrade[], targetQty: number, reverse: boolean) => {
         const ordered = reverse ? [...rows].sort((a, b) => b.time - a.time) : [...rows].sort((a, b) => a.time - b.time);
@@ -1979,6 +2185,8 @@ function AppInner() {
         const enoughCoverage = openFee.coveredQty > tracked.qty * 0.7 && closeFee.coveredQty > tracked.qty * 0.7;
         if (enoughCoverage && !openFee.nonUsdt && !closeFee.nonUsdt) {
           fees = parseFloat((openFee.fee + closeFee.fee).toFixed(8));
+        } else if (meta.liveEntryFee != null && closeFee.coveredQty > tracked.qty * 0.7 && !closeFee.nonUsdt) {
+          fees = parseFloat((meta.liveEntryFee + closeFee.fee).toFixed(8));
         }
       }
 
@@ -1999,7 +2207,14 @@ function AppInner() {
     const orphanCleanupEntries: LiveAltOrderRegistryEntry[] = [];
     const enrichTargets: Array<{ rowId: string; meta: AltMeta; tracked: LiveTrackedAltPosition; exitTime: number }> = [];
 
-    for (const [key, meta] of Object.entries(liveAltMetaMap)) {
+    const allKeys = new Set<string>([
+      ...Object.keys(liveAltMetaMap),
+      ...Object.keys(liveCloseMetaSnapshotMap),
+    ]);
+    for (const key of allKeys) {
+      const meta = liveAltMetaMap[key] ?? liveCloseMetaSnapshotMap[key]?.meta;
+      if (!meta) continue;
+      const snapTracked = liveCloseMetaSnapshotMap[key]?.tracked;
       const pos = futuresAllPositions.find(p =>
         p.symbol === meta.symbol &&
         Math.abs(p.positionAmt) > 0 &&
@@ -2014,13 +2229,23 @@ function AppInner() {
           markPrice: pos.markPrice,
           leverage: pos.leverage,
           positionSide: pos.positionSide,
-          entryTime: pos.entryTime,
+          entryTime: pos.entryTime ?? meta.liveEntryTime ?? snapTracked?.entryTime ?? nextTracked[key]?.entryTime,
           seenOpen: true,
         };
         continue;
       }
 
-      const tracked = nextTracked[key];
+      const tracked = nextTracked[key] ?? (snapTracked ? {
+        symbol: meta.symbol,
+        direction: meta.direction,
+        qty: snapTracked.qty,
+        entryPrice: snapTracked.entryPrice,
+        markPrice: markPricesMapRef.current[meta.symbol] ?? 0,
+        leverage: snapTracked.leverage,
+        positionSide: snapTracked.positionSide,
+        entryTime: snapTracked.entryTime ?? meta.liveEntryTime,
+        seenOpen: true,
+      } : undefined);
       if (!tracked?.seenOpen) continue;
 
       const rowId = uid();
@@ -2042,15 +2267,18 @@ function AppInner() {
         exitPrice,
         pnl,
         fees: null,
-        entryTime: tracked.entryTime ?? null,
+        entryTime: tracked.entryTime ?? meta.liveEntryTime ?? null,
         exitTime,
         closeReason,
+        isAltTrade: true,
         interval: meta.scanInterval,
         candidateScore: meta.candidateScore,
         plannedEntry: meta.plannedEntry,
         plannedTP: meta.plannedTP,
         plannedSL: meta.plannedSL,
       });
+      if (closeReason === 'tp') soundPlayer.playTp();
+      else if (closeReason === 'sl' || closeReason === 'invalid' || closeReason === 'time') soundPlayer.playSl();
       cleanupKeys.push(key);
       const orphan = liveAltOrderRegistryRef.current[key];
       if (orphan) orphanCleanupEntries.push(orphan);
@@ -2086,8 +2314,13 @@ function AppInner() {
         for (const k of cleanupKeys) delete next[k];
         return next;
       });
+      setLiveCloseMetaSnapshotMap(prev => {
+        const next = { ...prev };
+        for (const k of cleanupKeys) delete next[k];
+        return next;
+      });
     }
-  }, [futuresAllPositions, liveAltMetaMap, inferLiveCloseReason, cleanupAltOrphanOrders, enrichLiveHistoryRowFromTrades]);
+  }, [futuresAllPositions, liveAltMetaMap, liveCloseMetaSnapshotMap, inferLiveCloseReason, cleanupAltOrphanOrders, enrichLiveHistoryRowFromTrades, soundPlayer]);
 
   const handleLiveCloseMarket = useCallback(async (
     symbol: string,
@@ -2118,6 +2351,28 @@ function AppInner() {
     limitPrice: number,
   ) => {
     const key = `${symbol}_${direction}`;
+    const metaSnapshot = liveAltMetaMapRef.current[key];
+    if (metaSnapshot) {
+      const pos = futuresAllPositionsRef.current.find(p =>
+        p.symbol === symbol &&
+        Math.abs(p.positionAmt) > 0 &&
+        (direction === 'long' ? p.positionAmt > 0 : p.positionAmt < 0),
+      );
+      setLiveCloseMetaSnapshotMap(prev => ({
+        ...prev,
+        [key]: {
+          meta: metaSnapshot,
+          tracked: pos ? {
+            qty: Math.abs(pos.positionAmt),
+            entryPrice: pos.entryPrice,
+            leverage: pos.leverage,
+            positionSide: pos.positionSide,
+            entryTime: pos.entryTime,
+          } : prev[key]?.tracked,
+          capturedAt: Date.now(),
+        },
+      }));
+    }
     const prevHint = liveCloseReasonHintRef.current[key];
     liveCloseReasonHintRef.current[key] = 'manual';
     try {
@@ -2562,6 +2817,7 @@ function AppInner() {
           onOpenAltInMain={openAltInMain}
           liveAltMetaMap={liveAltMetaMap}
           liveAltOrderTagMap={liveAltOrderTagMap}
+          liveAltEntryOrderTagMap={liveAltEntryOrderTagMap}
           liveHistory={liveHistory}
           onLiveCloseMarket={handleLiveCloseMarket}
           onLiveCloseCurrentPrice={handleLiveCloseCurrentPrice}

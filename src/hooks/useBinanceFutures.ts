@@ -25,6 +25,25 @@ export interface PlaceTPSLOptions {
   onPlacedOrders?: (orders: PlacedTPSLOrderRef[]) => void;
 }
 
+export interface PlaceOrderAck {
+  orderId: string;
+  status?: string;
+  type?: string;
+  side?: 'BUY' | 'SELL';
+  symbol?: string;
+  executedQty?: number;
+  origQty?: number;
+  price?: number;
+  clientOrderId?: string;
+  time?: number;
+}
+
+export interface PlaceOrderOptions {
+  orderType?: 'LIMIT' | 'MARKET';
+  newClientOrderId?: string;
+  onAck?: (ack: PlaceOrderAck) => void;
+}
+
 function loadClientSlMap(): ClientSlMap {
   try { return JSON.parse(localStorage.getItem(CLIENT_SL_KEY) ?? '{}'); } catch { return {}; }
 }
@@ -494,7 +513,7 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
     return () => clearInterval(id);
   }, [apiKey, apiSecret, ticker, fetchData]);
 
-  // ── Place a LIMIT order ──────────────────────────────────────────────────────
+  // ── Place an order (default: LIMIT) ─────────────────────────────────────────
   const placeOrder = useCallback(async (
     side: 'BUY' | 'SELL',
     price: number,
@@ -504,6 +523,7 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
     reduceOnly = false,
     symbolOverride?: string,
     timeInForce: 'GTC' | 'IOC' | 'FOK' = 'GTC',
+    options?: PlaceOrderOptions,
   ): Promise<void> => {
     const key = apiKeyRef.current;
     const secret = apiSecretRef.current;
@@ -533,24 +553,45 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
       throw new Error('주문 수량이 최소 단위 미만입니다. 마진 또는 레버리지를 높이세요.');
     }
 
-    // Round price to tickSize, but if result is 0 (price < tickSize) use raw significant figures
-    // instead of blocking the order — the exchange will return the authoritative precision error.
-    let priceStr = floorToStep(price, info.tickSize);
-    if (parseFloat(priceStr) <= 0) {
-      // tickSize may be stale/misconfigured for this symbol; send with 8 sig-figs and let Binance decide
-      const rawDecimals = Math.min(8, (String(price).split('.')[1] ?? '').length);
-      priceStr = price.toFixed(rawDecimals);
+    const orderType = options?.orderType ?? 'LIMIT';
+
+    // Round price to tickSize only when LIMIT price is needed.
+    let priceStr = '';
+    if (orderType === 'LIMIT') {
+      // Round price to tickSize, but if result is 0 (price < tickSize) use raw significant figures
+      // instead of blocking the order — the exchange will return the authoritative precision error.
+      priceStr = floorToStep(price, info.tickSize);
+      if (parseFloat(priceStr) <= 0) {
+        // tickSize may be stale/misconfigured for this symbol; send with 8 sig-figs and let Binance decide
+        const rawDecimals = Math.min(8, (String(price).split('.')[1] ?? '').length);
+        priceStr = price.toFixed(rawDecimals);
+      }
     }
 
     // 4. Place order
-    await fetchSigned('/fapi/v1/order', key, secret, {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const orderRes = await fetchSigned<any>('/fapi/v1/order', key, secret, {
       symbol: sym, side,
-      type: 'LIMIT', timeInForce,
+      type: orderType,
       quantity: qtyStr,
-      price: priceStr,
+      ...(orderType === 'LIMIT' ? { timeInForce, price: priceStr } : {}),
+      ...(options?.newClientOrderId ? { newClientOrderId: options.newClientOrderId } : {}),
       ...(reduceOnly ? { reduceOnly: 'true' } : {}),
       recvWindow: 10000,
     }, 'POST');
+    options?.onAck?.({
+      orderId: String(orderRes?.orderId ?? ''),
+      status: typeof orderRes?.status === 'string' ? orderRes.status : undefined,
+      type: typeof orderRes?.type === 'string' ? orderRes.type : undefined,
+      side: (orderRes?.side as 'BUY' | 'SELL' | undefined) ?? undefined,
+      symbol: typeof orderRes?.symbol === 'string' ? orderRes.symbol : undefined,
+      executedQty: Number.isFinite(Number(orderRes?.executedQty)) ? parseFloat(orderRes.executedQty) : undefined,
+      origQty: Number.isFinite(Number(orderRes?.origQty)) ? parseFloat(orderRes.origQty) : undefined,
+      price: Number.isFinite(Number(orderRes?.price)) ? parseFloat(orderRes.price) : undefined,
+      clientOrderId: typeof orderRes?.clientOrderId === 'string' ? orderRes.clientOrderId : undefined,
+      time: Number.isFinite(Number(orderRes?.updateTime)) ? Number(orderRes.updateTime)
+        : (Number.isFinite(Number(orderRes?.transactTime)) ? Number(orderRes.transactTime) : undefined),
+    });
 
     // 4. Refresh — short delay so the exchange has time to register the order
     await new Promise(resolve => setTimeout(resolve, 600));

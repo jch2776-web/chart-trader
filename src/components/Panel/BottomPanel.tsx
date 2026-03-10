@@ -32,6 +32,7 @@ interface Props {
   onOpenAltInMain?: (meta: AltMeta) => void;
   liveAltMetaMap?: Record<string, AltMeta>;
   liveAltOrderTagMap?: Record<string, 'ALT-AUTO TP' | 'ALT-AUTO SL'>;
+  liveAltEntryOrderTagMap?: Record<string, true>;
   // Live trading history
   liveHistory?: LiveTradeHistoryEntry[];
   onLiveCloseMarket?: (
@@ -120,6 +121,7 @@ interface UnifiedHistoryRow {
   exitTime: number;
   closeReason: UnifiedHistoryReason;
   interval?: string;
+  isAltTrade?: boolean;
   candidateScore?: number | null;
   plannedEntry?: number | null;
   plannedTP?: number | null;
@@ -1026,7 +1028,7 @@ export function BottomPanel({
   paperOrders, paperHistory, paperInitialBalance,
   onPaperClosePosition, onPaperSetTPSL, onPaperResetBalance,
   onPaperCancelOrder, onPaperClearHistory, onOpenAltPosition, onOpenAltInMain, liveAltMetaMap,
-  liveAltOrderTagMap, liveHistory, onLiveCloseMarket, onLiveCloseCurrentPrice,
+  liveAltOrderTagMap, liveAltEntryOrderTagMap, liveHistory, onLiveCloseMarket, onLiveCloseCurrentPrice,
 }: Props) {
   const [tab, setTab] = useState<Tab>('positions');
 
@@ -1070,6 +1072,7 @@ export function BottomPanel({
       exitTime: h.exitTime,
       closeReason: h.closeReason,
       interval: h.interval,
+      isAltTrade: h.isAltTrade,
       candidateScore: h.candidateScore ?? null,
       plannedEntry: h.plannedEntry ?? null,
       plannedTP: h.plannedTP ?? null,
@@ -1092,6 +1095,7 @@ export function BottomPanel({
       entryTime: h.entryTime,
       exitTime: h.exitTime,
       closeReason: h.closeReason,
+      isAltTrade: h.isAltTrade,
       interval: h.interval,
       candidateScore: h.candidateScore ?? null,
       plannedEntry: h.plannedEntry ?? null,
@@ -1299,6 +1303,11 @@ export function BottomPanel({
                       <span style={s.symbolName}>{extractCoin(h.symbol)}</span>
                       <span style={s.symbolFull}>{h.symbol}</span>
                     </div>
+                    {h.isAltTrade && (
+                      <span style={{ fontSize: '0.58rem', background: 'rgba(59,139,235,0.18)', color: '#3b8beb', borderRadius: 3, padding: '1px 5px', fontWeight: 700, border: '1px solid rgba(59,139,235,0.4)', marginLeft: 4 }}>
+                        ALT추천
+                      </span>
+                    )}
                   </div>
                 </td>
                 <td style={s.td}><span style={{ ...s.sideBadge, background: h.positionSide === 'LONG' ? 'rgba(14,203,129,0.12)' : 'rgba(246,70,93,0.12)', color: h.positionSide === 'LONG' ? '#0ecb81' : '#f6465d' }}>{h.positionSide}</span></td>
@@ -1857,6 +1866,7 @@ export function BottomPanel({
               ) : allOrders.map(ord => {
                 const effectivePrice = ord.price > 0 ? ord.price : ord.stopPrice;
                 const altAutoTag = liveAltOrderTagMap?.[ord.orderId];
+                const isAltEntry = liveAltEntryOrderTagMap?.[ord.orderId] === true;
                 return (
                   <tr key={ord.orderId} style={s.tr}>
                     <td style={s.td}>
@@ -1874,6 +1884,20 @@ export function BottomPanel({
                     <td style={s.td}>
                       <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                         <span style={s.typeTag}>{orderTypeLabel(ord.type)}</span>
+                        {isAltEntry && (
+                          <span style={{
+                            fontSize: '0.6rem',
+                            fontWeight: 700,
+                            color: '#3b8beb',
+                            background: 'rgba(59,139,235,0.14)',
+                            border: '1px solid rgba(59,139,235,0.35)',
+                            borderRadius: 3,
+                            padding: '1px 5px',
+                            lineHeight: 1.2,
+                          }}>
+                            ALT추천
+                          </span>
+                        )}
                         {altAutoTag && (
                           <span style={{
                             fontSize: '0.6rem',

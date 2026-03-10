@@ -14,6 +14,11 @@ export interface AltMeta {
   validUntilTime: number;
   slPrice: number;            // invalidation threshold (used by AltPositionMonitor)
   drawingsSnapshot: Drawing[];
+  // Live ALT entry provenance/enrichment (optional for backward compatibility)
+  liveEntryOrderId?: string;
+  liveEntrySubmittedAt?: number;
+  liveEntryTime?: number;
+  liveEntryFee?: number | null;
 }
 
 export interface PaperPosition {
@@ -65,6 +70,7 @@ export interface PaperHistoryEntry {
   exitTime: number;
   closeReason: 'manual' | 'tp' | 'sl' | 'liq' | 'expired';
   interval?: string;          // timeframe of entry candle (e.g. '15m', '1h') — ALT추천 positions only
+  isAltTrade?: boolean;
   candidateScore?: number | null;
   plannedEntry?: number | null;
   plannedTP?: number | null;
