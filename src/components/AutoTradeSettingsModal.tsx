@@ -11,6 +11,7 @@ export interface AutoTradeSettings {
   marginType: 'ISOLATED' | 'CROSSED';
   scanIntervals: ScanTF[];
   scanCadenceMinutes?: number;
+  timeStopEnabled?: boolean;
 }
 
 const CADENCE_PRESETS = [15, 30, 60, 120, 240] as const;
@@ -19,6 +20,10 @@ const DEFAULT_SCAN_CADENCE_MINUTES = 60;
 function normalizeCadenceMinutes(v?: number): number {
   if (!Number.isFinite(v)) return DEFAULT_SCAN_CADENCE_MINUTES;
   return Math.max(15, Math.round(v!));
+}
+
+function normalizeTimeStopEnabled(v?: boolean): boolean {
+  return v !== false;
 }
 
 function tfToMinutes(tf: ScanTF): number {
@@ -36,6 +41,7 @@ export const DEFAULT_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
   marginType: 'ISOLATED',
   scanIntervals: ['1h', '4h', '1d'],
   scanCadenceMinutes: DEFAULT_SCAN_CADENCE_MINUTES,
+  timeStopEnabled: true,
 };
 
 export const DEFAULT_LIVE_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
@@ -46,6 +52,7 @@ export const DEFAULT_LIVE_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
   marginType: 'ISOLATED',
   scanIntervals: ['1h', '4h', '1d'],
   scanCadenceMinutes: DEFAULT_SCAN_CADENCE_MINUTES,
+  timeStopEnabled: true,
 };
 
 interface Props {
@@ -65,6 +72,7 @@ function SettingsEditor({
   isLive: boolean;
 }) {
   const cadence = normalizeCadenceMinutes(draft.scanCadenceMinutes);
+  const timeStopEnabled = normalizeTimeStopEnabled(draft.timeStopEnabled);
   const minTfMinutes = Math.min(...draft.scanIntervals.map(tfToMinutes));
   const cadenceFasterThanMinTf = cadence < minTfMinutes;
   return (
@@ -208,6 +216,31 @@ function SettingsEditor({
         </span>
       </div>
 
+      {/* Time-stop toggle (unattended auto-trade scope) */}
+      <div style={s.fieldRow}>
+        <label style={s.label}>타임스탑</label>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button
+            style={{ ...s.toggleChip, ...(timeStopEnabled ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
+            onClick={() => set('timeStopEnabled', true)}
+          >
+            ON
+          </button>
+          <button
+            style={{ ...s.toggleChip, ...(!timeStopEnabled ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
+            onClick={() => set('timeStopEnabled', false)}
+          >
+            OFF
+          </button>
+        </div>
+        <span style={s.hint}>
+          OFF면 자동매매 진입 포지션의 시간 만료 청산/프롬프트를 비활성화합니다.
+        </span>
+        <span style={s.hint}>
+          구조적 무효화(SL 기반) 감시는 계속 동작합니다.
+        </span>
+      </div>
+
       {/* Info */}
       <div style={s.infoBox}>
         <p style={{ margin: 0, color: '#5e6673', fontSize: '0.76rem', lineHeight: 1.7 }}>
@@ -231,10 +264,12 @@ export function AutoTradeSettingsModal({ paperSettings, liveSettings, onSave, on
   const [paperDraft, setPaperDraft] = useState<AutoTradeSettings>({
     ...paperSettings,
     scanCadenceMinutes: normalizeCadenceMinutes(paperSettings.scanCadenceMinutes),
+    timeStopEnabled: normalizeTimeStopEnabled(paperSettings.timeStopEnabled),
   });
   const [liveDraft,  setLiveDraft]  = useState<AutoTradeSettings>({
     ...liveSettings,
     scanCadenceMinutes: normalizeCadenceMinutes(liveSettings.scanCadenceMinutes),
+    timeStopEnabled: normalizeTimeStopEnabled(liveSettings.timeStopEnabled),
   });
 
   const setP = <K extends keyof AutoTradeSettings>(k: K, v: AutoTradeSettings[K]) =>
@@ -244,8 +279,16 @@ export function AutoTradeSettingsModal({ paperSettings, liveSettings, onSave, on
 
   const handleSave = () => {
     onSave(
-      { ...paperDraft, scanCadenceMinutes: normalizeCadenceMinutes(paperDraft.scanCadenceMinutes) },
-      { ...liveDraft, scanCadenceMinutes: normalizeCadenceMinutes(liveDraft.scanCadenceMinutes) },
+      {
+        ...paperDraft,
+        scanCadenceMinutes: normalizeCadenceMinutes(paperDraft.scanCadenceMinutes),
+        timeStopEnabled: normalizeTimeStopEnabled(paperDraft.timeStopEnabled),
+      },
+      {
+        ...liveDraft,
+        scanCadenceMinutes: normalizeCadenceMinutes(liveDraft.scanCadenceMinutes),
+        timeStopEnabled: normalizeTimeStopEnabled(liveDraft.timeStopEnabled),
+      },
     );
     onClose();
   };

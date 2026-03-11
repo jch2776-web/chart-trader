@@ -14,6 +14,8 @@ export interface AltMeta {
   validUntilTime: number;
   slPrice: number;            // invalidation threshold (used by AltPositionMonitor)
   drawingsSnapshot: Drawing[];
+  entrySource?: 'manual' | 'auto';
+  timeStopEnabled?: boolean;
   // Live ALT entry provenance/enrichment (optional for backward compatibility)
   liveEntryOrderId?: string;
   liveEntrySubmittedAt?: number;
@@ -75,6 +77,7 @@ export interface PaperHistoryEntry {
   plannedEntry?: number | null;
   plannedTP?: number | null;
   plannedSL?: number | null;
+  entrySource?: 'manual' | 'auto';
 }
 
 export interface PaperState {

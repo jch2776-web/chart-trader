@@ -178,10 +178,12 @@ const buildAltManagedDrawingId = (candidateId: string, sourceId: string, idx: nu
 const isAltManagedDrawingForCandidate = (drawingId: string, candidateId: string) =>
   drawingId.startsWith(altCandidatePrefix(candidateId));
 const normalizeAutoTradeCadence = (v?: number) => Math.max(15, Math.round(v ?? 60));
+const normalizeAutoTradeTimeStop = (v?: boolean) => v !== false;
 const normalizeAutoTradeSettings = (base: AutoTradeSettings, saved: Partial<AutoTradeSettings> | null | undefined): AutoTradeSettings => ({
   ...base,
   ...(saved ?? {}),
   scanCadenceMinutes: normalizeAutoTradeCadence(saved?.scanCadenceMinutes ?? base.scanCadenceMinutes),
+  timeStopEnabled: normalizeAutoTradeTimeStop(saved?.timeStopEnabled ?? base.timeStopEnabled),
 });
 
 // ── Resizable divider between panels ─────────────────────────────────────────
@@ -1265,6 +1267,8 @@ function AppInner() {
       validUntilTime: params.validUntilTime,
       slPrice: params.slPrice,
       drawingsSnapshot: params.drawingsSnapshot,
+      entrySource: params.entrySource,
+      timeStopEnabled: params.timeStopEnabled,
     };
     const side: 'BUY' | 'SELL' = params.direction === 'long' ? 'BUY' : 'SELL';
     type TriggerType = 'limit' | 'close_above' | 'close_below';
@@ -1288,7 +1292,10 @@ function AppInner() {
       altMeta,
       triggerType,
     );
-    if (!placed) return; // order was rejected (duplicate guard) — no sound, no log
+    if (!placed) {
+      addLog('info', `[ALT모의] ${params.symbol} 예약주문 생성 거부 — 중복 진입 또는 TP/SL 불변식 위반`);
+      return;
+    }
     soundPlayer.playEntry();
     if (isTrendlinePending) {
       addLog('info', `[ALT모의] ${params.symbol} 조건부 진입 대기 — 다음 봉 종가 ${params.direction === 'long' ? '≥' : '≤'} ${limitPrice.toFixed(4)} 시 체결`);
@@ -1304,6 +1311,7 @@ function AppInner() {
 
   // ── AltScanner auto-trade: convert ScanCandidate → AltTradeParams and route by mode ──
   const handleAutoTradeScan = useCallback((c: ScanCandidate) => {
+    const autoSettings = (autoTradeModeRef.current === 'live' ? liveAutoTradeSettingsRef : paperAutoTradeSettingsRef).current;
     const drawingsSnapshot = [
       ...c.drawingGroups.breakout,
       ...c.drawingGroups.topSR,
@@ -1317,9 +1325,9 @@ function AppInner() {
       slPrice:    c.slPrice,
       tpPrice:    c.tpPrice,
       tp1Price:   c.tp1Price,
-      leverage:   (autoTradeModeRef.current === 'live' ? liveAutoTradeSettingsRef : paperAutoTradeSettingsRef).current.leverage,
-      marginType: (autoTradeModeRef.current === 'live' ? liveAutoTradeSettingsRef : paperAutoTradeSettingsRef).current.marginType,
-      riskPct:    (autoTradeModeRef.current === 'live' ? liveAutoTradeSettingsRef : paperAutoTradeSettingsRef).current.riskPct,
+      leverage:   autoSettings.leverage,
+      marginType: autoSettings.marginType,
+      riskPct:    autoSettings.riskPct,
       candidateId: `${c.symbol}_${c.direction}_${c.asOfCloseTime}`,
       candidateScore: c.score,
       plannedEntry: c.entryPrice,
@@ -1328,11 +1336,13 @@ function AppInner() {
       scanInterval: c.interval,
       validUntilTime: c.validUntilTime,
       drawingsSnapshot,
+      entrySource: 'auto',
+      timeStopEnabled: normalizeAutoTradeTimeStop(autoSettings.timeStopEnabled),
       breakoutType:    c.breakoutType,
       candidateStatus: c.status,
       triggerPriceAtNextClose: c.triggerPriceAtNextClose,
-      sizeMode:   (autoTradeModeRef.current === 'live' ? liveAutoTradeSettingsRef : paperAutoTradeSettingsRef).current.sizeMode,
-      marginUsdt: (autoTradeModeRef.current === 'live' ? liveAutoTradeSettingsRef : paperAutoTradeSettingsRef).current.marginUsdt,
+      sizeMode:   autoSettings.sizeMode,
+      marginUsdt: autoSettings.marginUsdt,
     };
     if (autoTradeModeRef.current === 'live') {
       if (!binanceApiKey || !binanceApiSecret) {
@@ -1384,7 +1394,24 @@ function AppInner() {
              o.altMeta?.direction === c.direction,
       );
       for (const o of orders) {
-        paperTradingRef.current.updateOrder(o.id, { tpPrice: c.tpPrice, slPrice: c.slPrice });
+        const isLong = o.altMeta?.direction === 'long';
+        const entryBasis = o.limitPrice;
+        const nextTp = isLong
+          ? (c.tpPrice > entryBasis ? c.tpPrice : o.tpPrice)
+          : (c.tpPrice < entryBasis ? c.tpPrice : o.tpPrice);
+        const nextSl = isLong
+          ? (c.slPrice < entryBasis ? c.slPrice : o.slPrice)
+          : (c.slPrice > entryBasis ? c.slPrice : o.slPrice);
+        if (nextTp !== o.tpPrice || nextSl !== o.slPrice) {
+          paperTradingRef.current.updateOrder(o.id, { tpPrice: nextTp, slPrice: nextSl });
+          continue;
+        }
+        if (o.tpPrice !== c.tpPrice || o.slPrice !== c.slPrice) {
+          addLog(
+            'info',
+            `[ALT모의] ${o.symbol} ${o.altMeta?.direction?.toUpperCase()} TP/SL 업데이트 보류 — 기존 TP:${o.tpPrice ?? '—'} SL:${o.slPrice ?? '—'} / 신규 TP:${c.tpPrice} SL:${c.slPrice} (진입기준:${entryBasis})`,
+          );
+        }
       }
       // Update matching open paper positions
       const positions = paperTradingRef.current.positions.filter(
@@ -1403,10 +1430,16 @@ function AppInner() {
         const safeSL = isLong
           ? (c.slPrice < p.entryPrice ? c.slPrice : p.slPrice)
           : (c.slPrice > p.entryPrice ? c.slPrice : p.slPrice);
+        if (safeTP === p.tpPrice && safeSL === p.slPrice && (c.tpPrice !== p.tpPrice || c.slPrice !== p.slPrice)) {
+          addLog(
+            'info',
+            `[ALT모의] ${p.symbol} ${p.altMeta?.direction?.toUpperCase()} 포지션 TP/SL 유지 — 기존 TP:${p.tpPrice ?? '—'} SL:${p.slPrice ?? '—'} / 신규 TP:${c.tpPrice} SL:${c.slPrice} (실진입:${p.entryPrice})`,
+          );
+        }
         paperTradingRef.current.setTPSL(p.id, safeTP, safeSL);
       }
     }
-  }, []);
+  }, [addLog]);
 
   const handleAltLiveTrade = useCallback(async (params: AltTradeParams) => {
     if (!binanceApiKey || !binanceApiSecret) {
@@ -1479,6 +1512,8 @@ function AppInner() {
       validUntilTime: params.validUntilTime,
       slPrice: params.slPrice,
       drawingsSnapshot: params.drawingsSnapshot,
+      entrySource: params.entrySource,
+      timeStopEnabled: params.timeStopEnabled,
     };
 
     handleTickerSelect(params.symbol);
@@ -1738,6 +1773,32 @@ function AppInner() {
     return 'unknown';
   }, []);
 
+  const inferLiveCloseReasonFromOrderEvidence = useCallback((liveKey: string): LiveCloseReason | null => {
+    const registry = liveAltOrderRegistryRef.current[liveKey];
+    if (!registry || registry.orders.length === 0) return null;
+    let hasTPRef = false;
+    let hasSLRef = false;
+    let tpOpen = false;
+    let slOpen = false;
+    for (const ref of registry.orders) {
+      if (ref.kind === 'TP') hasTPRef = true;
+      if (ref.kind === 'SL') hasSLRef = true;
+      const exists = futuresAllOrders.some(o => o.orderId === ref.orderId && o.symbol === registry.symbol);
+      if (ref.kind === 'TP' && exists) tpOpen = true;
+      if (ref.kind === 'SL' && exists) slOpen = true;
+    }
+    // If one protection leg disappeared while the opposite leg is still open,
+    // treat the disappeared leg as the filled close reason.
+    if (hasTPRef && hasSLRef) {
+      if (!slOpen && tpOpen) return 'sl';
+      if (!tpOpen && slOpen) return 'tp';
+      return null;
+    }
+    if (hasSLRef && !slOpen) return 'sl';
+    if (hasTPRef && !tpOpen) return 'tp';
+    return null;
+  }, [futuresAllOrders]);
+
   const evaluateTimeStop = useCallback(async (req: TimeStopRequestEntry) => {
     const finalize = (patch: Partial<TimeStopEvalResult>) => {
       setTimeStopRequests(prev => {
@@ -1838,6 +1899,7 @@ function AppInner() {
           ? paperTradingRef.current.positions.find(p => p.id === payload.paperPosId)
           : undefined;
         if (!pos || !pos.altMeta) return prev;
+        if (pos.altMeta.timeStopEnabled === false) return prev;
 
         createdEntry = {
           key,
@@ -1870,6 +1932,7 @@ function AppInner() {
         (payload.direction === 'long' ? p.positionAmt > 0 : p.positionAmt < 0),
       );
       if (!meta || !pos) return prev;
+      if (meta.timeStopEnabled === false) return prev;
 
       createdEntry = {
         key,
@@ -2116,7 +2179,16 @@ function AppInner() {
         const exists = req.paperPosId
           ? paperTrading.positions.some(p => p.id === req.paperPosId)
           : false;
-        if (!exists) staleKeys.push(req.key);
+        const disabled = req.paperPosId
+          ? paperTrading.positions.some(p => p.id === req.paperPosId && p.altMeta?.timeStopEnabled === false)
+          : false;
+        if (!exists || disabled) staleKeys.push(req.key);
+        continue;
+      }
+      const liveMetaKey = `${req.symbol}_${req.direction}`;
+      const liveMeta = liveAltMetaMap[liveMetaKey];
+      if (liveMeta?.timeStopEnabled === false) {
+        staleKeys.push(req.key);
         continue;
       }
       const exists = futuresAllPositions.some(p =>
@@ -2144,7 +2216,7 @@ function AppInner() {
       }
       return changed ? next : prev;
     });
-  }, [timeStopRequests, hiddenTimeStopKeys, paperTrading.positions, futuresAllPositions]);
+  }, [timeStopRequests, hiddenTimeStopKeys, paperTrading.positions, futuresAllPositions, liveAltMetaMap]);
 
   const activeTimeStopRequest = React.useMemo(() => {
     const pending = Object.values(timeStopRequests).filter(x => x.state === 'pending' && !hiddenTimeStopKeys[x.key]);
@@ -2180,6 +2252,7 @@ function AppInner() {
     meta: AltMeta,
     tracked: LiveTrackedAltPosition,
     exitTime: number,
+    reasonSource: 'explicit' | 'order' | 'fallback',
   ) => {
     try {
       const fallbackStart = exitTime - 7 * 24 * 60 * 60 * 1000;
@@ -2231,18 +2304,59 @@ function AppInner() {
         }
         return { fee, coveredQty, nonUsdt };
       };
+      const consumeFill = (rows: FuturesUserTrade[], targetQty: number, reverse: boolean) => {
+        const ordered = reverse ? [...rows].sort((a, b) => b.time - a.time) : [...rows].sort((a, b) => a.time - b.time);
+        let remainQty = targetQty;
+        let coveredQty = 0;
+        let notional = 0;
+        for (const row of ordered) {
+          if (remainQty <= 1e-8) break;
+          const rowQty = Math.abs(row.qty);
+          if (rowQty <= 0) continue;
+          const usedQty = Math.min(remainQty, rowQty);
+          remainQty -= usedQty;
+          coveredQty += usedQty;
+          notional += row.price * usedQty;
+        }
+        return { coveredQty, avgPrice: coveredQty > 0 ? (notional / coveredQty) : null };
+      };
+      const inferByCloseFillPrice = (fillPrice: number): LiveCloseReason | null => {
+        if (!isFinite(fillPrice) || fillPrice <= 0) return null;
+        const tp = meta.plannedTP;
+        const sl = meta.plannedSL;
+        const baseTol = Math.max((tracked.entryPrice > 0 ? tracked.entryPrice : fillPrice) * 0.002, 1e-8);
+        if (meta.direction === 'long') {
+          if (tp != null && fillPrice >= tp - baseTol) return 'tp';
+          if (sl != null && fillPrice <= sl + baseTol) return 'sl';
+        } else {
+          if (tp != null && fillPrice <= tp + baseTol) return 'tp';
+          if (sl != null && fillPrice >= sl - baseTol) return 'sl';
+        }
+        if (tp != null && sl != null) {
+          const spreadTol = Math.max(Math.abs(tp - sl) * 0.2, baseTol);
+          const dTp = Math.abs(fillPrice - tp);
+          const dSl = Math.abs(fillPrice - sl);
+          if (Math.min(dTp, dSl) <= spreadTol) return dTp <= dSl ? 'tp' : 'sl';
+        }
+        return null;
+      };
 
       let fees: number | null = null;
+      let tradeCloseReason: LiveCloseReason | null = null;
       if (entryTime != null) {
         const openRows = relevant.filter(t => t.side === openSide && t.time >= entryTime && t.time <= exitTime + 120000);
         const closeRows = relevant.filter(t => t.side === closeSide && t.time >= entryTime && t.time <= exitTime + 120000);
         const openFee = consumeFee(openRows, tracked.qty, false);
         const closeFee = consumeFee(closeRows, tracked.qty, true);
+        const closeFill = consumeFill(closeRows, tracked.qty, true);
         const enoughCoverage = openFee.coveredQty > tracked.qty * 0.7 && closeFee.coveredQty > tracked.qty * 0.7;
         if (enoughCoverage && !openFee.nonUsdt && !closeFee.nonUsdt) {
           fees = parseFloat((openFee.fee + closeFee.fee).toFixed(8));
         } else if (meta.liveEntryFee != null && closeFee.coveredQty > tracked.qty * 0.7 && !closeFee.nonUsdt) {
           fees = parseFloat((meta.liveEntryFee + closeFee.fee).toFixed(8));
+        }
+        if (closeFill.avgPrice != null && closeFill.coveredQty > tracked.qty * 0.4) {
+          tradeCloseReason = inferByCloseFillPrice(closeFill.avgPrice);
         }
       }
 
@@ -2250,6 +2364,9 @@ function AppInner() {
         ...h,
         entryTime: entryTime ?? h.entryTime,
         fees: fees ?? h.fees,
+        closeReason: tradeCloseReason && (reasonSource === 'fallback' || h.closeReason === 'unknown')
+          ? tradeCloseReason
+          : h.closeReason,
       } : h));
     } catch {
       // keep the base history row when trade enrichment fails
@@ -2261,7 +2378,7 @@ function AppInner() {
     const appended: LiveTradeHistoryEntry[] = [];
     const cleanupKeys: string[] = [];
     const orphanCleanupEntries: LiveAltOrderRegistryEntry[] = [];
-    const enrichTargets: Array<{ rowId: string; meta: AltMeta; tracked: LiveTrackedAltPosition; exitTime: number }> = [];
+    const enrichTargets: Array<{ rowId: string; meta: AltMeta; tracked: LiveTrackedAltPosition; exitTime: number; reasonSource: 'explicit' | 'order' | 'fallback' }> = [];
 
     const allKeys = new Set<string>([
       ...Object.keys(liveAltMetaMap),
@@ -2309,7 +2426,12 @@ function AppInner() {
       const exitPrice = tracked.markPrice > 0
         ? tracked.markPrice
         : (markPricesMapRef.current[meta.symbol] ?? null);
-      const closeReason = liveCloseReasonHintRef.current[key] ?? inferLiveCloseReason(meta, exitPrice);
+      const explicitReason = liveCloseReasonHintRef.current[key];
+      const orderEvidenceReason = explicitReason ? null : inferLiveCloseReasonFromOrderEvidence(key);
+      const closeReason = explicitReason ?? orderEvidenceReason ?? inferLiveCloseReason(meta, exitPrice);
+      const reasonSource: 'explicit' | 'order' | 'fallback' = explicitReason
+        ? 'explicit'
+        : (orderEvidenceReason ? 'order' : 'fallback');
       const pnl = exitPrice != null
         ? parseFloat((((tracked.direction === 'long' ? exitPrice - tracked.entryPrice : tracked.entryPrice - exitPrice) * tracked.qty)).toFixed(8))
         : null;
@@ -2332,6 +2454,7 @@ function AppInner() {
         plannedEntry: meta.plannedEntry,
         plannedTP: meta.plannedTP,
         plannedSL: meta.plannedSL,
+        entrySource: meta.entrySource,
       });
       removeAltManagedDrawingsForCandidate(meta.symbol, meta.candidateId);
       if (closeReason === 'tp') soundPlayer.playTp();
@@ -2339,7 +2462,7 @@ function AppInner() {
       cleanupKeys.push(key);
       const orphan = liveAltOrderRegistryRef.current[key];
       if (orphan) orphanCleanupEntries.push(orphan);
-      enrichTargets.push({ rowId, meta, tracked, exitTime });
+      enrichTargets.push({ rowId, meta, tracked, exitTime, reasonSource });
       delete nextTracked[key];
       delete liveCloseReasonHintRef.current[key];
     }
@@ -2349,7 +2472,7 @@ function AppInner() {
     if (appended.length > 0) {
       setLiveHistory(prev => [...appended, ...prev].slice(0, 1000));
       for (const target of enrichTargets) {
-        void enrichLiveHistoryRowFromTrades(target.rowId, target.meta, target.tracked, target.exitTime);
+        void enrichLiveHistoryRowFromTrades(target.rowId, target.meta, target.tracked, target.exitTime, target.reasonSource);
       }
     }
     if (cleanupKeys.length > 0) {
@@ -2377,7 +2500,7 @@ function AppInner() {
         return next;
       });
     }
-  }, [futuresAllPositions, liveAltMetaMap, liveCloseMetaSnapshotMap, inferLiveCloseReason, cleanupAltOrphanOrders, enrichLiveHistoryRowFromTrades, soundPlayer, removeAltManagedDrawingsForCandidate]);
+  }, [futuresAllPositions, liveAltMetaMap, liveCloseMetaSnapshotMap, inferLiveCloseReason, inferLiveCloseReasonFromOrderEvidence, cleanupAltOrphanOrders, enrichLiveHistoryRowFromTrades, soundPlayer, removeAltManagedDrawingsForCandidate]);
 
   const handleLiveCloseMarket = useCallback(async (
     symbol: string,

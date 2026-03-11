@@ -44,6 +44,20 @@ function liqPrice(entryPrice: number, leverage: number, side: 'LONG' | 'SHORT'):
     : entryPrice * (1 + 1 / leverage);
 }
 
+function isAltOrigin(meta?: AltMeta): boolean {
+  return meta?.source === 'altscanner';
+}
+
+function isDirectionalTPValid(side: 'LONG' | 'SHORT', entry: number, tp?: number): boolean {
+  if (tp == null) return true;
+  return side === 'LONG' ? tp > entry : tp < entry;
+}
+
+function isDirectionalSLValid(side: 'LONG' | 'SHORT', entry: number, sl?: number): boolean {
+  if (sl == null) return true;
+  return side === 'LONG' ? sl < entry : sl > entry;
+}
+
 export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' | 'sl' | 'liq') => void) {
   const [state, setState] = useState<PaperState>(() => load(storageKey) ?? { ...DEFAULT_STATE });
 
@@ -71,6 +85,16 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
     const entryFee = parseFloat((price * qty * FEE_RATE).toFixed(8));
     setState(prev => {
       if (prev.balance < margin) return prev; // not enough even for margin
+      if (isAltOrigin(altMeta)) {
+        const tpOk = isDirectionalTPValid(side, price, tpPrice);
+        const slOk = isDirectionalSLValid(side, price, slPrice);
+        if (!tpOk || !slOk) {
+          console.info(
+            `[ALT모의] 오픈 거부(${symbol} ${side}) - TP/SL 불변식 위반: entry=${price} tp=${tpPrice ?? '—'} sl=${slPrice ?? '—'}`,
+          );
+          return prev;
+        }
+      }
       // Cap fee to remaining balance so rounding/price-improvement never silently blocks the order
       const actualFee = Math.min(entryFee, parseFloat((prev.balance - margin).toFixed(8)));
       const actualCost = parseFloat((margin + actualFee).toFixed(8));
@@ -159,6 +183,7 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
         plannedEntry: pos.altMeta?.plannedEntry ?? null,
         plannedTP: pos.altMeta?.plannedTP ?? null,
         plannedSL: pos.altMeta?.plannedSL ?? null,
+        entrySource: pos.altMeta?.entrySource,
       };
       return {
         ...prev,
@@ -209,6 +234,7 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
         plannedEntry: pos.altMeta?.plannedEntry ?? null,
         plannedTP: pos.altMeta?.plannedTP ?? null,
         plannedSL: pos.altMeta?.plannedSL ?? null,
+        entrySource: pos.altMeta?.entrySource,
       };
       const isFull = qty >= totalQty;
       return {
@@ -231,7 +257,20 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
     setState(prev => ({
       ...prev,
       positions: prev.positions.map(p =>
-        p.id === id ? { ...p, tpPrice, slPrice } : p,
+        p.id === id
+          ? (() => {
+              if (!isAltOrigin(p.altMeta)) return { ...p, tpPrice, slPrice };
+              const tpOk = isDirectionalTPValid(p.positionSide, p.entryPrice, tpPrice);
+              const slOk = isDirectionalSLValid(p.positionSide, p.entryPrice, slPrice);
+              if (tpOk && slOk) return { ...p, tpPrice, slPrice };
+              const nextTp = tpOk ? tpPrice : p.tpPrice;
+              const nextSl = slOk ? slPrice : p.slPrice;
+              console.info(
+                `[ALT모의] 포지션 TP/SL 보정(${p.symbol} ${p.positionSide}) - 기존 TP:${p.tpPrice ?? '—'} SL:${p.slPrice ?? '—'} / 입력 TP:${tpPrice ?? '—'} SL:${slPrice ?? '—'} / 유지 TP:${nextTp ?? '—'} SL:${nextSl ?? '—'}`,
+              );
+              return { ...p, tpPrice: nextTp, slPrice: nextSl };
+            })()
+          : p,
       ),
     }));
   }, []);
@@ -261,6 +300,17 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
     altMeta?: AltMeta,
     triggerType: PaperOrder['triggerType'] = 'limit',
   ): boolean => {
+    if (isAltOrigin(altMeta)) {
+      const posSide = side === 'BUY' ? 'LONG' : 'SHORT';
+      const tpOk = isDirectionalTPValid(posSide, limitPrice, tpPrice);
+      const slOk = isDirectionalSLValid(posSide, limitPrice, slPrice);
+      if (!tpOk || !slOk) {
+        console.info(
+          `[ALT모의] 예약주문 거부(${symbol} ${posSide}) - TP/SL 불변식 위반: entry=${limitPrice} tp=${tpPrice ?? '—'} sl=${slPrice ?? '—'}`,
+        );
+        return false;
+      }
+    }
     // Pre-check with stateRef (latest rendered state) for a fast synchronous return value.
     if (altMeta) {
       const posSide = side === 'BUY' ? 'LONG' : 'SHORT';
@@ -345,9 +395,31 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
         // targetMargin = order.qty * order.limitPrice / order.leverage
         const targetMargin = (order.qty * order.limitPrice) / order.leverage;
         const actualQty = parseFloat(((targetMargin * order.leverage) / fillPrice).toFixed(6));
+        const posSide = order.side === 'BUY' ? 'LONG' : 'SHORT';
+        let tpForOpen = order.tpPrice;
+        let slForOpen = order.slPrice;
+        if (isAltOrigin(order.altMeta)) {
+          const tpOk = isDirectionalTPValid(posSide, fillPrice, tpForOpen);
+          const slOk = isDirectionalSLValid(posSide, fillPrice, slForOpen);
+          if (!tpOk || !slOk) {
+            const nextTp = tpOk ? tpForOpen : undefined;
+            const nextSl = slOk ? slForOpen : undefined;
+            console.info(
+              `[ALT모의] 체결 시 TP/SL 재검증(${order.symbol} ${posSide}) - 기존 TP:${tpForOpen ?? '—'} SL:${slForOpen ?? '—'} / 보정 TP:${nextTp ?? '—'} SL:${nextSl ?? '—'} / fill:${fillPrice}`,
+            );
+            tpForOpen = nextTp;
+            slForOpen = nextSl;
+            if (tpForOpen == null && slForOpen == null && (order.tpPrice != null || order.slPrice != null)) {
+              console.info(
+                `[ALT모의] 체결 취소(${order.symbol} ${posSide}) - fill 기준 유효 TP/SL 부재: fill=${fillPrice} tp=${order.tpPrice ?? '—'} sl=${order.slPrice ?? '—'}`,
+              );
+              continue;
+            }
+          }
+        }
         openPosition(order.symbol, order.side === 'BUY' ? 'LONG' : 'SHORT',
           actualQty, fillPrice, order.leverage, order.marginType,
-          order.tpPrice, order.slPrice, order.altMeta);
+          tpForOpen, slForOpen, order.altMeta);
       }
     }
     if (triggeredIds.length > 0) {
@@ -379,10 +451,32 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
       // actualQty    = targetMargin * order.leverage / closePrice
       const targetMargin = (order.qty * order.limitPrice) / order.leverage;
       const actualQty = parseFloat(((targetMargin * order.leverage) / closePrice).toFixed(6));
+      const posSide = order.side === 'BUY' ? 'LONG' : 'SHORT';
+      let tpForOpen = order.tpPrice;
+      let slForOpen = order.slPrice;
+      if (isAltOrigin(order.altMeta)) {
+        const tpOk = isDirectionalTPValid(posSide, closePrice, tpForOpen);
+        const slOk = isDirectionalSLValid(posSide, closePrice, slForOpen);
+        if (!tpOk || !slOk) {
+          const nextTp = tpOk ? tpForOpen : undefined;
+          const nextSl = slOk ? slForOpen : undefined;
+          console.info(
+            `[ALT모의] 봉마감 체결 재검증(${order.symbol} ${posSide}) - 기존 TP:${tpForOpen ?? '—'} SL:${slForOpen ?? '—'} / 보정 TP:${nextTp ?? '—'} SL:${nextSl ?? '—'} / fill:${closePrice}`,
+          );
+          tpForOpen = nextTp;
+          slForOpen = nextSl;
+          if (tpForOpen == null && slForOpen == null && (order.tpPrice != null || order.slPrice != null)) {
+            console.info(
+              `[ALT모의] 봉마감 체결 취소(${order.symbol} ${posSide}) - fill 기준 유효 TP/SL 부재: fill=${closePrice} tp=${order.tpPrice ?? '—'} sl=${order.slPrice ?? '—'}`,
+            );
+            continue;
+          }
+        }
+      }
       openPosition(
         order.symbol, order.side === 'BUY' ? 'LONG' : 'SHORT',
         actualQty, closePrice, order.leverage, order.marginType,
-        order.tpPrice, order.slPrice, order.altMeta,
+        tpForOpen, slForOpen, order.altMeta,
       );
     }
     if (triggeredIds.length > 0) {
@@ -397,7 +491,32 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
   const updateOrder = useCallback((id: string, updates: Partial<Pick<PaperOrder, 'limitPrice' | 'tpPrice' | 'slPrice'>>) => {
     setState(prev => ({
       ...prev,
-      orders: prev.orders.map(o => o.id === id ? { ...o, ...updates } : o),
+      orders: prev.orders.map(o => {
+        if (o.id !== id) return o;
+        const candidate = { ...o, ...updates };
+        if (!isAltOrigin(o.altMeta)) return candidate;
+        const side = candidate.side === 'BUY' ? 'LONG' : 'SHORT';
+        const tpOk = isDirectionalTPValid(side, candidate.limitPrice, candidate.tpPrice);
+        const slOk = isDirectionalSLValid(side, candidate.limitPrice, candidate.slPrice);
+        if (tpOk && slOk) return candidate;
+        const preserved = {
+          ...candidate,
+          tpPrice: tpOk ? candidate.tpPrice : o.tpPrice,
+          slPrice: slOk ? candidate.slPrice : o.slPrice,
+        };
+        const preservedOk = isDirectionalTPValid(side, preserved.limitPrice, preserved.tpPrice)
+          && isDirectionalSLValid(side, preserved.limitPrice, preserved.slPrice);
+        if (!preservedOk) {
+          console.info(
+            `[ALT모의] 예약주문 업데이트 거부(${candidate.symbol} ${side}) - 유효 TP/SL 부재: 기존 TP:${o.tpPrice ?? '—'} SL:${o.slPrice ?? '—'} / 입력 TP:${candidate.tpPrice ?? '—'} SL:${candidate.slPrice ?? '—'} / entry:${preserved.limitPrice}`,
+          );
+          return o;
+        }
+        console.info(
+          `[ALT모의] 예약주문 TP/SL 보정(${candidate.symbol} ${side}) - 기존 TP:${o.tpPrice ?? '—'} SL:${o.slPrice ?? '—'} / 입력 TP:${candidate.tpPrice ?? '—'} SL:${candidate.slPrice ?? '—'} / 유지 TP:${preserved.tpPrice ?? '—'} SL:${preserved.slPrice ?? '—'}`,
+        );
+        return preserved;
+      }),
     }));
   }, []);
 

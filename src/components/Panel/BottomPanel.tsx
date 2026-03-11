@@ -126,6 +126,7 @@ interface UnifiedHistoryRow {
   plannedEntry?: number | null;
   plannedTP?: number | null;
   plannedSL?: number | null;
+  entrySource?: 'manual' | 'auto';
 }
 
 function reasonLabel(reason: UnifiedHistoryReason): string {
@@ -291,21 +292,202 @@ function AnalyticsSummaryCards({ summary }: { summary: MetricSummary }) {
   );
 }
 
+interface AnalyticsGroupRow extends MetricSummary {
+  key: string;
+  label: string;
+  color?: string;
+}
+
+interface AnalyticsPieSlice {
+  key: string;
+  label: string;
+  value: number;
+  color: string;
+}
+
+function AnalyticsGroupBars({
+  title,
+  rows,
+  emptyText = '데이터 없음',
+}: {
+  title: string;
+  rows: AnalyticsGroupRow[];
+  emptyText?: string;
+}) {
+  const maxAbs = Math.max(1, ...rows.map(r => Math.abs(r.totalPnl)));
+  return (
+    <div style={{ border: '1px solid #223247', borderRadius: 6, padding: '8px 10px', background: 'rgba(17,24,39,0.35)' }}>
+      <div style={{ color: '#9aa4b5', fontSize: '0.74rem', marginBottom: 7 }}>{title}</div>
+      {rows.length === 0 ? (
+        <div style={{ color: '#5d6776', fontSize: '0.72rem' }}>{emptyText}</div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {rows.map(row => {
+            const ratio = Math.abs(row.totalPnl) / maxAbs;
+            const width = Math.max(2, ratio * 48);
+            const pos = row.totalPnl >= 0;
+            return (
+              <div key={row.key} style={{ display: 'grid', gridTemplateColumns: '86px 1fr 126px', gap: 8, alignItems: 'center' }}>
+                <span style={{ color: row.color ?? '#c9d0db', fontSize: '0.72rem' }}>{row.label}</span>
+                <div style={{ position: 'relative', height: 14, borderRadius: 4, background: '#141b26', border: '1px solid #1b2635' }}>
+                  <div style={{ position: 'absolute', top: 0, bottom: 0, left: '50%', width: 1, background: '#2f3d51' }} />
+                  <div
+                    style={{
+                      position: 'absolute',
+                      top: 1,
+                      bottom: 1,
+                      left: pos ? '50%' : undefined,
+                      right: pos ? undefined : '50%',
+                      width: `${width}%`,
+                      background: pos ? 'linear-gradient(90deg,#0ecb81,#0ecb8166)' : 'linear-gradient(90deg,#f6465d66,#f6465d)',
+                      borderRadius: 3,
+                    }}
+                  />
+                </div>
+                <span style={{ fontSize: '0.7rem', color: '#9aa4b5', textAlign: 'right', fontFamily: '"SF Mono",Consolas,monospace' }}>
+                  {row.totalPnl >= 0 ? '+' : ''}{row.totalPnl.toFixed(1)} | {row.winRate.toFixed(0)}%
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AnalyticsPieCard({
+  title,
+  slices,
+  emptyText = '데이터 없음',
+}: {
+  title: string;
+  slices: AnalyticsPieSlice[];
+  emptyText?: string;
+}) {
+  const total = slices.reduce((s, x) => s + x.value, 0);
+  let acc = 0;
+  const gradientStops = slices
+    .filter(x => x.value > 0)
+    .map(x => {
+      const start = acc;
+      acc += (x.value / Math.max(total, 1)) * 360;
+      return `${x.color} ${start}deg ${acc}deg`;
+    });
+  const bg = gradientStops.length > 0 ? `conic-gradient(${gradientStops.join(',')})` : '#1a2535';
+
+  return (
+    <div style={{ border: '1px solid #223247', borderRadius: 6, padding: '8px 10px', background: 'rgba(17,24,39,0.35)' }}>
+      <div style={{ color: '#9aa4b5', fontSize: '0.74rem', marginBottom: 7 }}>{title}</div>
+      {total <= 0 ? (
+        <div style={{ color: '#5d6776', fontSize: '0.72rem' }}>{emptyText}</div>
+      ) : (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div
+            style={{
+              width: 72,
+              height: 72,
+              borderRadius: '50%',
+              background: bg,
+              border: '1px solid #2b3b52',
+              boxShadow: 'inset 0 0 0 16px #141c28',
+              flexShrink: 0,
+            }}
+          />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, width: '100%' }}>
+            {slices.filter(x => x.value > 0).map(x => (
+              <div key={x.key} style={{ display: 'grid', gridTemplateColumns: '8px 1fr auto', alignItems: 'center', gap: 6, fontSize: '0.71rem' }}>
+                <span style={{ width: 8, height: 8, borderRadius: '50%', background: x.color }} />
+                <span style={{ color: '#c9d0db' }}>{x.label}</span>
+                <span style={{ color: '#9aa4b5' }}>{x.value} ({((x.value / total) * 100).toFixed(0)}%)</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AltAnalyticsSection({ rows, mode }: { rows: UnifiedHistoryRow[]; mode: 'paper' | 'live' }) {
   const dominance = useAltDominanceProxy();
   const altRows = useMemo(() => rows.filter(r => r.isAltTrade), [rows]);
   const totalSummary = useMemo(() => summarizeRows(altRows), [altRows]);
-  const timeframeRows = useMemo(() => {
+  const timeframeRows = useMemo<AnalyticsGroupRow[]>(() => {
     const grouped = new Map<string, UnifiedHistoryRow[]>();
     for (const row of altRows) {
       const key = row.interval ?? 'unknown';
       grouped.set(key, [...(grouped.get(key) ?? []), row]);
     }
     return Array.from(grouped.entries())
-      .map(([interval, groupedRows]) => ({ interval, ...summarizeRows(groupedRows) }))
-      .sort((a, b) => (ALT_INTERVAL_ORDER[a.interval] ?? 999) - (ALT_INTERVAL_ORDER[b.interval] ?? 999));
+      .map(([interval, groupedRows]) => ({
+        key: interval,
+        label: fmtShortInterval(interval === 'unknown' ? undefined : interval),
+        ...summarizeRows(groupedRows),
+      }))
+      .sort((a, b) => (ALT_INTERVAL_ORDER[a.key] ?? 999) - (ALT_INTERVAL_ORDER[b.key] ?? 999));
   }, [altRows]);
-  const closeTypeRows = useMemo(() => {
+  const leverageRows = useMemo<AnalyticsGroupRow[]>(() => {
+    const grouped = new Map<string, UnifiedHistoryRow[]>();
+    for (const row of altRows) {
+      const lv = row.leverage != null && row.leverage > 0
+        ? (Number.isInteger(row.leverage) ? `${row.leverage}` : row.leverage.toFixed(1))
+        : 'unknown';
+      grouped.set(lv, [...(grouped.get(lv) ?? []), row]);
+    }
+    return Array.from(grouped.entries())
+      .map(([lv, groupedRows]) => ({
+        key: lv,
+        label: lv === 'unknown' ? '미지정' : `${lv}x`,
+        ...summarizeRows(groupedRows),
+      }))
+      .sort((a, b) => {
+        const an = a.key === 'unknown' ? Number.POSITIVE_INFINITY : parseFloat(a.key);
+        const bn = b.key === 'unknown' ? Number.POSITIVE_INFINITY : parseFloat(b.key);
+        return an - bn;
+      });
+  }, [altRows]);
+  const entrySourceRows = useMemo<AnalyticsGroupRow[]>(() => {
+    const manualRows = altRows.filter(r => r.entrySource === 'manual');
+    const autoRows = altRows.filter(r => r.entrySource === 'auto');
+    const unknownRows = altRows.filter(r => r.entrySource !== 'manual' && r.entrySource !== 'auto');
+    return [
+      { key: 'manual', label: '수동 진입', color: '#9aa4b5', ...summarizeRows(manualRows) },
+      { key: 'auto', label: '자동 진입', color: '#3b8beb', ...summarizeRows(autoRows) },
+      { key: 'unknown', label: '미지정', color: '#5d6776', ...summarizeRows(unknownRows) },
+    ];
+  }, [altRows]);
+  const sideRows = useMemo<AnalyticsGroupRow[]>(() => {
+    const longRows = altRows.filter(r => r.positionSide === 'LONG');
+    const shortRows = altRows.filter(r => r.positionSide === 'SHORT');
+    return [
+      { key: 'long', label: 'LONG', color: '#0ecb81', ...summarizeRows(longRows) },
+      { key: 'short', label: 'SHORT', color: '#f6465d', ...summarizeRows(shortRows) },
+    ];
+  }, [altRows]);
+  const hourlyRows = useMemo<AnalyticsGroupRow[]>(() => {
+    const buckets = Array.from({ length: 6 }, (_, i) => {
+      const from = i * 4;
+      const to = from + 3;
+      return {
+        key: `${from}`,
+        label: `${String(from).padStart(2, '0')}-${String(to).padStart(2, '0')}h`,
+        rows: [] as UnifiedHistoryRow[],
+      };
+    });
+    for (const row of altRows) {
+      const ts = row.entryTime ?? row.exitTime;
+      const hour = new Date(ts).getHours();
+      const idx = Math.min(5, Math.max(0, Math.floor(hour / 4)));
+      buckets[idx].rows.push(row);
+    }
+    return buckets.map(x => ({
+      key: x.key,
+      label: x.label,
+      ...summarizeRows(x.rows),
+    }));
+  }, [altRows]);
+  const closeTypeRows = useMemo<AnalyticsGroupRow[]>(() => {
     const manualRows = altRows.filter(r => r.closeReason === 'manual');
     const autoRows = altRows.filter(r => r.closeReason !== 'manual');
     return [
@@ -313,16 +495,48 @@ function AltAnalyticsSection({ rows, mode }: { rows: UnifiedHistoryRow[]; mode: 
       { key: 'auto', label: '자동/시스템 청산', ...summarizeRows(autoRows) },
     ];
   }, [altRows]);
-  const closeReasonRows = useMemo(() => {
+  const closeReasonRows = useMemo<AnalyticsGroupRow[]>(() => {
     const grouped = new Map<string, UnifiedHistoryRow[]>();
     for (const row of altRows) {
       const key = row.closeReason ?? 'unknown';
       grouped.set(key, [...(grouped.get(key) ?? []), row]);
     }
     return Array.from(grouped.entries())
-      .map(([reason, groupedRows]) => ({ reason: reasonLabel(reason as UnifiedHistoryReason), reasonRaw: reason, ...summarizeRows(groupedRows) }))
+      .map(([reason, groupedRows]) => ({
+        key: reason,
+        label: reasonLabel(reason as UnifiedHistoryReason),
+        color: reasonColorByReason(reason as UnifiedHistoryReason),
+        ...summarizeRows(groupedRows),
+      }))
       .sort((a, b) => b.count - a.count);
   }, [altRows]);
+  const entrySourceSlices = useMemo<AnalyticsPieSlice[]>(
+    () => entrySourceRows.map(r => ({
+      key: r.key,
+      label: r.label,
+      value: r.count,
+      color: r.key === 'auto' ? '#3b8beb' : r.key === 'manual' ? '#9aa4b5' : '#5d6776',
+    })),
+    [entrySourceRows],
+  );
+  const sideSlices = useMemo<AnalyticsPieSlice[]>(
+    () => sideRows.map(r => ({
+      key: r.key,
+      label: r.label,
+      value: r.count,
+      color: r.key === 'long' ? '#0ecb81' : '#f6465d',
+    })),
+    [sideRows],
+  );
+  const closeReasonSlices = useMemo<AnalyticsPieSlice[]>(
+    () => closeReasonRows.map(r => ({
+      key: r.key,
+      label: r.label,
+      value: r.count,
+      color: r.color ?? '#848e9c',
+    })),
+    [closeReasonRows],
+  );
   const correlation = useMemo(() => {
     if (Object.keys(dominance.byDay).length === 0) return { n: 0, value: null as number | null };
     const points: Array<{ x: number; y: number }> = [];
@@ -348,56 +562,19 @@ function AltAnalyticsSection({ rows, mode }: { rows: UnifiedHistoryRow[]; mode: 
         <>
           <AnalyticsSummaryCards summary={totalSummary} />
 
-          <div style={{ overflowX: 'auto', marginBottom: 8 }}>
-            <table style={s.table}>
-              <thead>
-                <tr>
-                  <th style={s.th}>타임프레임</th>
-                  <th style={s.th}>거래수</th>
-                  <th style={s.th}>승률</th>
-                  <th style={s.th}>총 손익</th>
-                  <th style={s.th}>평균 손익</th>
-                  <th style={s.th}>평균 ROI</th>
-                </tr>
-              </thead>
-              <tbody>
-                {timeframeRows.map(row => (
-                  <tr key={row.interval} style={s.tr}>
-                    <td style={s.td}>{fmtShortInterval(row.interval === 'unknown' ? undefined : row.interval)}</td>
-                    <td style={s.td}>{row.count}</td>
-                    <td style={s.td}>{row.winRate.toFixed(1)}%</td>
-                    <td style={{ ...s.td, color: row.totalPnl >= 0 ? '#0ecb81' : '#f6465d' }}>{row.totalPnl >= 0 ? '+' : ''}{row.totalPnl.toFixed(2)}</td>
-                    <td style={{ ...s.td, color: row.avgPnl >= 0 ? '#0ecb81' : '#f6465d' }}>{row.avgPnl >= 0 ? '+' : ''}{row.avgPnl.toFixed(2)}</td>
-                    <td style={s.td}>{row.avgRoi != null ? `${row.avgRoi >= 0 ? '+' : ''}${row.avgRoi.toFixed(2)}%` : '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10, marginBottom: 10 }}>
+            <AnalyticsPieCard title="진입 출처 분포" slices={entrySourceSlices} />
+            <AnalyticsPieCard title="LONG/SHORT 분포" slices={sideSlices} />
+            <AnalyticsPieCard title="종료 사유 분포" slices={closeReasonSlices} />
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(260px, 1fr) minmax(260px, 1fr)', gap: 10 }}>
-            <div style={{ border: '1px solid #223247', borderRadius: 6, padding: '8px 10px', background: 'rgba(17,24,39,0.35)' }}>
-              <div style={{ color: '#9aa4b5', fontSize: '0.74rem', marginBottom: 6 }}>수동 vs 자동 청산</div>
-              {closeTypeRows.map(row => (
-                <div key={row.key} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, fontSize: '0.73rem', marginBottom: 4 }}>
-                  <span style={{ color: '#c9d0db' }}>{row.label}</span>
-                  <span style={{ color: '#5d6776' }}>{row.count}건</span>
-                  <span style={{ color: '#d4d9e1' }}>{row.winRate.toFixed(1)}%</span>
-                  <span style={{ color: row.totalPnl >= 0 ? '#0ecb81' : '#f6465d' }}>{row.totalPnl >= 0 ? '+' : ''}{row.totalPnl.toFixed(2)}</span>
-                </div>
-              ))}
-            </div>
-            <div style={{ border: '1px solid #223247', borderRadius: 6, padding: '8px 10px', background: 'rgba(17,24,39,0.35)' }}>
-              <div style={{ color: '#9aa4b5', fontSize: '0.74rem', marginBottom: 6 }}>종료 사유 분해</div>
-              {closeReasonRows.map(row => (
-                <div key={row.reasonRaw} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, fontSize: '0.73rem', marginBottom: 4 }}>
-                  <span style={{ color: reasonColorByReason(row.reasonRaw as UnifiedHistoryReason) }}>{row.reason}</span>
-                  <span style={{ color: '#5d6776' }}>{row.count}건</span>
-                  <span style={{ color: '#d4d9e1' }}>{row.winRate.toFixed(1)}%</span>
-                  <span style={{ color: row.totalPnl >= 0 ? '#0ecb81' : '#f6465d' }}>{row.totalPnl >= 0 ? '+' : ''}{row.totalPnl.toFixed(2)}</span>
-                </div>
-              ))}
-            </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 10 }}>
+            <AnalyticsGroupBars title="타임프레임별 성과 (총손익 | 승률)" rows={timeframeRows} />
+            <AnalyticsGroupBars title="레버리지별 성과 (총손익 | 승률)" rows={leverageRows} />
+            <AnalyticsGroupBars title="수동/자동 진입별 성과" rows={entrySourceRows.filter(r => r.count > 0)} />
+            <AnalyticsGroupBars title="LONG / SHORT 성과 비교" rows={sideRows.filter(r => r.count > 0)} />
+            <AnalyticsGroupBars title="시간대별 성과 비교 (진입시간 기준)" rows={hourlyRows} />
+            <AnalyticsGroupBars title="수동/자동 청산 성과" rows={closeTypeRows.filter(r => r.count > 0)} />
           </div>
 
           <div style={{ marginTop: 10, border: '1px solid #2a2e39', borderRadius: 6, padding: '8px 10px', background: 'rgba(19,23,34,0.45)' }}>
@@ -738,6 +915,7 @@ function PaperAssetChart({ history, initialBalance }: { history: PaperHistoryEnt
       plannedEntry: h.plannedEntry ?? null,
       plannedTP: h.plannedTP ?? null,
       plannedSL: h.plannedSL ?? null,
+      entrySource: h.entrySource,
     })),
     [sorted],
   );
@@ -915,6 +1093,7 @@ function LiveAssetChart({ history }: { history: LiveTradeHistoryEntry[] }) {
       plannedEntry: h.plannedEntry ?? null,
       plannedTP: h.plannedTP ?? null,
       plannedSL: h.plannedSL ?? null,
+      entrySource: h.entrySource,
     })),
     [sorted],
   );
@@ -1405,6 +1584,7 @@ export function BottomPanel({
       plannedEntry: h.plannedEntry ?? null,
       plannedTP: h.plannedTP ?? null,
       plannedSL: h.plannedSL ?? null,
+      entrySource: h.entrySource,
     })),
     [paperHistory],
   );
@@ -1429,6 +1609,7 @@ export function BottomPanel({
       plannedEntry: h.plannedEntry ?? null,
       plannedTP: h.plannedTP ?? null,
       plannedSL: h.plannedSL ?? null,
+      entrySource: h.entrySource,
     })),
     [liveHistory],
   );
@@ -1886,9 +2067,10 @@ export function BottomPanel({
                     const remH = Math.floor(remMs / 3600000);
                     const remM = Math.floor((remMs % 3600000) / 60000);
                     const remS = Math.floor((remMs % 60000) / 1000);
+                    const paperTimeStopOff = altMeta?.timeStopEnabled === false;
                     const remStr = remMs > 0
                       ? `${String(remH).padStart(2,'0')}:${String(remM).padStart(2,'0')}:${String(remS).padStart(2,'0')}`
-                      : '만료';
+                      : (paperTimeStopOff ? '만료(OFF)' : '만료');
                     return (
                       <tr key={`paper-${pos.symbol}-${pos.positionSide}-${pos.updateTime}`} style={s.tr}>
                         <td style={s.td}>
@@ -1953,7 +2135,12 @@ export function BottomPanel({
                           {altMeta ? (
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                               <span style={{ color: '#3b8beb', fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.03em' }}>{altMeta.scanInterval}</span>
-                              <span style={{ color: remMs > 0 ? '#848e9c' : '#f6465d' }}>{remStr}</span>
+                              <span
+                                title={paperTimeStopOff ? '타임스탑 OFF: 시간 만료로 자동청산하지 않습니다.' : undefined}
+                                style={{ color: remMs > 0 ? '#848e9c' : (paperTimeStopOff ? '#f0b90b' : '#f6465d') }}
+                              >
+                                {remStr}
+                              </span>
                             </div>
                           ) : '—'}
                         </td>
@@ -1981,9 +2168,10 @@ export function BottomPanel({
                     const liveRemH = Math.floor(liveRemMs / 3600000);
                     const liveRemM = Math.floor((liveRemMs % 3600000) / 60000);
                     const liveRemS = Math.floor((liveRemMs % 60000) / 1000);
+                    const liveTimeStopOff = liveMeta?.timeStopEnabled === false;
                     const liveRemStr = liveRemMs > 0
                       ? `${String(liveRemH).padStart(2,'0')}:${String(liveRemM).padStart(2,'0')}:${String(liveRemS).padStart(2,'0')}`
-                      : '만료';
+                      : (liveTimeStopOff ? '만료(OFF)' : '만료');
                     const absAmt = Math.abs(pos.positionAmt);
                     const notionalUsdt = absAmt * pos.markPrice;
                     const margin = pos.entryPrice > 0 ? absAmt * pos.entryPrice / pos.leverage : 0;
@@ -2069,7 +2257,12 @@ export function BottomPanel({
                           {liveMeta ? (
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                               <span style={{ color: '#3b8beb', fontSize: '0.7rem', fontWeight: 700, letterSpacing: '0.03em' }}>{liveMeta.scanInterval}</span>
-                              <span style={{ color: liveRemMs > 0 ? '#848e9c' : '#f6465d' }}>{liveRemStr}</span>
+                              <span
+                                title={liveTimeStopOff ? '타임스탑 OFF: 시간 만료로 자동청산하지 않습니다.' : undefined}
+                                style={{ color: liveRemMs > 0 ? '#848e9c' : (liveTimeStopOff ? '#f0b90b' : '#f6465d') }}
+                              >
+                                {liveRemStr}
+                              </span>
                             </div>
                           ) : '—'}
                         </td>

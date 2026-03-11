@@ -53,7 +53,7 @@ export function AltPositionMonitor({ meta, qty, positionSide, paperPosId, onClos
     }
 
     // ── Time-stop request (single-shot) ────────────────────────────────────
-    if (Date.now() > meta.validUntilTime && !timeStopRequestedRef.current) {
+    if (meta.timeStopEnabled !== false && Date.now() > meta.validUntilTime && !timeStopRequestedRef.current) {
       timeStopRequestedRef.current = true;
       onTimeStopRequest({
         mode: 'paper',
@@ -120,7 +120,7 @@ export function LiveAltPositionMonitor({ meta, positionSide, qty, onCloseMarket,
       return;
     }
 
-    if (Date.now() > meta.validUntilTime && !timeStopRequestedRef.current) {
+    if (meta.timeStopEnabled !== false && Date.now() > meta.validUntilTime && !timeStopRequestedRef.current) {
       timeStopRequestedRef.current = true;
       onTimeStopRequest({
         mode: 'live',

@@ -45,6 +45,7 @@ export interface LiveTradeHistoryEntry {
   plannedEntry?: number | null;
   plannedTP?: number | null;
   plannedSL?: number | null;
+  entrySource?: 'manual' | 'auto';
 }
 
 export interface FuturesUserTrade {

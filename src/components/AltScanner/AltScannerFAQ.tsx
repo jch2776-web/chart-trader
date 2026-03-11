@@ -693,7 +693,7 @@ SHORT 청산가 = entryPrice × (1 + 1/leverage - 0.005)
           <Table
             headers={['조건', '동작']}
             rows={[
-              ['now > validUntilTime (타임스탑)', '즉시청산 대신 5분 확인 모달 표시 → 확인 즉시 또는 미응답 5분 후 자동 청산'],
+              ['now > validUntilTime (타임스탑)', '즉시청산 대신 5분 확인 모달 표시 → 확인 즉시 또는 미응답 5분 후 자동 청산 (자동매매 설정에서 OFF한 auto 진입은 제외)'],
               ['종가가 slPrice를 손실 방향으로 돌파 (구조적 무효화)', 'MARKET reduceOnly 전량 청산 + liveAltMetaMap에서 제거'],
             ]}
           />
@@ -825,7 +825,7 @@ SHORT 청산가 = entryPrice × (1 + 1/leverage - 0.005)
           <p>네, 자동으로 등록됩니다. 단, 진입 주문 직후가 아닌 <strong>포지션이 실제로 열린 것이 확인된 후</strong> 등록됩니다. 진입 즉시 내부 대기 목록(pendingLiveTPSLMap)에 TP/SL 의도가 저장되고, futuresAllPositions에서 포지션 오픈이 감지되면 실제 체결 수량으로 TP/SL 주문이 자동 접수됩니다. 진입 주문이 미체결/취소/만료로 끝나면 TP/SL 대기는 자동 해제되며, 이 경우를 TP/SL 타임아웃 실패로 보지 않습니다.</p>
         </Q>
         <Q q="실전 포지션도 타임스탑이나 SL 이탈 시 자동 청산되나요?">
-          <p>네. ALT추천 실전 포지션은 scanInterval 봉 마감마다 감시됩니다. ① 구조적 무효화(SL 이탈)는 즉시 MARKET reduceOnly 청산, ② 타임스탑(validUntilTime 초과)은 먼저 5분 확인 모달을 띄우고 사용자가 확인하면 즉시 청산, 미응답이면 5분 후 자동 청산합니다. 앱이 실행 중일 때만 동작합니다.</p>
+          <p>네. ALT추천 실전 포지션은 scanInterval 봉 마감마다 감시됩니다. ① 구조적 무효화(SL 이탈)는 즉시 MARKET reduceOnly 청산, ② 타임스탑(validUntilTime 초과)은 먼저 5분 확인 모달을 띄우고 사용자가 확인하면 즉시 청산, 미응답이면 5분 후 자동 청산합니다. 단, 자동설정에서 타임스탑 OFF로 들어간 auto 진입은 시간 만료 청산/프롬프트를 만들지 않습니다. 앱이 실행 중일 때만 동작합니다.</p>
         </Q>
         <Q q="현재가 청산은 시장가 청산과 같은가요?">
           <p>아니요. 현재가 청산은 <strong>IOC(Immediate-Or-Cancel) 성격</strong>의 현재가 지정 청산이며 체결이 보장되지 않습니다. UI에서 요청 전송/전송됨/체결완료/미체결/실패 상태를 분리해 표시합니다.</p>

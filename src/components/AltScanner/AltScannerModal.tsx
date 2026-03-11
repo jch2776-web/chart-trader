@@ -32,6 +32,8 @@ export interface AltTradeParams {
   scanInterval: Interval;
   validUntilTime: number;
   drawingsSnapshot: Drawing[];
+  entrySource?: 'manual' | 'auto';
+  timeStopEnabled?: boolean;
   // Signal classification — used for conditional entry logic
   breakoutType: 'trendline' | 'hline' | 'box';
   candidateStatus: CandidateStatus;
