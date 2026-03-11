@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect, useMemo } from 'react';
+import React, { useRef, useState, useEffect, useMemo, useId } from 'react';
 import type { FuturesPosition, FuturesOrder, LiveTradeHistoryEntry } from '../../types/futures';
 import type { ClientSlMap } from '../../hooks/useBinanceFutures';
 import type { PaperHistoryEntry, PaperPosition, PaperOrder, AltMeta } from '../../types/paperTrading';
@@ -35,6 +35,7 @@ interface Props {
   liveAltEntryOrderTagMap?: Record<string, true>;
   // Live trading history
   liveHistory?: LiveTradeHistoryEntry[];
+  liveBalanceHistory?: Array<{ time: number; balance: number }>;
   onLiveCloseMarket?: (
     symbol: string,
     direction: 'long' | 'short',
@@ -156,21 +157,12 @@ interface MetricSummary {
   avgRoi: number | null;
 }
 
-interface DominanceProxyState {
-  loading: boolean;
-  error: string | null;
-  byDay: Record<string, number>;
-  updatedAt: number | null;
-}
-
 const ALT_INTERVAL_ORDER: Record<string, number> = {
   '15m': 1,
   '1h': 2,
   '4h': 3,
   '1d': 4,
 };
-const ALT_DOM_PROXY_CACHE_KEY = 'alt_dom_proxy_ethbtc_v1';
-const ALT_DOM_PROXY_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 
 function fmtShortInterval(iv?: string) {
   if (!iv) return '—';
@@ -198,96 +190,24 @@ function summarizeRows(rows: UnifiedHistoryRow[]): MetricSummary {
   };
 }
 
-function dayKey(ts: number): string {
-  return new Date(ts).toISOString().slice(0, 10);
-}
-
-function pearsonCorrelation(points: Array<{ x: number; y: number }>): number | null {
-  const n = points.length;
-  if (n < 3) return null;
-  const sx = points.reduce((s, p) => s + p.x, 0);
-  const sy = points.reduce((s, p) => s + p.y, 0);
-  const sxx = points.reduce((s, p) => s + p.x * p.x, 0);
-  const syy = points.reduce((s, p) => s + p.y * p.y, 0);
-  const sxy = points.reduce((s, p) => s + p.x * p.y, 0);
-  const num = n * sxy - sx * sy;
-  const den = Math.sqrt((n * sxx - sx * sx) * (n * syy - sy * sy));
-  if (!isFinite(den) || den <= 1e-12) return null;
-  return num / den;
-}
-
-function useAltDominanceProxy(): DominanceProxyState {
-  const [state, setState] = useState<DominanceProxyState>({ loading: true, error: null, byDay: {}, updatedAt: null });
-  useEffect(() => {
-    let cancelled = false;
-    const run = async () => {
-      try {
-        const now = Date.now();
-        try {
-          const cachedRaw = localStorage.getItem(ALT_DOM_PROXY_CACHE_KEY);
-          if (cachedRaw) {
-            const cached = JSON.parse(cachedRaw) as { updatedAt?: number; byDay?: Record<string, number> };
-            if (cached.updatedAt && cached.byDay && now - cached.updatedAt < ALT_DOM_PROXY_CACHE_TTL_MS) {
-              if (!cancelled) {
-                setState({ loading: false, error: null, byDay: cached.byDay, updatedAt: cached.updatedAt });
-              }
-              return;
-            }
-          }
-        } catch {
-          // cache parse failure should not block fetch
-        }
-        const [btcRes, ethRes] = await Promise.all([
-          fetch('https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1d&limit=500'),
-          fetch('https://fapi.binance.com/fapi/v1/klines?symbol=ETHUSDT&interval=1d&limit=500'),
-        ]);
-        if (!btcRes.ok || !ethRes.ok) throw new Error('dominance_proxy_http_error');
-        const btcRows = await btcRes.json() as Array<[number, string, string, string, string, string, number, string, number, string, string, string]>;
-        const ethRows = await ethRes.json() as Array<[number, string, string, string, string, string, number, string, number, string, string, string]>;
-        const btcMap = new Map<string, number>();
-        for (const row of btcRows) {
-          const close = parseFloat(row[4]);
-          if (!isFinite(close) || close <= 0) continue;
-          btcMap.set(dayKey(row[0]), close);
-        }
-        const byDay: Record<string, number> = {};
-        for (const row of ethRows) {
-          const ethClose = parseFloat(row[4]);
-          if (!isFinite(ethClose) || ethClose <= 0) continue;
-          const dk = dayKey(row[0]);
-          const btcClose = btcMap.get(dk);
-          if (!btcClose || btcClose <= 0) continue;
-          byDay[dk] = ethClose / btcClose; // proxy: ETH/BTC relative strength
-        }
-        if (!cancelled) {
-          setState({ loading: false, error: null, byDay, updatedAt: now });
-        }
-        try {
-          localStorage.setItem(ALT_DOM_PROXY_CACHE_KEY, JSON.stringify({ updatedAt: now, byDay }));
-        } catch {
-          // ignore cache write errors
-        }
-      } catch {
-        if (!cancelled) {
-          setState({ loading: false, error: 'proxy_fetch_failed', byDay: {}, updatedAt: null });
-        }
-      }
-    };
-    void run();
-    return () => { cancelled = true; };
-  }, []);
-  return state;
-}
 
 function AnalyticsSummaryCards({ summary }: { summary: MetricSummary }) {
   const pnlColor2 = summary.totalPnl >= 0 ? '#0ecb81' : '#f6465d';
+  const chips = [
+    { label: '거래수', value: `${summary.count}`, color: '#d4d9e1' },
+    { label: '승률', value: `${summary.winRate.toFixed(1)}%`, color: '#d4d9e1' },
+    { label: '총 손익', value: `${summary.totalPnl >= 0 ? '+' : ''}${summary.totalPnl.toFixed(2)} USDT`, color: pnlColor2 },
+    { label: '평균 손익', value: `${summary.avgPnl >= 0 ? '+' : ''}${summary.avgPnl.toFixed(2)} USDT`, color: summary.avgPnl >= 0 ? '#0ecb81' : '#f6465d' },
+    { label: '평균 ROI', value: summary.avgRoi != null ? `${summary.avgRoi >= 0 ? '+' : ''}${summary.avgRoi.toFixed(2)}%` : '—', color: '#d4d9e1' },
+  ];
   return (
-    <div style={{ display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 }}>
-      <span style={{ fontSize: '0.74rem', color: '#4a5568' }}>거래수 <b style={{ color: '#d4d9e1' }}>{summary.count}</b></span>
-      <span style={{ fontSize: '0.74rem', color: '#4a5568' }}>승률 <b style={{ color: '#d4d9e1' }}>{summary.winRate.toFixed(1)}%</b></span>
-      <span style={{ fontSize: '0.74rem', color: '#4a5568' }}>총 손익 <b style={{ color: pnlColor2 }}>{summary.totalPnl >= 0 ? '+' : ''}{summary.totalPnl.toFixed(2)} USDT</b></span>
-      <span style={{ fontSize: '0.74rem', color: '#4a5568' }}>평균 손익 <b style={{ color: summary.avgPnl >= 0 ? '#0ecb81' : '#f6465d' }}>{summary.avgPnl >= 0 ? '+' : ''}{summary.avgPnl.toFixed(2)} USDT</b></span>
-      <span style={{ fontSize: '0.74rem', color: '#4a5568' }}>평균 ROI <b style={{ color: '#d4d9e1' }}>{summary.avgRoi != null ? `${summary.avgRoi >= 0 ? '+' : ''}${summary.avgRoi.toFixed(2)}%` : '—'}</b></span>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 8, marginBottom: 10 }}>
+      {chips.map(chip => (
+        <div key={chip.label} style={{ border: '1px solid rgba(255,255,255,0.08)', borderRadius: 10, padding: '8px 10px', background: 'rgba(255,255,255,0.02)' }}>
+          <div style={{ fontSize: '0.67rem', color: '#6f7c90', marginBottom: 3, letterSpacing: '0.02em' }}>{chip.label}</div>
+          <div style={{ fontSize: '0.83rem', color: chip.color, fontWeight: 700, fontFamily: '"SF Mono",Consolas,monospace' }}>{chip.value}</div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -305,6 +225,34 @@ interface AnalyticsPieSlice {
   color: string;
 }
 
+function piePoint(cx: number, cy: number, radius: number, angleDeg: number) {
+  const rad = (angleDeg - 90) * (Math.PI / 180);
+  return { x: cx + radius * Math.cos(rad), y: cy + radius * Math.sin(rad) };
+}
+
+function pieSlicePath(
+  cx: number,
+  cy: number,
+  radius: number,
+  startDeg: number,
+  endDeg: number,
+  offsetX: number,
+  offsetY: number,
+) {
+  const cX = cx + offsetX;
+  const cY = cy + offsetY;
+  const start = piePoint(cX, cY, radius, startDeg);
+  const end = piePoint(cX, cY, radius, endDeg);
+  const largeArc = endDeg - startDeg > 180 ? 1 : 0;
+  return `M ${cX} ${cY} L ${start.x} ${start.y} A ${radius} ${radius} 0 ${largeArc} 1 ${end.x} ${end.y} Z`;
+}
+
+function withAlpha(color: string, alphaHex: string) {
+  return color.startsWith('#') && (color.length === 7 || color.length === 4)
+    ? `${color}${alphaHex}`
+    : color;
+}
+
 function AnalyticsGroupBars({
   title,
   rows,
@@ -314,22 +262,27 @@ function AnalyticsGroupBars({
   rows: AnalyticsGroupRow[];
   emptyText?: string;
 }) {
+  const [entered, setEntered] = useState(false);
+  useEffect(() => {
+    const id = requestAnimationFrame(() => setEntered(true));
+    return () => cancelAnimationFrame(id);
+  }, []);
   const maxAbs = Math.max(1, ...rows.map(r => Math.abs(r.totalPnl)));
   return (
-    <div style={{ border: '1px solid #223247', borderRadius: 6, padding: '8px 10px', background: 'rgba(17,24,39,0.35)' }}>
-      <div style={{ color: '#9aa4b5', fontSize: '0.74rem', marginBottom: 7 }}>{title}</div>
+    <div style={{ border: '1px solid rgba(151,167,191,0.2)', borderRadius: 12, padding: '10px 12px', background: 'rgba(20,28,41,0.52)', backdropFilter: 'blur(8px)' }}>
+      <div style={{ color: '#b8c4d8', fontSize: '0.77rem', marginBottom: 8, fontWeight: 600, letterSpacing: '0.01em' }}>{title}</div>
       {rows.length === 0 ? (
-        <div style={{ color: '#5d6776', fontSize: '0.72rem' }}>{emptyText}</div>
+        <div style={{ color: '#5d6776', fontSize: '0.72rem', minHeight: 28 }}>{emptyText}</div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          {rows.map(row => {
+          {rows.map((row, idx) => {
             const ratio = Math.abs(row.totalPnl) / maxAbs;
-            const width = Math.max(2, ratio * 48);
+            const targetWidth = Math.max(2, ratio * 48);
             const pos = row.totalPnl >= 0;
             return (
               <div key={row.key} style={{ display: 'grid', gridTemplateColumns: '86px 1fr 126px', gap: 8, alignItems: 'center' }}>
                 <span style={{ color: row.color ?? '#c9d0db', fontSize: '0.72rem' }}>{row.label}</span>
-                <div style={{ position: 'relative', height: 14, borderRadius: 4, background: '#141b26', border: '1px solid #1b2635' }}>
+                <div style={{ position: 'relative', height: 14, borderRadius: 8, background: '#141b26', border: '1px solid #1b2635' }}>
                   <div style={{ position: 'absolute', top: 0, bottom: 0, left: '50%', width: 1, background: '#2f3d51' }} />
                   <div
                     style={{
@@ -338,13 +291,15 @@ function AnalyticsGroupBars({
                       bottom: 1,
                       left: pos ? '50%' : undefined,
                       right: pos ? undefined : '50%',
-                      width: `${width}%`,
+                      width: `${entered ? targetWidth : 0}%`,
                       background: pos ? 'linear-gradient(90deg,#0ecb81,#0ecb8166)' : 'linear-gradient(90deg,#f6465d66,#f6465d)',
-                      borderRadius: 3,
+                      borderRadius: 7,
+                      transition: 'width 620ms cubic-bezier(0.22,1,0.36,1)',
+                      transitionDelay: `${idx * 70}ms`,
                     }}
                   />
                 </div>
-                <span style={{ fontSize: '0.7rem', color: '#9aa4b5', textAlign: 'right', fontFamily: '"SF Mono",Consolas,monospace' }}>
+                <span style={{ fontSize: '0.7rem', color: '#9aa4b5', textAlign: 'right', fontFamily: '"SF Mono",Consolas,monospace', opacity: entered ? 1 : 0.55, transition: 'opacity 360ms ease', transitionDelay: `${idx * 70 + 80}ms` }}>
                   {row.totalPnl >= 0 ? '+' : ''}{row.totalPnl.toFixed(1)} | {row.winRate.toFixed(0)}%
                 </span>
               </div>
@@ -365,37 +320,98 @@ function AnalyticsPieCard({
   slices: AnalyticsPieSlice[];
   emptyText?: string;
 }) {
+  const [entered, setEntered] = useState(false);
+  const gradientPrefix = useId().replace(/[:]/g, '');
+  useEffect(() => {
+    const id = requestAnimationFrame(() => setEntered(true));
+    return () => cancelAnimationFrame(id);
+  }, []);
   const total = slices.reduce((s, x) => s + x.value, 0);
-  let acc = 0;
-  const gradientStops = slices
-    .filter(x => x.value > 0)
-    .map(x => {
-      const start = acc;
-      acc += (x.value / Math.max(total, 1)) * 360;
-      return `${x.color} ${start}deg ${acc}deg`;
+  const visibleSlices = slices.filter(x => x.value > 0);
+  const chartSize = 192;
+  const cx = chartSize / 2;
+  const cy = chartSize / 2;
+  const radius = 50;
+  const geometry = useMemo(() => {
+    let start = -90;
+    return visibleSlices.map(slice => {
+      const ratio = slice.value / Math.max(total, 1);
+      const span = ratio * 360;
+      const end = start + span;
+      const mid = start + span / 2;
+      const explode = Math.max(4, Math.min(8, span * 0.045));
+      const rad = (mid - 90) * (Math.PI / 180);
+      const ox = Math.cos(rad) * explode;
+      const oy = Math.sin(rad) * explode;
+      const labelPos = piePoint(cx + ox, cy + oy, radius * 0.56, mid);
+      const shape = {
+        ...slice,
+        gradId: `${gradientPrefix}-${slice.key}`,
+        pct: ratio * 100,
+        path: pieSlicePath(cx, cy, radius, start, end, ox, oy),
+        innerX: labelPos.x,
+        innerY: labelPos.y,
+      };
+      start = end;
+      return shape;
     });
-  const bg = gradientStops.length > 0 ? `conic-gradient(${gradientStops.join(',')})` : '#1a2535';
+  }, [visibleSlices, total, cx, cy, radius, gradientPrefix]);
 
   return (
-    <div style={{ border: '1px solid #223247', borderRadius: 6, padding: '8px 10px', background: 'rgba(17,24,39,0.35)' }}>
-      <div style={{ color: '#9aa4b5', fontSize: '0.74rem', marginBottom: 7 }}>{title}</div>
+    <div style={{ border: '1px solid rgba(151,167,191,0.2)', borderRadius: 12, padding: '10px 12px', background: 'linear-gradient(180deg, rgba(31,44,62,0.34), rgba(20,28,41,0.44))', backdropFilter: 'blur(8px)' }}>
+      <div style={{ color: '#b8c4d8', fontSize: '0.77rem', marginBottom: 8, fontWeight: 600, letterSpacing: '0.01em' }}>{title}</div>
       {total <= 0 ? (
         <div style={{ color: '#5d6776', fontSize: '0.72rem' }}>{emptyText}</div>
       ) : (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <div
-            style={{
-              width: 72,
-              height: 72,
-              borderRadius: '50%',
-              background: bg,
-              border: '1px solid #2b3b52',
-              boxShadow: 'inset 0 0 0 16px #141c28',
-              flexShrink: 0,
-            }}
-          />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, overflow: 'visible' }}>
+          <div style={{ width: chartSize, height: chartSize, flexShrink: 0 }}>
+            <svg
+              width={chartSize}
+              height={chartSize}
+              viewBox={`0 0 ${chartSize} ${chartSize}`}
+              style={{
+                transform: entered ? 'scale(1)' : 'scale(0.92)',
+                opacity: entered ? 1 : 0.72,
+                transition: 'transform 360ms cubic-bezier(0.22,1,0.36,1), opacity 280ms ease',
+                overflow: 'visible',
+              }}
+            >
+              <defs>
+                {geometry.map(g => (
+                  <linearGradient key={g.gradId} id={g.gradId} x1="0%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" stopColor={withAlpha(g.color, 'f0')} />
+                    <stop offset="55%" stopColor={withAlpha(g.color, '99')} />
+                    <stop offset="100%" stopColor={withAlpha(g.color, '3a')} />
+                  </linearGradient>
+                ))}
+              </defs>
+              {geometry.map(g => (
+                <g key={g.key}>
+                  <path
+                    d={g.path}
+                    fill={`url(#${g.gradId})`}
+                    stroke={withAlpha('#dbe8ff', '7a')}
+                    strokeWidth={1.4}
+                    style={{ filter: `drop-shadow(0 0 10px ${withAlpha(g.color, '77')})` }}
+                  />
+                  <text
+                    x={g.innerX}
+                    y={g.innerY}
+                    fill="#eef5ff"
+                    fontSize={11}
+                    fontWeight={700}
+                    textAnchor="middle"
+                    dominantBaseline="middle"
+                    style={{ textShadow: '0 0 6px rgba(12,19,33,0.55)' }}
+                  >
+                    {g.pct.toFixed(0)}%
+                  </text>
+                </g>
+              ))}
+            </svg>
+          </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4, width: '100%' }}>
-            {slices.filter(x => x.value > 0).map(x => (
+            {visibleSlices.map(x => (
               <div key={x.key} style={{ display: 'grid', gridTemplateColumns: '8px 1fr auto', alignItems: 'center', gap: 6, fontSize: '0.71rem' }}>
                 <span style={{ width: 8, height: 8, borderRadius: '50%', background: x.color }} />
                 <span style={{ color: '#c9d0db' }}>{x.label}</span>
@@ -410,7 +426,11 @@ function AnalyticsPieCard({
 }
 
 function AltAnalyticsSection({ rows, mode }: { rows: UnifiedHistoryRow[]; mode: 'paper' | 'live' }) {
-  const dominance = useAltDominanceProxy();
+  const [revealed, setRevealed] = useState(false);
+  useEffect(() => {
+    const id = requestAnimationFrame(() => setRevealed(true));
+    return () => cancelAnimationFrame(id);
+  }, []);
   const altRows = useMemo(() => rows.filter(r => r.isAltTrade), [rows]);
   const totalSummary = useMemo(() => summarizeRows(altRows), [altRows]);
   const timeframeRows = useMemo<AnalyticsGroupRow[]>(() => {
@@ -448,15 +468,16 @@ function AltAnalyticsSection({ rows, mode }: { rows: UnifiedHistoryRow[]; mode: 
       });
   }, [altRows]);
   const entrySourceRows = useMemo<AnalyticsGroupRow[]>(() => {
-    const manualRows = altRows.filter(r => r.entrySource === 'manual');
-    const autoRows = altRows.filter(r => r.entrySource === 'auto');
-    const unknownRows = altRows.filter(r => r.entrySource !== 'manual' && r.entrySource !== 'auto');
+    const altAutoRows = rows.filter(r => r.isAltTrade && r.entrySource === 'auto');
+    // Legacy ALT rows without entrySource are classified as ALT manual to avoid "미지정" bucket.
+    const altManualRows = rows.filter(r => r.isAltTrade && r.entrySource !== 'auto');
+    const userRows = rows.filter(r => !r.isAltTrade);
     return [
-      { key: 'manual', label: '수동 진입', color: '#9aa4b5', ...summarizeRows(manualRows) },
-      { key: 'auto', label: '자동 진입', color: '#3b8beb', ...summarizeRows(autoRows) },
-      { key: 'unknown', label: '미지정', color: '#5d6776', ...summarizeRows(unknownRows) },
+      { key: 'alt-auto', label: 'ALT 자동', color: '#66e0ff', ...summarizeRows(altAutoRows) },
+      { key: 'alt-manual', label: 'ALT 수동', color: '#7fb7ff', ...summarizeRows(altManualRows) },
+      { key: 'user-manual', label: '사용자 진입', color: '#b6c0d0', ...summarizeRows(userRows) },
     ];
-  }, [altRows]);
+  }, [rows]);
   const sideRows = useMemo<AnalyticsGroupRow[]>(() => {
     const longRows = altRows.filter(r => r.positionSide === 'LONG');
     const shortRows = altRows.filter(r => r.positionSide === 'SHORT');
@@ -515,7 +536,7 @@ function AltAnalyticsSection({ rows, mode }: { rows: UnifiedHistoryRow[]; mode: 
       key: r.key,
       label: r.label,
       value: r.count,
-      color: r.key === 'auto' ? '#3b8beb' : r.key === 'manual' ? '#9aa4b5' : '#5d6776',
+      color: r.key === 'alt-auto' ? '#3bd8ff' : r.key === 'alt-manual' ? '#6f8bff' : '#8da2c2',
     })),
     [entrySourceRows],
   );
@@ -537,22 +558,18 @@ function AltAnalyticsSection({ rows, mode }: { rows: UnifiedHistoryRow[]; mode: 
     })),
     [closeReasonRows],
   );
-  const correlation = useMemo(() => {
-    if (Object.keys(dominance.byDay).length === 0) return { n: 0, value: null as number | null };
-    const points: Array<{ x: number; y: number }> = [];
-    for (const row of altRows) {
-      const roi = calcTradeRoi(row);
-      if (roi == null || !isFinite(roi)) continue;
-      const ts = row.entryTime ?? row.exitTime;
-      const proxy = dominance.byDay[dayKey(ts)];
-      if (!isFinite(proxy)) continue;
-      points.push({ x: proxy, y: roi });
-    }
-    return { n: points.length, value: pearsonCorrelation(points) };
-  }, [altRows, dominance.byDay]);
 
   return (
-    <div style={{ marginTop: 14, borderTop: '1px solid #1a2535', paddingTop: 10 }}>
+    <div
+      style={{
+        marginTop: 14,
+        borderTop: '1px solid #1a2535',
+        paddingTop: 12,
+        opacity: revealed ? 1 : 0,
+        transform: revealed ? 'translateY(0) scale(1)' : 'translateY(8px) scale(0.992)',
+        transition: 'opacity 420ms ease, transform 420ms cubic-bezier(0.22,1,0.36,1)',
+      }}
+    >
       <div style={{ fontSize: '0.78rem', color: '#3b8beb', fontWeight: 700, letterSpacing: '0.02em', marginBottom: 8 }}>
         ALT추천 누적 통계 ({mode === 'paper' ? '모의' : '실전'})
       </div>
@@ -571,34 +588,10 @@ function AltAnalyticsSection({ rows, mode }: { rows: UnifiedHistoryRow[]; mode: 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 10 }}>
             <AnalyticsGroupBars title="타임프레임별 성과 (총손익 | 승률)" rows={timeframeRows} />
             <AnalyticsGroupBars title="레버리지별 성과 (총손익 | 승률)" rows={leverageRows} />
-            <AnalyticsGroupBars title="수동/자동 진입별 성과" rows={entrySourceRows.filter(r => r.count > 0)} />
+            <AnalyticsGroupBars title="진입 출처별 성과" rows={entrySourceRows.filter(r => r.count > 0)} />
             <AnalyticsGroupBars title="LONG / SHORT 성과 비교" rows={sideRows.filter(r => r.count > 0)} />
             <AnalyticsGroupBars title="시간대별 성과 비교 (진입시간 기준)" rows={hourlyRows} />
             <AnalyticsGroupBars title="수동/자동 청산 성과" rows={closeTypeRows.filter(r => r.count > 0)} />
-          </div>
-
-          <div style={{ marginTop: 10, border: '1px solid #2a2e39', borderRadius: 6, padding: '8px 10px', background: 'rgba(19,23,34,0.45)' }}>
-            <div style={{ color: '#f0b90b', fontSize: '0.74rem', fontWeight: 700, marginBottom: 5 }}>알트코인 도미넌스-수익률 상관 (Proxy)</div>
-            <div style={{ color: '#6f7c91', fontSize: '0.71rem', marginBottom: 6 }}>
-              프록시 정의: 일봉 기준 <code style={{ color: '#d4d9e1' }}>ETHUSDT / BTCUSDT</code> 비율(ALT 상대강도). Binance 공개 데이터로 계산됩니다.
-            </div>
-            {dominance.loading ? (
-              <div style={{ color: '#5d6776', fontSize: '0.73rem' }}>프록시 데이터 로딩 중...</div>
-            ) : dominance.error ? (
-              <div style={{ color: '#5d6776', fontSize: '0.73rem' }}>프록시 데이터를 불러오지 못했습니다. (다른 통계는 정상 동작)</div>
-            ) : correlation.value == null ? (
-              <div style={{ color: '#5d6776', fontSize: '0.73rem' }}>상관계수 계산에 필요한 데이터가 부족합니다. (매칭 표본 {correlation.n}건)</div>
-            ) : (
-              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', fontSize: '0.74rem' }}>
-                <span style={{ color: '#d4d9e1' }}>표본: {correlation.n}건</span>
-                <span style={{ color: correlation.value >= 0 ? '#0ecb81' : '#f6465d' }}>
-                  Pearson r = {correlation.value >= 0 ? '+' : ''}{correlation.value.toFixed(3)}
-                </span>
-                <span style={{ color: '#9aa4b5' }}>
-                  {correlation.value > 0.3 ? '양(+) 상관 경향' : correlation.value < -0.3 ? '음(-) 상관 경향' : '약한 상관'}
-                </span>
-              </div>
-            )}
           </div>
         </>
       )}
@@ -1069,7 +1062,13 @@ function PaperAssetChart({ history, initialBalance }: { history: PaperHistoryEnt
 
 
 // ── Live Asset Chart ──────────────────────────────────────────────────────────
-function LiveAssetChart({ history }: { history: LiveTradeHistoryEntry[] }) {
+function LiveAssetChart({
+  history,
+  balanceHistory,
+}: {
+  history: LiveTradeHistoryEntry[];
+  balanceHistory?: Array<{ time: number; balance: number }>;
+}) {
   const [period, setPeriod] = useState<AssetPeriod>('1M');
 
   const sorted = useMemo(() => [...history].sort((a, b) => a.exitTime - b.exitTime), [history]);
@@ -1105,11 +1104,14 @@ function LiveAssetChart({ history }: { history: LiveTradeHistoryEntry[] }) {
     return acc;
   }, [sorted, cutMs]);
 
-  const { filtered, cumPnlPts, tradeCountPts, winRatePts } = useMemo(() => {
+  const { filtered, cumPnlPts, tradeCountPts, winRatePts, balancePts } = useMemo(() => {
     const filtered = sorted.filter(h => h.exitTime >= cutMs);
     const cumPnlPts: AssetPt[] = [];
     const tradeCountPts: AssetPt[] = [];
     const winRatePts: AssetPt[] = [];
+    const balancePts: AssetPt[] = (balanceHistory ?? [])
+      .filter(x => x.time >= cutMs && isFinite(x.balance) && x.balance > 0)
+      .map(x => ({ time: x.time, value: x.balance }));
     let cumPnl = baselineCumPnl;
     let wins = 0;
     filtered.forEach((h, i) => {
@@ -1120,8 +1122,8 @@ function LiveAssetChart({ history }: { history: LiveTradeHistoryEntry[] }) {
       tradeCountPts.push({ time: h.exitTime, value: i + 1 });
       winRatePts.push({ time: h.exitTime, value: (wins / (i + 1)) * 100 });
     });
-    return { filtered, cumPnlPts, tradeCountPts, winRatePts };
-  }, [sorted, cutMs, baselineCumPnl]);
+    return { filtered, cumPnlPts, tradeCountPts, winRatePts, balancePts };
+  }, [sorted, cutMs, baselineCumPnl, balanceHistory]);
 
   const totalPnl  = filtered.reduce((s, h) => s + (h.pnl ?? 0), 0);
   const winCount  = filtered.filter(h => (h.pnl ?? 0) > 0).length;
@@ -1156,6 +1158,8 @@ function LiveAssetChart({ history }: { history: LiveTradeHistoryEntry[] }) {
         </div>
       </div>
       <div style={{ display: 'flex', gap: 10 }}>
+        <AssetLineChart pts={balancePts} gradId="lg-margin-balance" color="#f0b90b" label="선물 마진 밸런스" period={period}
+          fmtTooltip={v => `${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT`} />
         <AssetLineChart pts={cumPnlPts} gradId="lg-cumpnl" showZeroLine color={pnlColor2} label="누적 실현손익" period={period}
           fmtTooltip={v => `${v >= 0 ? '+' : ''}${v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT`} />
         <AssetLineChart pts={tradeCountPts} gradId="lg-trades" color="#7b8cde" label="누적 거래횟수" period={period}
@@ -1535,7 +1539,7 @@ export function BottomPanel({
   paperOrders, paperHistory, paperInitialBalance,
   onPaperClosePosition, onPaperSetTPSL, onPaperResetBalance,
   onPaperCancelOrder, onPaperClearHistory, onOpenAltPosition, onOpenAltInMain, liveAltMetaMap,
-  liveAltOrderTagMap, liveAltEntryOrderTagMap, liveHistory, onLiveCloseMarket, onLiveCloseCurrentPrice,
+  liveAltOrderTagMap, liveAltEntryOrderTagMap, liveHistory, liveBalanceHistory, onLiveCloseMarket, onLiveCloseCurrentPrice,
 }: Props) {
   const [tab, setTab] = useState<Tab>('positions');
 
@@ -2027,7 +2031,7 @@ export function BottomPanel({
 
         {/* Live asset tab */}
         {!isPaperMode && tab === 'live-asset' && (
-          <LiveAssetChart history={liveHistory ?? []} />
+          <LiveAssetChart history={liveHistory ?? []} balanceHistory={liveBalanceHistory} />
         )}
 
         {/* Positions tab */}

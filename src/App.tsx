@@ -67,6 +67,8 @@ function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
 
+const LIVE_MARGIN_BAL_HISTORY_KEY = 'live-futures-margin-balance-history';
+
 const DEFAULT_TELEGRAM: TelegramSettings = {
   enabled: false,
   botToken: '',
@@ -130,6 +132,11 @@ interface LiveCloseMetaSnapshot {
   capturedAt: number;
 }
 
+interface LiveBalancePoint {
+  time: number;
+  balance: number;
+}
+
 interface TimeStopEvalResult {
   status: 'loading' | 'done';
   summaryText: string;
@@ -160,6 +167,26 @@ interface TimeStopRequestEntry {
   deadlineAt: number;
   state: 'pending' | 'closing';
   eval: TimeStopEvalResult;
+  actionError?: string;
+}
+
+interface LiveEntryFillRetryState {
+  attempts: number;
+  nextAt: number;
+  deadlineAt: number;
+  running?: boolean;
+}
+
+interface LiveHistoryEnrichTask {
+  rowId: string;
+  meta: AltMeta;
+  tracked: LiveTrackedAltPosition;
+  exitTime: number;
+  reasonSource: 'explicit' | 'order' | 'fallback';
+  attempts: number;
+  nextAt: number;
+  deadlineAt: number;
+  running?: boolean;
 }
 
 const DEFAULT_SETTINGS: TradeSettings = {
@@ -714,13 +741,16 @@ function AppInner() {
     allPositions: futuresAllPositions,
     allOrders: futuresAllOrders,
     balance: futuresBalance,
+    marginBalance: futuresMarginBalance,
     loading: futuresLoading,
     error: futuresError,
+    refetch: futuresRefetch,
     placeOrder: futuresPlaceOrder,
     cancelOrder: futuresCancelOrder,
     placeTPSL: futuresPlaceTPSL,
     closeMarket: futuresCloseMarket,
     clientSlMap: futuresClientSlMap,
+    recentClientSlTriggerMap: futuresRecentClientSlTriggerMap,
     removeClientSL: futuresRemoveClientSL,
     fetchUserTrades: futuresFetchUserTrades,
   } = useBinanceFutures(binanceApiKey, binanceApiSecret, ticker);
@@ -737,8 +767,39 @@ function AppInner() {
   React.useEffect(() => {
     try { localStorage.setItem(uk('live-trade-history'), JSON.stringify(liveHistory)); } catch {}
   }, [liveHistory]);
+  const liveHistoryRef = useRef<LiveTradeHistoryEntry[]>(liveHistory);
+  liveHistoryRef.current = liveHistory;
+  const [liveBalanceHistory, setLiveBalanceHistory] = useState<LiveBalancePoint[]>(() => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(uk(LIVE_MARGIN_BAL_HISTORY_KEY)) ?? '[]') as LiveBalancePoint[];
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter(p => isFinite(p?.time) && isFinite(p?.balance) && p.balance > 0);
+    }
+    catch { return []; }
+  });
+  React.useEffect(() => {
+    try { localStorage.setItem(uk(LIVE_MARGIN_BAL_HISTORY_KEY), JSON.stringify(liveBalanceHistory)); } catch {}
+  }, [liveBalanceHistory]);
+  React.useEffect(() => {
+    if (!binanceApiKey || !binanceApiSecret) return;
+    if (!isFinite(futuresMarginBalance) || futuresMarginBalance <= 0) return;
+    const now = Date.now();
+    setLiveBalanceHistory(prev => {
+      const last = prev[prev.length - 1];
+      // 샘플링 간격/변화량 기준으로 중복 완화
+      if (last) {
+        const dt = now - last.time;
+        const dv = Math.abs(last.balance - futuresMarginBalance);
+        if (dt < 25_000 && dv < 0.01) return prev;
+      }
+      const next = [...prev, { time: now, balance: futuresMarginBalance }];
+      return next.slice(-4000);
+    });
+  }, [futuresMarginBalance, binanceApiKey, binanceApiSecret]);
   const liveTrackedRef = useRef<Record<string, LiveTrackedAltPosition>>({});
   const liveCloseReasonHintRef = useRef<Record<string, LiveCloseReason>>({});
+  const liveEntryFillRetryRef = useRef<Record<string, LiveEntryFillRetryState>>({});
+  const liveHistoryEnrichQueueRef = useRef<Record<string, LiveHistoryEnrichTask>>({});
   const liveAltOrderTagMap = React.useMemo(() => {
     const out: Record<string, 'ALT-AUTO TP' | 'ALT-AUTO SL'> = {};
     for (const entry of Object.values(liveAltOrderRegistry)) {
@@ -802,6 +863,42 @@ function AppInner() {
       },
     }));
   }, []);
+
+  const captureLiveEntryFillFromTrades = useCallback(async (liveKey: string, meta: AltMeta) => {
+    const submittedAt = meta.liveEntrySubmittedAt ?? Date.now();
+    const start = Math.max(0, submittedAt - 5 * 60 * 1000);
+    const end = Date.now() + 2 * 60 * 1000;
+    const side: 'BUY' | 'SELL' = meta.direction === 'long' ? 'BUY' : 'SELL';
+    const rows = await futuresFetchUserTrades(meta.symbol, start, end, 300);
+    let openRows = rows
+      .filter(t => t.symbol === meta.symbol && t.side === side && t.time >= start)
+      .sort((a, b) => a.time - b.time);
+    if (meta.liveEntryOrderId) {
+      const byOrder = openRows.filter(r => r.orderId && String(r.orderId) === String(meta.liveEntryOrderId));
+      if (byOrder.length > 0) openRows = byOrder;
+    }
+    if (openRows.length === 0) return { found: false, nonUsdt: false };
+
+    const entryTime = openRows[0].time;
+    const nonUsdt = openRows.some(r => (r.commissionAsset ?? '').toUpperCase() !== 'USDT');
+    const entryFee = nonUsdt
+      ? null
+      : parseFloat(openRows.reduce((sum, r) => sum + r.commission, 0).toFixed(8));
+
+    setLiveAltMetaMap(prev => {
+      const cur = prev[liveKey];
+      if (!cur) return prev;
+      return {
+        ...prev,
+        [liveKey]: {
+          ...cur,
+          liveEntryTime: cur.liveEntryTime ?? entryTime,
+          liveEntryFee: cur.liveEntryFee ?? entryFee,
+        },
+      };
+    });
+    return { found: true, nonUsdt };
+  }, [futuresFetchUserTrades]);
 
   // ── Chart indicators ──────────────────────────────────────────────────
   const [indicators, setIndicators] = useState<IndicatorConfig>(() => {
@@ -1582,37 +1679,13 @@ function AppInner() {
       }));
       addLog('info', `[ALT실전] TP/SL 대기 등록 — 포지션 체결 확인 후 자동 적용`);
 
-      // Best-effort entry fill metadata (real trade time/fee) for later history enrichment.
-      void (async () => {
-        try {
-          const start = Math.max(0, submittedAt - 2 * 60 * 1000);
-          const end = Date.now() + 2 * 60 * 1000;
-          const rows = await futuresFetchUserTrades(params.symbol, start, end, 200);
-          const openRows = rows
-            .filter(t => t.symbol === params.symbol && t.side === side && t.time >= start)
-            .sort((a, b) => a.time - b.time);
-          if (openRows.length === 0) return;
-          const entryTime = openRows[0].time;
-          const usdtOnly = openRows.every(r => (r.commissionAsset ?? '').toUpperCase() === 'USDT');
-          const entryFee = usdtOnly
-            ? parseFloat(openRows.reduce((sum, r) => sum + r.commission, 0).toFixed(8))
-            : null;
-          setLiveAltMetaMap(prev => {
-            const cur = prev[liveKey];
-            if (!cur) return prev;
-            return {
-              ...prev,
-              [liveKey]: {
-                ...cur,
-                liveEntryTime: entryTime,
-                liveEntryFee: entryFee,
-              },
-            };
-          });
-        } catch {
-          // no-op: keep base metadata when enrichment is unavailable
-        }
-      })();
+      // Entry fill capture: immediate attempt + bounded retries
+      liveEntryFillRetryRef.current[liveKey] = {
+        attempts: 0,
+        nextAt: Date.now(),
+        deadlineAt: submittedAt + 15 * 60 * 1000,
+      };
+      void captureLiveEntryFillFromTrades(liveKey, liveMeta).catch(() => {});
 
       // Explicit UX feedback: filled / still-open / unknown.
       void (async () => {
@@ -1645,10 +1718,67 @@ function AppInner() {
         addLog('info', `[ALT실전] 진입 처리 완료 (${(elapsed / 1000).toFixed(1)}s)`);
       }
     }
-  }, [handleTickerSelect, addLog, futuresPlaceOrder, binanceApiKey, binanceApiSecret, soundPlayer, upsertLiveAltEntryOrderRegistry, futuresFetchUserTrades]);
+  }, [handleTickerSelect, addLog, futuresPlaceOrder, binanceApiKey, binanceApiSecret, soundPlayer, upsertLiveAltEntryOrderRegistry, captureLiveEntryFillFromTrades]);
 
   // Connect forward ref so handleAutoTradeScan can call handleAltLiveTrade
   handleAltLiveTradeRef.current = handleAltLiveTrade;
+
+  // ── Live ALT entry fill retry (bounded) ────────────────────────────────
+  React.useEffect(() => {
+    const now = Date.now();
+    const retryMap = liveEntryFillRetryRef.current;
+    const liveKeys = new Set(Object.keys(liveAltMetaMap));
+    for (const key of Object.keys(retryMap)) {
+      if (!liveKeys.has(key)) delete retryMap[key];
+    }
+    for (const [liveKey, meta] of Object.entries(liveAltMetaMap)) {
+      if (!meta.liveEntrySubmittedAt && !meta.liveEntryOrderId) continue;
+      const hasEntryTime = meta.liveEntryTime != null;
+      const hasEntryFee = meta.liveEntryFee != null;
+      if (hasEntryTime && hasEntryFee) {
+        delete retryMap[liveKey];
+        continue;
+      }
+
+      const cur = retryMap[liveKey] ?? {
+        attempts: 0,
+        nextAt: now,
+        deadlineAt: (meta.liveEntrySubmittedAt ?? now) + 15 * 60 * 1000,
+      };
+      retryMap[liveKey] = cur;
+      if (cur.running) continue;
+      if (now < cur.nextAt) continue;
+      if (now > cur.deadlineAt || cur.attempts >= 30 || (hasEntryTime && cur.attempts >= 3)) {
+        delete retryMap[liveKey];
+        continue;
+      }
+
+      cur.running = true;
+      void captureLiveEntryFillFromTrades(liveKey, meta)
+        .then((res) => {
+          const latest = liveEntryFillRetryRef.current[liveKey];
+          if (!latest) return;
+          latest.attempts += 1;
+          latest.nextAt = Date.now() + (res.found ? 25_000 : 8_000);
+          latest.running = false;
+          const latestMeta = liveAltMetaMapRef.current[liveKey];
+          if (!latestMeta) {
+            delete liveEntryFillRetryRef.current[liveKey];
+            return;
+          }
+          if (latestMeta.liveEntryTime != null && (latestMeta.liveEntryFee != null || res.nonUsdt || latest.attempts >= 3)) {
+            delete liveEntryFillRetryRef.current[liveKey];
+          }
+        })
+        .catch(() => {
+          const latest = liveEntryFillRetryRef.current[liveKey];
+          if (!latest) return;
+          latest.attempts += 1;
+          latest.nextAt = Date.now() + 12_000;
+          latest.running = false;
+        });
+    }
+  }, [liveAltMetaMap, captureLiveEntryFillFromTrades]);
 
   // ── Auto trade mode change handler ────────────────────────────────────
   const handleChangeAutoTradeMode = useCallback((mode: 'paper' | 'live') => {
@@ -1798,6 +1928,19 @@ function AppInner() {
     if (hasTPRef && !tpOpen) return 'tp';
     return null;
   }, [futuresAllOrders]);
+
+  const inferLiveCloseReasonFromClientSlEvidence = useCallback((
+    symbol: string,
+    tracked: LiveTrackedAltPosition | undefined,
+  ): LiveCloseReason | null => {
+    if (!tracked) return null;
+    const byPosSide = futuresRecentClientSlTriggerMap[`${symbol}_${tracked.positionSide}`];
+    const byBoth = futuresRecentClientSlTriggerMap[`${symbol}_BOTH`];
+    const hitTs = Math.max(byPosSide ?? 0, byBoth ?? 0);
+    if (hitTs <= 0) return null;
+    if (Date.now() - hitTs > 20 * 60 * 1000) return null;
+    return 'sl';
+  }, [futuresRecentClientSlTriggerMap]);
 
   const evaluateTimeStop = useCallback(async (req: TimeStopRequestEntry) => {
     const finalize = (patch: Partial<TimeStopEvalResult>) => {
@@ -1975,7 +2118,7 @@ function AppInner() {
     setTimeStopRequests(prev => {
       const cur = prev[reqKey];
       if (!cur || cur.state !== 'pending') return prev;
-      return { ...prev, [reqKey]: { ...cur, state: 'closing' } };
+      return { ...prev, [reqKey]: { ...cur, state: 'closing', actionError: undefined } };
     });
 
     let success = false;
@@ -2040,38 +2183,56 @@ function AppInner() {
 
   const applyTightenAndExtend = useCallback(async (reqKey: string, extendBars: 1 | 2, applyTp: boolean) => {
     const req = timeStopRequestsRef.current[reqKey];
-    if (!req || req.state !== 'pending') return;
-    if (req.eval.status !== 'done' || req.eval.tightenOk !== true || req.eval.flipSuggested === true || req.eval.newSl == null) return;
+    if (!req) {
+      addLog('error', `[타임스탑] 연장 요청을 찾을 수 없습니다 (${reqKey})`);
+      return;
+    }
+    if (req.state !== 'pending') return;
+    if (req.eval.status !== 'done' || req.eval.tightenOk !== true || req.eval.flipSuggested === true || req.eval.newSl == null) {
+      setTimeStopRequests(prev => {
+        const cur = prev[reqKey];
+        if (!cur) return prev;
+        return {
+          ...prev,
+          [reqKey]: {
+            ...cur,
+            actionError: '연장 조건이 아직 충족되지 않았습니다. 재평가 결과를 확인해주세요.',
+          },
+        };
+      });
+      return;
+    }
     const tightenedSl = req.eval.newSl;
 
     setTimeStopRequests(prev => {
       const cur = prev[reqKey];
       if (!cur || cur.state !== 'pending') return prev;
-      return { ...prev, [reqKey]: { ...cur, state: 'closing' } };
+      return { ...prev, [reqKey]: { ...cur, state: 'closing', actionError: undefined } };
     });
 
     const newValidUntil = Date.now() + extendBars * intervalToMs(req.scanInterval);
     let success = false;
+    let failureMessage: string | null = null;
 
     if (req.mode === 'paper') {
       try {
         const pos = req.paperPosId
           ? paperTradingRef.current.positions.find(p => p.id === req.paperPosId)
           : undefined;
-        if (pos && pos.altMeta) {
-          const nextTp = applyTp ? (req.eval.newTp ?? pos.tpPrice) : pos.tpPrice;
-          paperTradingRef.current.setTPSL(pos.id, nextTp ?? undefined, tightenedSl);
-          paperTradingRef.current.updateAltMeta(pos.id, {
-            validUntilTime: newValidUntil,
-            slPrice: tightenedSl,
-            plannedSL: tightenedSl,
-            ...(applyTp && req.eval.newTp != null ? { plannedTP: req.eval.newTp } : {}),
-          });
-          addLog('info', `[ALT모의] ${req.symbol} SL 갱신(${tightenedSl.toFixed(6)}) 후 ${extendBars}봉 연장`);
-        }
+        if (!pos || !pos.altMeta) throw new Error('연장 대상 포지션을 찾을 수 없습니다');
+        const nextTp = applyTp ? (req.eval.newTp ?? pos.tpPrice) : pos.tpPrice;
+        paperTradingRef.current.setTPSL(pos.id, nextTp ?? undefined, tightenedSl);
+        paperTradingRef.current.updateAltMeta(pos.id, {
+          validUntilTime: newValidUntil,
+          slPrice: tightenedSl,
+          plannedSL: tightenedSl,
+          ...(applyTp && req.eval.newTp != null ? { plannedTP: req.eval.newTp } : {}),
+        });
+        addLog('info', `[ALT모의] ${req.symbol} SL 갱신(${tightenedSl.toFixed(6)}) 후 ${extendBars}봉 연장`);
         success = true;
       } catch (e) {
-        addLog('error', `[ALT모의] ${req.symbol} 연장 적용 실패: ${e instanceof Error ? e.message : 'unknown'}`);
+        failureMessage = e instanceof Error ? e.message : 'unknown';
+        addLog('error', `[ALT모의] ${req.symbol} 연장 적용 실패: ${failureMessage}`);
       }
     } else {
       try {
@@ -2080,62 +2241,67 @@ function AppInner() {
           Math.abs(p.positionAmt) > 0 &&
           (req.direction === 'long' ? p.positionAmt > 0 : p.positionAmt < 0),
         );
-        if (livePos) {
-          const liveKey = req.liveMetaKey ?? `${req.symbol}_${req.direction}`;
-          const staleRefs = liveAltOrderRegistryRef.current[liveKey]?.orders ?? [];
-          for (const ref of staleRefs) {
-            const ord = futuresAllOrders.find(o => o.orderId === ref.orderId && o.symbol === req.symbol);
-            if (!ord) continue;
-            if (ord.positionSide && ord.positionSide !== livePos.positionSide) continue;
-            try {
-              await futuresCancelOrder(ord.orderId, ord.symbol);
-            } catch {
-              // ignore not-found/filled race
-            }
-          }
-
-          const nextTp = applyTp ? (req.eval.newTp ?? undefined) : (req.currentTp ?? undefined);
-          await futuresPlaceTPSL(
-            req.symbol,
-            req.closeSide,
-            Math.abs(livePos.positionAmt),
-            nextTp,
-            tightenedSl,
-            livePos.positionSide,
-            {
-              onPlacedOrders: (refs) => {
-                upsertLiveAltOrderRegistry(
-                  liveKey,
-                  req.symbol,
-                  req.direction,
-                  req.closeSide,
-                  livePos.positionSide,
-                  refs,
-                );
-              },
-            },
-          );
-
-          setLiveAltMetaMap(prev => {
-            const meta = prev[liveKey];
-            if (!meta) return prev;
-            return {
-              ...prev,
-              [liveKey]: {
-                ...meta,
-                validUntilTime: newValidUntil,
-                slPrice: tightenedSl,
-                plannedSL: tightenedSl,
-                ...(applyTp && req.eval.newTp != null ? { plannedTP: req.eval.newTp } : {}),
-              },
-            };
-          });
-
-          addLog('info', `[ALT실전] ${req.symbol} SL 갱신(${tightenedSl.toFixed(6)}) 후 ${extendBars}봉 연장`);
+        const liveKey = req.liveMetaKey ?? `${req.symbol}_${req.direction}`;
+        const liveMeta = liveAltMetaMapRef.current[liveKey];
+        if (!liveMeta) throw new Error('실전 ALT 메타를 찾을 수 없습니다');
+        const effectiveQty = livePos ? Math.abs(livePos.positionAmt) : req.qty;
+        const effectivePosSide = livePos?.positionSide ?? req.positionSide;
+        if (!isFinite(effectiveQty) || effectiveQty <= 0) throw new Error('연장 대상 수량을 확인할 수 없습니다');
+        if (!livePos) {
+          addLog('info', `[ALT실전] ${req.symbol} 포지션 스냅샷 지연으로 요청 수량(${effectiveQty}) 기준 연장 적용 시도`);
         }
+        const staleRefs = liveAltOrderRegistryRef.current[liveKey]?.orders ?? [];
+        for (const ref of staleRefs) {
+          if (ref.positionSide !== effectivePosSide && ref.positionSide !== 'BOTH' && effectivePosSide !== 'BOTH') continue;
+          try {
+            await futuresCancelOrder(ref.orderId, req.symbol);
+          } catch {
+            // ignore not-found/filled race
+          }
+        }
+
+        const nextTp = applyTp ? (req.eval.newTp ?? undefined) : (req.currentTp ?? undefined);
+        await futuresPlaceTPSL(
+          req.symbol,
+          req.closeSide,
+          effectiveQty,
+          nextTp,
+          tightenedSl,
+          effectivePosSide,
+          {
+            onPlacedOrders: (refs) => {
+              upsertLiveAltOrderRegistry(
+                liveKey,
+                req.symbol,
+                req.direction,
+                req.closeSide,
+                effectivePosSide,
+                refs,
+              );
+            },
+          },
+        );
+
+        setLiveAltMetaMap(prev => {
+          const cur = prev[liveKey] ?? liveMeta;
+          if (!cur) return prev;
+          return {
+            ...prev,
+            [liveKey]: {
+              ...cur,
+              validUntilTime: newValidUntil,
+              slPrice: tightenedSl,
+              plannedSL: tightenedSl,
+              ...(applyTp && req.eval.newTp != null ? { plannedTP: req.eval.newTp } : {}),
+            },
+          };
+        });
+
+        addLog('info', `[ALT실전] ${req.symbol} SL 갱신(${tightenedSl.toFixed(6)}) 후 ${extendBars}봉 연장`);
         success = true;
       } catch (e) {
-        addLog('error', `[ALT실전] ${req.symbol} 연장 적용 실패: ${e instanceof Error ? e.message : 'unknown'}`);
+        failureMessage = e instanceof Error ? e.message : 'unknown';
+        addLog('error', `[ALT실전] ${req.symbol} 연장 적용 실패: ${failureMessage}`);
       }
     }
 
@@ -2147,7 +2313,14 @@ function AppInner() {
         delete next[reqKey];
         return next;
       }
-      return { ...prev, [reqKey]: { ...cur, state: 'pending' } };
+      return {
+        ...prev,
+        [reqKey]: {
+          ...cur,
+          state: 'pending',
+          actionError: failureMessage ?? '연장 적용에 실패했습니다',
+        },
+      };
     });
     if (success) {
       setHiddenTimeStopKeys(prev => {
@@ -2157,7 +2330,7 @@ function AppInner() {
         return next;
       });
     }
-  }, [addLog, futuresAllOrders, futuresAllPositions, futuresCancelOrder, futuresPlaceTPSL, upsertLiveAltOrderRegistry]);
+  }, [addLog, futuresAllPositions, futuresCancelOrder, futuresPlaceTPSL, upsertLiveAltOrderRegistry]);
 
   React.useEffect(() => {
     const now = timeStopNowMs;
@@ -2185,7 +2358,7 @@ function AppInner() {
         if (!exists || disabled) staleKeys.push(req.key);
         continue;
       }
-      const liveMetaKey = `${req.symbol}_${req.direction}`;
+      const liveMetaKey = req.liveMetaKey ?? `${req.symbol}_${req.direction}`;
       const liveMeta = liveAltMetaMap[liveMetaKey];
       if (liveMeta?.timeStopEnabled === false) {
         staleKeys.push(req.key);
@@ -2225,27 +2398,29 @@ function AppInner() {
   }, [timeStopRequests, hiddenTimeStopKeys]);
 
   const cleanupAltOrphanOrders = useCallback(async (entry: LiveAltOrderRegistryEntry) => {
-    if (!entry.orders.length) return;
-    for (const ref of entry.orders) {
-      const ord = futuresAllOrders.find(o => o.orderId === ref.orderId && o.symbol === entry.symbol);
-      if (!ord) continue;
-      const isProtection =
-        ord.isAlgo === true ||
-        ord.type === 'STOP' ||
-        ord.type === 'STOP_MARKET' ||
-        ord.type === 'TAKE_PROFIT' ||
-        ord.type === 'TAKE_PROFIT_MARKET' ||
-        ord.type === 'LIMIT';
-      if (!isProtection) continue;
-      if (ord.side !== entry.closeSide) continue;
-      if (ord.positionSide && ord.positionSide !== entry.positionSide) continue;
-      try {
-        await futuresCancelOrder(ord.orderId, ord.symbol);
-      } catch {
-        // ignore not-found/filled race to keep close flow resilient
-      }
+    if (!entry.orders.length) {
+      futuresRemoveClientSL(entry.symbol, entry.positionSide);
+      return;
     }
-  }, [futuresAllOrders, futuresCancelOrder]);
+    const cancelRefsOnce = async () => {
+      for (const ref of entry.orders) {
+        if (ref.side !== entry.closeSide) continue;
+        if (ref.positionSide !== entry.positionSide && ref.positionSide !== 'BOTH' && entry.positionSide !== 'BOTH') continue;
+        try {
+          await futuresCancelOrder(ref.orderId, entry.symbol);
+        } catch {
+          // ignore unknown/already-filled race
+        }
+      }
+    };
+
+    await cancelRefsOnce();
+    futuresRemoveClientSL(entry.symbol, entry.positionSide);
+    await new Promise(resolve => setTimeout(resolve, 1200));
+    try { await futuresRefetch(); } catch {}
+    await cancelRefsOnce();
+    futuresRemoveClientSL(entry.symbol, entry.positionSide);
+  }, [futuresCancelOrder, futuresRemoveClientSL, futuresRefetch]);
 
   const enrichLiveHistoryRowFromTrades = useCallback(async (
     rowId: string,
@@ -2271,6 +2446,9 @@ function AppInner() {
 
       const openSide: 'BUY' | 'SELL' = tracked.direction === 'long' ? 'BUY' : 'SELL';
       const closeSide: 'BUY' | 'SELL' = openSide === 'BUY' ? 'SELL' : 'BUY';
+      const openRowsByEntryOrder = meta.liveEntryOrderId
+        ? relevant.filter(t => t.side === openSide && t.orderId && String(t.orderId) === String(meta.liveEntryOrderId))
+        : [];
 
       let remaining = tracked.qty;
       let foundEntryTime: number | null = null;
@@ -2284,7 +2462,7 @@ function AppInner() {
           remaining += Math.abs(t.qty);
         }
       }
-      const entryTime = foundEntryTime ?? tracked.entryTime ?? meta.liveEntryTime ?? meta.liveEntrySubmittedAt ?? null;
+      const entryTime = openRowsByEntryOrder[0]?.time ?? foundEntryTime ?? tracked.entryTime ?? meta.liveEntryTime ?? meta.liveEntrySubmittedAt ?? null;
 
       const consumeFee = (rows: FuturesUserTrade[], targetQty: number, reverse: boolean) => {
         const ordered = reverse ? [...rows].sort((a, b) => b.time - a.time) : [...rows].sort((a, b) => a.time - b.time);
@@ -2344,7 +2522,8 @@ function AppInner() {
       let fees: number | null = null;
       let tradeCloseReason: LiveCloseReason | null = null;
       if (entryTime != null) {
-        const openRows = relevant.filter(t => t.side === openSide && t.time >= entryTime && t.time <= exitTime + 120000);
+        let openRows = relevant.filter(t => t.side === openSide && t.time >= entryTime && t.time <= exitTime + 120000);
+        if (openRowsByEntryOrder.length > 0) openRows = openRowsByEntryOrder;
         const closeRows = relevant.filter(t => t.side === closeSide && t.time >= entryTime && t.time <= exitTime + 120000);
         const openFee = consumeFee(openRows, tracked.qty, false);
         const closeFee = consumeFee(closeRows, tracked.qty, true);
@@ -2355,8 +2534,14 @@ function AppInner() {
         } else if (meta.liveEntryFee != null && closeFee.coveredQty > tracked.qty * 0.7 && !closeFee.nonUsdt) {
           fees = parseFloat((meta.liveEntryFee + closeFee.fee).toFixed(8));
         }
-        if (closeFill.avgPrice != null && closeFill.coveredQty > tracked.qty * 0.4) {
+        const hasCloseFillEvidence = closeFill.coveredQty > tracked.qty * 0.4;
+        if (closeFill.avgPrice != null && hasCloseFillEvidence) {
           tradeCloseReason = inferByCloseFillPrice(closeFill.avgPrice);
+          // External manual close (app/PC) often has no TP/SL evidence.
+          // If fallback path has real close-fill evidence but TP/SL 매칭이 안 되면 수동으로 분류.
+          if (!tradeCloseReason && reasonSource === 'fallback') {
+            tradeCloseReason = 'manual';
+          }
         }
       }
 
@@ -2428,10 +2613,13 @@ function AppInner() {
         : (markPricesMapRef.current[meta.symbol] ?? null);
       const explicitReason = liveCloseReasonHintRef.current[key];
       const orderEvidenceReason = explicitReason ? null : inferLiveCloseReasonFromOrderEvidence(key);
-      const closeReason = explicitReason ?? orderEvidenceReason ?? inferLiveCloseReason(meta, exitPrice);
+      const clientSlEvidenceReason = explicitReason || orderEvidenceReason
+        ? null
+        : inferLiveCloseReasonFromClientSlEvidence(meta.symbol, tracked);
+      const closeReason = explicitReason ?? orderEvidenceReason ?? clientSlEvidenceReason ?? inferLiveCloseReason(meta, exitPrice);
       const reasonSource: 'explicit' | 'order' | 'fallback' = explicitReason
         ? 'explicit'
-        : (orderEvidenceReason ? 'order' : 'fallback');
+        : ((orderEvidenceReason || clientSlEvidenceReason) ? 'order' : 'fallback');
       const pnl = exitPrice != null
         ? parseFloat((((tracked.direction === 'long' ? exitPrice - tracked.entryPrice : tracked.entryPrice - exitPrice) * tracked.qty)).toFixed(8))
         : null;
@@ -2471,8 +2659,18 @@ function AppInner() {
 
     if (appended.length > 0) {
       setLiveHistory(prev => [...appended, ...prev].slice(0, 1000));
+      const now = Date.now();
       for (const target of enrichTargets) {
-        void enrichLiveHistoryRowFromTrades(target.rowId, target.meta, target.tracked, target.exitTime, target.reasonSource);
+        liveHistoryEnrichQueueRef.current[target.rowId] = {
+          rowId: target.rowId,
+          meta: target.meta,
+          tracked: target.tracked,
+          exitTime: target.exitTime,
+          reasonSource: target.reasonSource,
+          attempts: 0,
+          nextAt: now,
+          deadlineAt: target.exitTime + 20 * 60 * 1000,
+        };
       }
     }
     if (cleanupKeys.length > 0) {
@@ -2500,7 +2698,45 @@ function AppInner() {
         return next;
       });
     }
-  }, [futuresAllPositions, liveAltMetaMap, liveCloseMetaSnapshotMap, inferLiveCloseReason, inferLiveCloseReasonFromOrderEvidence, cleanupAltOrphanOrders, enrichLiveHistoryRowFromTrades, soundPlayer, removeAltManagedDrawingsForCandidate]);
+  }, [futuresAllPositions, liveAltMetaMap, liveCloseMetaSnapshotMap, inferLiveCloseReason, inferLiveCloseReasonFromOrderEvidence, inferLiveCloseReasonFromClientSlEvidence, cleanupAltOrphanOrders, enrichLiveHistoryRowFromTrades, soundPlayer, removeAltManagedDrawingsForCandidate]);
+
+  React.useEffect(() => {
+    const id = window.setInterval(() => {
+      const queue = liveHistoryEnrichQueueRef.current;
+      const now = Date.now();
+      for (const [rowId, task] of Object.entries(queue)) {
+        const row = liveHistoryRef.current.find(h => h.id === rowId);
+        if (!row) {
+          delete queue[rowId];
+          continue;
+        }
+        if (row.entryTime != null && row.fees != null) {
+          delete queue[rowId];
+          continue;
+        }
+        if (now > task.deadlineAt || task.attempts >= 60) {
+          delete queue[rowId];
+          continue;
+        }
+        if (task.running || now < task.nextAt) continue;
+
+        task.running = true;
+        void enrichLiveHistoryRowFromTrades(task.rowId, task.meta, task.tracked, task.exitTime, task.reasonSource)
+          .finally(() => {
+            const cur = liveHistoryEnrichQueueRef.current[rowId];
+            if (!cur) return;
+            cur.running = false;
+            cur.attempts += 1;
+            cur.nextAt = Date.now() + 10_000;
+            const latest = liveHistoryRef.current.find(h => h.id === rowId);
+            if (!latest || (latest.entryTime != null && latest.fees != null) || Date.now() > cur.deadlineAt || cur.attempts >= 60) {
+              delete liveHistoryEnrichQueueRef.current[rowId];
+            }
+          });
+      }
+    }, 4000);
+    return () => window.clearInterval(id);
+  }, [enrichLiveHistoryRowFromTrades]);
 
   const handleLiveCloseMarket = useCallback(async (
     symbol: string,
@@ -3015,6 +3251,7 @@ function AppInner() {
           liveAltOrderTagMap={liveAltOrderTagMap}
           liveAltEntryOrderTagMap={liveAltEntryOrderTagMap}
           liveHistory={liveHistory}
+          liveBalanceHistory={liveBalanceHistory}
           onLiveCloseMarket={handleLiveCloseMarket}
           onLiveCloseCurrentPrice={handleLiveCloseCurrentPrice}
         />

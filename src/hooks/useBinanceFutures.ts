@@ -261,14 +261,18 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
   const [allPositions, setAllPositions]   = useState<FuturesPosition[]>([]);
   const [allOrders, setAllOrders]         = useState<FuturesOrder[]>([]);
   const [balance, setBalance]             = useState<number>(0);
+  const [marginBalance, setMarginBalance] = useState<number>(0);
   const [loading, setLoading]             = useState(false);
   const [error, setError]                 = useState<string | null>(null);
 
   // Client-side SL 상태 (localStorage 연동)
   const [clientSlMap, setClientSlMapState] = useState<ClientSlMap>(loadClientSlMap);
+  const [recentClientSlTriggerMap, setRecentClientSlTriggerMap] = useState<Record<string, number>>({});
   const clientSlMapRef     = useRef<ClientSlMap>(clientSlMap);
   const clientSlTriggering = useRef(new Set<string>()); // 현재 실행 중인 SL 키
+  const recentClientSlTriggerRef = useRef<Record<string, number>>(recentClientSlTriggerMap);
   clientSlMapRef.current   = clientSlMap;
+  recentClientSlTriggerRef.current = recentClientSlTriggerMap;
 
   const setClientSL = useCallback((
     symbol: string,
@@ -379,6 +383,14 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const usdtBal = (balRes as any[]).find((b: any) => b.asset === 'USDT');
       setBalance(usdtBal ? parseFloat(usdtBal.availableBalance ?? '0') : 0);
+      if (usdtBal) {
+        const wallet = parseFloat(usdtBal.balance ?? '0');
+        const crossUnPnl = parseFloat(usdtBal.crossUnPnl ?? '0');
+        const nextMargin = Number.isFinite(wallet + crossUnPnl) ? (wallet + crossUnPnl) : wallet;
+        if (Number.isFinite(nextMargin) && nextMargin >= 0) {
+          setMarginBalance(nextMargin);
+        }
+      }
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const mappedAllPositions: FuturesPosition[] = allPosRes
@@ -474,6 +486,7 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
 
         // SL 트리거됨 → MARKET 청산
         clientSlTriggering.current.add(key);
+        setRecentClientSlTriggerMap(prev => ({ ...prev, [key]: Date.now() }));
         const snapKey     = key;
         const snapSymbol  = pos.symbol;
         const snapPosSide = pos.positionSide;
@@ -499,6 +512,18 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
           clientSlTriggering.current.delete(snapKey);
         }).catch(() => {
           clientSlTriggering.current.delete(snapKey); // 다음 tick에 재시도
+        });
+      }
+
+      // 최근 client-side SL 트리거 기록은 20분만 유지
+      const cutoff = Date.now() - 20 * 60 * 1000;
+      const cur = recentClientSlTriggerRef.current;
+      const stale = Object.keys(cur).filter(k => cur[k] < cutoff);
+      if (stale.length > 0) {
+        setRecentClientSlTriggerMap(prev => {
+          const next = { ...prev };
+          for (const k of stale) delete next[k];
+          return next;
         });
       }
     } catch (e) {
@@ -791,6 +816,7 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
     const rows = await fetchSigned<any[]>('/fapi/v1/userTrades', key, secret, params);
     return rows.map((t) => ({
       id: String(t.id ?? t.tradeId ?? ''),
+      orderId: t.orderId != null ? String(t.orderId) : undefined,
       symbol: t.symbol,
       side: t.side as 'BUY' | 'SELL',
       price: parseFloat(t.price ?? '0'),
@@ -824,5 +850,5 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
     }));
   }, []);
 
-  return { positions, orders, allPositions, allOrders, balance, loading, error, refetch: fetchData, placeOrder, cancelOrder, placeTPSL, closeMarket, clientSlMap, removeClientSL, fetchIncomeHistory, fetchUserTrades };
+  return { positions, orders, allPositions, allOrders, balance, marginBalance, loading, error, refetch: fetchData, placeOrder, cancelOrder, placeTPSL, closeMarket, clientSlMap, recentClientSlTriggerMap, removeClientSL, fetchIncomeHistory, fetchUserTrades };
 }

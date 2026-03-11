@@ -85,6 +85,16 @@ const GLOSSARY = [
 ];
 
 const SCAN_DELAY_MS = 3000; // fire this many ms after candle close
+const HOURLY_AUTOSCAN_PAUSE_MS = 30_000;
+
+function getHourlyAutoScanPauseEnd(ts: number): number | null {
+  const d = new Date(ts);
+  if (d.getMinutes() !== 0) return null;
+  const hourStart = new Date(d);
+  hourStart.setMinutes(0, 0, 0);
+  const end = hourStart.getTime() + HOURLY_AUTOSCAN_PAUSE_MS;
+  return ts < end ? end : null;
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function scoreColor(s: number) { return s >= 75 ? '#0ecb81' : s >= 50 ? '#f0b90b' : '#848e9c'; }
@@ -931,6 +941,12 @@ export function AltScannerModal({
       setNextAutoScanAt(null);
       return;
     }
+    const pauseEnd = getHourlyAutoScanPauseEnd(Date.now());
+    if (pauseEnd) {
+      // Protect the top-of-hour burst window (00:00~00:30) and resume immediately after.
+      setNextAutoScanAt(pauseEnd + 400);
+      return;
+    }
     const iMs    = intervalToMs(scanInterval);
     const fireAt = getNextAlignedCloseTime(Date.now(), iMs) + SCAN_DELAY_MS;
     setNextAutoScanAt(fireAt);
@@ -948,6 +964,11 @@ export function AltScannerModal({
     }
 
     const tid = setTimeout(async () => {
+      const pauseEnd = getHourlyAutoScanPauseEnd(Date.now());
+      if (pauseEnd) {
+        setNextAutoScanAt(pauseEnd + 400);
+        return;
+      }
       if (scanningRef.current) {
         // Busy — skip this slot, reschedule
         const iMs = intervalToMs(scanInterval);
@@ -1027,6 +1048,13 @@ export function AltScannerModal({
   const progressPct = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
   const hasTP1      = selected?.tp1Price != null;
   const countdown   = nextAutoScanAt ? fmtCountdown(nextAutoScanAt - nowMs) : null;
+  const hourlyPauseRemainMs = useMemo(() => {
+    const end = getHourlyAutoScanPauseEnd(nowMs);
+    return end ? Math.max(0, end - nowMs) : 0;
+  }, [nowMs]);
+  const pauseCountdown = hourlyPauseRemainMs > 0
+    ? fmtCountdown(hourlyPauseRemainMs).replace(/^00:/, '')
+    : null;
 
   return (
     <div style={S.overlay}>
@@ -1067,12 +1095,17 @@ export function AltScannerModal({
         <div style={S.autoBar}>
           {/* Left: scan timing info */}
           <div style={S.autoBarLeft}>
+            {autoScanEnabled && pauseCountdown && (
+              <span style={S.autoBarPause}>
+                ⚠ 정각 보호구간(30초)으로 자동 스캔 일시정지 중 · 재개까지 <b style={{ fontFamily: 'monospace' }}>{pauseCountdown}</b>
+              </span>
+            )}
             {lastScanAt && (
               <span style={S.autoBarInfo}>
                 최근 스캔: <b>{fmtDateTime(lastScanAt)}</b>
               </span>
             )}
-            {autoScanEnabled && countdown && !scanning && (
+            {autoScanEnabled && countdown && !scanning && !pauseCountdown && (
               <span style={S.autoBarCountdown}>
                 다음 자동 스캔: <b style={{ color: '#3b8beb', fontFamily: 'monospace' }}>{countdown}</b>
               </span>
@@ -1410,10 +1443,11 @@ const S: Record<string, React.CSSProperties> = {
   closeBtn: { background: 'none', border: 'none', color: '#848e9c', cursor: 'pointer', fontSize: '1rem', padding: '2px 6px' },
   // Auto-scan bar
   autoBar: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '5px 16px', background: 'rgba(0,0,0,0.2)', borderBottom: '1px solid #2a2e39', flexShrink: 0, gap: 10, flexWrap: 'wrap' as const },
-  autoBarLeft: { display: 'flex', alignItems: 'center', gap: 14 },
+  autoBarLeft: { display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' as const },
   autoBarRight: { display: 'flex', alignItems: 'center', gap: 6 },
   autoBarInfo: { color: '#5e6673', fontSize: '0.76rem' },
   autoBarCountdown: { color: '#848e9c', fontSize: '0.76rem' },
+  autoBarPause: { color: '#f0b90b', fontSize: '0.76rem', fontWeight: 700, background: 'rgba(240,185,11,0.12)', border: '1px solid rgba(240,185,11,0.35)', borderRadius: 6, padding: '2px 8px' },
   autoBarNote: { color: '#5e6673', fontSize: '0.72rem', fontStyle: 'italic' },
   // Controls
   controls: { display: 'flex', alignItems: 'center', gap: 10, padding: '7px 16px', borderBottom: '1px solid #2a2e39', flexShrink: 0, flexWrap: 'wrap' as const },

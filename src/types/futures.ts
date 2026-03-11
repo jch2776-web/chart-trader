@@ -50,6 +50,7 @@ export interface LiveTradeHistoryEntry {
 
 export interface FuturesUserTrade {
   id: string;
+  orderId?: string;
   symbol: string;
   side: 'BUY' | 'SELL';
   price: number;

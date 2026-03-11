@@ -24,6 +24,7 @@ interface TimeStopReqView {
   deadlineAt: number;
   state: 'pending' | 'closing';
   eval: TimeStopEvalView;
+  actionError?: string;
 }
 
 interface Props {
@@ -127,17 +128,20 @@ export function TimeStopDecisionModal({
 
         <div style={S.actions}>
           <button style={S.closeNowBtn} onClick={() => onCloseNow(req.key)} disabled={req.state !== 'pending'}>
-            지금 청산
+            {req.state === 'closing' ? '처리 중...' : '지금 청산'}
           </button>
           <button
             style={canExtend ? S.extendBtn : S.extendBtnDisabled}
             onClick={() => onApplyTightenAndExtend(req.key, extendBars, applyTp)}
-            disabled={!canExtend}
+            disabled={!canExtend || req.state !== 'pending'}
           >
-            SL 갱신 후 연장
+            {req.state === 'closing' ? '적용 중...' : 'SL 갱신 후 연장'}
           </button>
           <button style={S.ghostBtn} onClick={onCloseModal}>닫기</button>
         </div>
+        {req.actionError && (
+          <div style={S.errorText}>{req.actionError}</div>
+        )}
       </div>
     </div>
   );
@@ -241,5 +245,11 @@ const S: Record<string, React.CSSProperties> = {
     padding: '6px 11px',
     cursor: 'pointer',
     fontSize: '0.8rem',
+  },
+  errorText: {
+    marginTop: 8,
+    color: '#f6465d',
+    fontSize: '0.76rem',
+    lineHeight: 1.35,
   },
 };
