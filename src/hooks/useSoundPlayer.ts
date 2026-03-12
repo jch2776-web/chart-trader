@@ -12,6 +12,13 @@ export interface SoundConfig {
   volume:       number;   // 0.0 – 1.0
 }
 
+interface SpeakOptions {
+  lang?: string;
+  rate?: number;
+  pitch?: number;
+  interrupt?: boolean;
+}
+
 const DEFAULT_CONFIG: SoundConfig = {
   entryEnabled: true,
   tpEnabled:    true,
@@ -76,6 +83,24 @@ function playDataUrl(dataUrl: string, volume: number) {
   } catch {}
 }
 
+function pickKoreanVoice(voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice | null {
+  const ko = voices.filter(v => (v.lang || '').toLowerCase().startsWith('ko'));
+  if (ko.length === 0) return null;
+  const preferred = [
+    'Google 한국의',
+    'Google Korean',
+    'Microsoft Heami',
+    'Yuna',
+    'Nari',
+    'Sora',
+  ];
+  for (const key of preferred) {
+    const found = ko.find(v => (v.name || '').includes(key));
+    if (found) return found;
+  }
+  return ko.find(v => v.default) ?? ko.find(v => v.localService) ?? ko[0] ?? null;
+}
+
 export function useSoundPlayer() {
   const [config, setConfigState] = useState<SoundConfig>(loadConfig);
 
@@ -108,5 +133,23 @@ export function useSoundPlayer() {
     else               playBeep(330, 0.25, cfg.volume); // low — somber
   }, []);
 
-  return { config, updateConfig, playEntry, playTp, playSl };
+  const speak = useCallback((text: string, opts?: SpeakOptions) => {
+    try {
+      if (typeof window === 'undefined' || !('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') return;
+      const cfg = loadConfig();
+      if (!cfg.entryEnabled && !cfg.tpEnabled && !cfg.slEnabled) return;
+      const synth = window.speechSynthesis;
+      if (opts?.interrupt) synth.cancel();
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.lang = opts?.lang ?? 'ko-KR';
+      utter.rate = Math.min(1.2, Math.max(0.85, opts?.rate ?? 1.0));
+      utter.pitch = Math.min(1.2, Math.max(0.8, opts?.pitch ?? 1.0));
+      utter.volume = Math.min(1, Math.max(0, cfg.volume));
+      const voice = pickKoreanVoice(synth.getVoices());
+      if (voice) utter.voice = voice;
+      synth.speak(utter);
+    } catch {}
+  }, []);
+
+  return { config, updateConfig, playEntry, playTp, playSl, speak };
 }

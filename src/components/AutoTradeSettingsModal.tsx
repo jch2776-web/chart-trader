@@ -12,6 +12,7 @@ export interface AutoTradeSettings {
   scanIntervals: ScanTF[];
   scanCadenceMinutes?: number;
   timeStopEnabled?: boolean;
+  voiceAlertEnabled?: boolean;
 }
 
 const CADENCE_PRESETS = [15, 30, 60, 120, 240] as const;
@@ -23,6 +24,10 @@ function normalizeCadenceMinutes(v?: number): number {
 }
 
 function normalizeTimeStopEnabled(v?: boolean): boolean {
+  return v !== false;
+}
+
+function normalizeVoiceAlertEnabled(v?: boolean): boolean {
   return v !== false;
 }
 
@@ -42,6 +47,7 @@ export const DEFAULT_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
   scanIntervals: ['1h', '4h', '1d'],
   scanCadenceMinutes: DEFAULT_SCAN_CADENCE_MINUTES,
   timeStopEnabled: true,
+  voiceAlertEnabled: true,
 };
 
 export const DEFAULT_LIVE_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
@@ -53,6 +59,7 @@ export const DEFAULT_LIVE_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
   scanIntervals: ['1h', '4h', '1d'],
   scanCadenceMinutes: DEFAULT_SCAN_CADENCE_MINUTES,
   timeStopEnabled: true,
+  voiceAlertEnabled: true,
 };
 
 interface Props {
@@ -73,6 +80,7 @@ function SettingsEditor({
 }) {
   const cadence = normalizeCadenceMinutes(draft.scanCadenceMinutes);
   const timeStopEnabled = normalizeTimeStopEnabled(draft.timeStopEnabled);
+  const voiceAlertEnabled = normalizeVoiceAlertEnabled(draft.voiceAlertEnabled);
   const minTfMinutes = Math.min(...draft.scanIntervals.map(tfToMinutes));
   const cadenceFasterThanMinTf = cadence < minTfMinutes;
   return (
@@ -241,6 +249,28 @@ function SettingsEditor({
         </span>
       </div>
 
+      {/* Voice alert toggle (unattended auto-trade scope) */}
+      <div style={s.fieldRow}>
+        <label style={s.label}>자동진입 음성 알림</label>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button
+            style={{ ...s.toggleChip, ...(voiceAlertEnabled ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
+            onClick={() => set('voiceAlertEnabled', true)}
+          >
+            ON
+          </button>
+          <button
+            style={{ ...s.toggleChip, ...(!voiceAlertEnabled ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
+            onClick={() => set('voiceAlertEnabled', false)}
+          >
+            OFF
+          </button>
+        </div>
+        <span style={s.hint}>
+          OFF면 자동매매(auto) 진입 시 음성 멘트는 재생하지 않고, 기본 진입음만 재생합니다.
+        </span>
+      </div>
+
       {/* Info */}
       <div style={s.infoBox}>
         <p style={{ margin: 0, color: '#5e6673', fontSize: '0.76rem', lineHeight: 1.7 }}>
@@ -265,11 +295,13 @@ export function AutoTradeSettingsModal({ paperSettings, liveSettings, onSave, on
     ...paperSettings,
     scanCadenceMinutes: normalizeCadenceMinutes(paperSettings.scanCadenceMinutes),
     timeStopEnabled: normalizeTimeStopEnabled(paperSettings.timeStopEnabled),
+    voiceAlertEnabled: normalizeVoiceAlertEnabled(paperSettings.voiceAlertEnabled),
   });
   const [liveDraft,  setLiveDraft]  = useState<AutoTradeSettings>({
     ...liveSettings,
     scanCadenceMinutes: normalizeCadenceMinutes(liveSettings.scanCadenceMinutes),
     timeStopEnabled: normalizeTimeStopEnabled(liveSettings.timeStopEnabled),
+    voiceAlertEnabled: normalizeVoiceAlertEnabled(liveSettings.voiceAlertEnabled),
   });
 
   const setP = <K extends keyof AutoTradeSettings>(k: K, v: AutoTradeSettings[K]) =>
@@ -283,11 +315,13 @@ export function AutoTradeSettingsModal({ paperSettings, liveSettings, onSave, on
         ...paperDraft,
         scanCadenceMinutes: normalizeCadenceMinutes(paperDraft.scanCadenceMinutes),
         timeStopEnabled: normalizeTimeStopEnabled(paperDraft.timeStopEnabled),
+        voiceAlertEnabled: normalizeVoiceAlertEnabled(paperDraft.voiceAlertEnabled),
       },
       {
         ...liveDraft,
         scanCadenceMinutes: normalizeCadenceMinutes(liveDraft.scanCadenceMinutes),
         timeStopEnabled: normalizeTimeStopEnabled(liveDraft.timeStopEnabled),
+        voiceAlertEnabled: normalizeVoiceAlertEnabled(liveDraft.voiceAlertEnabled),
       },
     );
     onClose();

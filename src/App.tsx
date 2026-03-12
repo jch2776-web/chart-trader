@@ -50,6 +50,8 @@ import { useSoundPlayer } from './hooks/useSoundPlayer';
 import { SoundSettingsModal } from './components/SoundSettingsModal';
 import { AutoTradeSettingsModal, DEFAULT_AUTO_TRADE_SETTINGS, DEFAULT_LIVE_AUTO_TRADE_SETTINGS } from './components/AutoTradeSettingsModal';
 import type { AutoTradeSettings } from './components/AutoTradeSettingsModal';
+import { db, isFirebaseConfigured } from './lib/firebase';
+import { doc, onSnapshot, runTransaction } from 'firebase/firestore';
 
 export interface BreakoutFlash {
   id: string;
@@ -67,7 +69,20 @@ function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
 
+function coinLabel(symbol: string): string {
+  return symbol.replace(/USDT$/i, '');
+}
+
+function leverageSpeech(leverage: number): string {
+  if (!Number.isFinite(leverage)) return '1';
+  const rounded = Math.round(leverage * 100) / 100;
+  return Number.isInteger(rounded) ? String(rounded) : String(rounded);
+}
+
 const LIVE_MARGIN_BAL_HISTORY_KEY = 'live-futures-margin-balance-history';
+const AUTO_TRADE_LEADER_LOCK_COLLECTION = 'auto_trade_leader_locks';
+const AUTO_TRADE_LEADER_LEASE_MS = 35_000;
+const AUTO_TRADE_LEADER_HEARTBEAT_MS = 10_000;
 
 const DEFAULT_TELEGRAM: TelegramSettings = {
   enabled: false,
@@ -206,11 +221,13 @@ const isAltManagedDrawingForCandidate = (drawingId: string, candidateId: string)
   drawingId.startsWith(altCandidatePrefix(candidateId));
 const normalizeAutoTradeCadence = (v?: number) => Math.max(15, Math.round(v ?? 60));
 const normalizeAutoTradeTimeStop = (v?: boolean) => v !== false;
+const normalizeAutoTradeVoiceAlert = (v?: boolean) => v !== false;
 const normalizeAutoTradeSettings = (base: AutoTradeSettings, saved: Partial<AutoTradeSettings> | null | undefined): AutoTradeSettings => ({
   ...base,
   ...(saved ?? {}),
   scanCadenceMinutes: normalizeAutoTradeCadence(saved?.scanCadenceMinutes ?? base.scanCadenceMinutes),
   timeStopEnabled: normalizeAutoTradeTimeStop(saved?.timeStopEnabled ?? base.timeStopEnabled),
+  voiceAlertEnabled: normalizeAutoTradeVoiceAlert(saved?.voiceAlertEnabled ?? base.voiceAlertEnabled),
 });
 
 // ── Resizable divider between panels ─────────────────────────────────────────
@@ -263,6 +280,10 @@ function AppInner() {
 
   // Sound player — exposes playBuy / playSell called at trade execution points
   const soundPlayer = useSoundPlayer();
+  const playEntrySound = soundPlayer.playEntry;
+  const playTpSound = soundPlayer.playTp;
+  const playSlSound = soundPlayer.playSl;
+  const speakSound = soundPlayer.speak;
 
   // ── Mobile detection ─────────────────────────────────────────────────
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
@@ -342,6 +363,7 @@ function AppInner() {
   timeStopRequestsRef.current = timeStopRequests;
   const [timeStopNowMs, setTimeStopNowMs] = useState(() => Date.now());
   const [hiddenTimeStopKeys, setHiddenTimeStopKeys] = useState<Record<string, true>>({});
+  const timeStopWarnedRef = useRef<Record<string, number>>({});
   React.useEffect(() => {
     if (Object.keys(timeStopRequests).length === 0) return;
     const id = window.setInterval(() => setTimeStopNowMs(Date.now()), 1000);
@@ -423,6 +445,14 @@ function AppInner() {
   React.useEffect(() => {
     try { localStorage.setItem(uk('alt_auto_trade_mode'), autoTradeMode); } catch {}
   }, [autoTradeMode]);
+  const autoTradeLeaderSessionIdRef = useRef(`leader_${Math.random().toString(36).slice(2, 10)}`);
+  const autoTradeLeaderLockDocRef = useRef(
+    CURRENT_USER && isFirebaseConfigured()
+      ? doc(db, AUTO_TRADE_LEADER_LOCK_COLLECTION, encodeURIComponent(CURRENT_USER))
+      : null,
+  );
+  const [autoTradeLeaderNotice, setAutoTradeLeaderNotice] = useState<string | null>(null);
+  const autoTradeBlockedByRef = useRef<string | null>(null);
 
   // ── Binance API keys (persisted) ─────────────────────────────────────
   const [binanceApiKey, setBinanceApiKey] = useState<string>(() => {
@@ -769,6 +799,16 @@ function AppInner() {
   }, [liveHistory]);
   const liveHistoryRef = useRef<LiveTradeHistoryEntry[]>(liveHistory);
   liveHistoryRef.current = liveHistory;
+  const liveCloseSoundSeenRef = useRef<Set<string>>(new Set(liveHistory.map(row => row.id)));
+  React.useEffect(() => {
+    const seen = liveCloseSoundSeenRef.current;
+    for (const row of liveHistory) {
+      if (seen.has(row.id)) continue;
+      seen.add(row.id);
+      if ((row.pnl ?? 0) > 0) playTpSound();
+      else if ((row.pnl ?? 0) < 0) playSlSound();
+    }
+  }, [liveHistory, playTpSound, playSlSound]);
   const [liveBalanceHistory, setLiveBalanceHistory] = useState<LiveBalancePoint[]>(() => {
     try {
       const parsed = JSON.parse(localStorage.getItem(uk(LIVE_MARGIN_BAL_HISTORY_KEY)) ?? '[]') as LiveBalancePoint[];
@@ -920,14 +960,21 @@ function AppInner() {
     try { localStorage.setItem(uk('paper-mode'), isPaperMode ? '1' : '0'); } catch {}
   }, [isPaperMode]);
 
-  const paperTrading = usePaperTrading(uk('paper-trading'), (reason) => {
-    if (reason === 'tp') soundPlayer.playTp();
-    else soundPlayer.playSl();
-  });
+  const paperTrading = usePaperTrading(uk('paper-trading'));
   const isPaperModeRef = useRef(isPaperMode);
   isPaperModeRef.current = isPaperMode;
   const paperTradingRef = useRef(paperTrading);
   paperTradingRef.current = paperTrading;
+  const paperCloseSoundSeenRef = useRef<Set<string>>(new Set(paperTrading.history.map(row => row.id)));
+  React.useEffect(() => {
+    const seen = paperCloseSoundSeenRef.current;
+    for (const row of paperTrading.history) {
+      if (seen.has(row.id)) continue;
+      seen.add(row.id);
+      if ((row.pnl ?? 0) > 0) playTpSound();
+      else if ((row.pnl ?? 0) < 0) playSlSound();
+    }
+  }, [paperTrading.history, playTpSound, playSlSound]);
 
   // Convert paper pending orders → FuturesOrder shape for RightPanel display
   const paperOrdersAsFutures = isPaperMode ? paperTrading.orders.map(o => ({
@@ -1285,6 +1332,23 @@ function AppInner() {
       />
     ));
 
+  const announceAltEntry = useCallback((
+    symbol: string,
+    direction: 'long' | 'short',
+    leverage: number,
+    opts?: { mode?: 'paper' | 'live'; reservation?: boolean; voiceEnabled?: boolean },
+  ) => {
+    const sideText = direction === 'long' ? '롱' : '숏';
+    const actionText = opts?.reservation ? '예약되었습니다' : '진입했습니다';
+    const suffix = opts?.mode === 'paper' ? ' 모의거래 입니다.' : '';
+    const message = `자동매수 알림! ${coinLabel(symbol)}코인 ${sideText} 포지션으로 ${leverageSpeech(leverage)}배 ${actionText}${suffix}`;
+    playEntrySound();
+    if (opts?.voiceEnabled === false) return;
+    window.setTimeout(() => {
+      speakSound(message, { lang: 'ko-KR', rate: 1.0, pitch: 1.0 });
+    }, 180);
+  }, [playEntrySound, speakSound]);
+
   // ── AltScanner trade handlers ─────────────────────────────────────────
   const handleAltPaperTrade = useCallback((params: AltTradeParams) => {
     // ── Duplicate guard ───────────────────────────────────────────────────
@@ -1393,14 +1457,17 @@ function AppInner() {
       addLog('info', `[ALT모의] ${params.symbol} 예약주문 생성 거부 — 중복 진입 또는 TP/SL 불변식 위반`);
       return;
     }
-    soundPlayer.playEntry();
+    const autoVoiceEnabled = normalizeAutoTradeVoiceAlert(paperAutoTradeSettingsRef.current.voiceAlertEnabled);
+    const voiceEnabled = params.entrySource === 'auto' ? autoVoiceEnabled : true;
+    const reservation = isTrendlinePending || params.candidateStatus === 'PENDING';
+    announceAltEntry(params.symbol, params.direction, leverage, { mode: 'paper', reservation, voiceEnabled });
     if (isTrendlinePending) {
       addLog('info', `[ALT모의] ${params.symbol} 조건부 진입 대기 — 다음 봉 종가 ${params.direction === 'long' ? '≥' : '≤'} ${limitPrice.toFixed(4)} 시 체결`);
     }
     handleTickerSelect(params.symbol);
     setIsPaperMode(true);
     setShowAltScanner(false);
-  }, [handleTickerSelect]);
+  }, [announceAltEntry, handleTickerSelect]);
 
   // Forward refs — populated after their targets are defined below
   const handleAltLiveTradeRef    = useRef<((params: AltTradeParams) => void) | null>(null);
@@ -1474,6 +1541,169 @@ function AppInner() {
     cadenceMinutes: (autoTradeMode === 'live' ? liveAutoTradeSettings : paperAutoTradeSettings).scanCadenceMinutes,
   });
   altAutoTradeSetActiveRef.current = altAutoTrade.setActive;
+
+  const tryAcquireAutoTradeLeaderLock = useCallback(async (): Promise<boolean> => {
+    const lockDocRef = autoTradeLeaderLockDocRef.current;
+    if (!lockDocRef) return true;
+
+    const now = Date.now();
+    const myId = autoTradeLeaderSessionIdRef.current;
+    let acquired = false;
+    let blockedBy = '';
+
+    try {
+      await runTransaction(db, async (tx) => {
+        const snap = await tx.get(lockDocRef);
+        const raw = snap.data() as { holderId?: string; expiresAt?: number } | undefined;
+        const holderId = typeof raw?.holderId === 'string' ? raw.holderId : '';
+        const expiresAt = typeof raw?.expiresAt === 'number' ? raw.expiresAt : 0;
+        blockedBy = holderId;
+        if (!holderId || expiresAt <= now || holderId === myId) {
+          tx.set(lockDocRef, {
+            holderId: myId,
+            expiresAt: now + AUTO_TRADE_LEADER_LEASE_MS,
+            updatedAt: now,
+          }, { merge: true });
+          acquired = true;
+        }
+      });
+    } catch {
+      acquired = false;
+    }
+
+    if (acquired) {
+      setAutoTradeLeaderNotice(null);
+      return true;
+    }
+
+    const msg = '다른 디바이스가 자동매매 리더로 실행 중이라 이 디바이스 스캔이 차단되었습니다.';
+    setAutoTradeLeaderNotice(msg);
+    addLog('error', `[자동매매] ${msg}${blockedBy ? ` (holder:${blockedBy.slice(0, 6)})` : ''}`);
+    return false;
+  }, [addLog]);
+
+  const releaseAutoTradeLeaderLock = useCallback(async () => {
+    const lockDocRef = autoTradeLeaderLockDocRef.current;
+    if (!lockDocRef) return;
+
+    const now = Date.now();
+    const myId = autoTradeLeaderSessionIdRef.current;
+    try {
+      await runTransaction(db, async (tx) => {
+        const snap = await tx.get(lockDocRef);
+        const raw = snap.data() as { holderId?: string } | undefined;
+        const holderId = typeof raw?.holderId === 'string' ? raw.holderId : '';
+        if (holderId !== myId) return;
+        tx.set(lockDocRef, {
+          holderId: '',
+          expiresAt: now - 1,
+          updatedAt: now,
+        }, { merge: true });
+      });
+    } catch {}
+  }, []);
+
+  React.useEffect(() => {
+    const lockDocRef = autoTradeLeaderLockDocRef.current;
+    if (!lockDocRef) return;
+    const myId = autoTradeLeaderSessionIdRef.current;
+    const unsub = onSnapshot(lockDocRef, snap => {
+      const raw = snap.data() as { holderId?: string; expiresAt?: number } | undefined;
+      const holderId = typeof raw?.holderId === 'string' ? raw.holderId : '';
+      const expiresAt = typeof raw?.expiresAt === 'number' ? raw.expiresAt : 0;
+      const now = Date.now();
+      const blocked = !!holderId && holderId !== myId && expiresAt > now;
+      if (!blocked) {
+        if (autoTradeBlockedByRef.current) {
+          autoTradeBlockedByRef.current = null;
+          addLog('info', '[자동매매] 리더 락 해제됨 — 이 디바이스에서 다시 자동매매를 시작할 수 있습니다.');
+        }
+        setAutoTradeLeaderNotice(null);
+        return;
+      }
+
+      if (autoTradeBlockedByRef.current !== holderId) {
+        autoTradeBlockedByRef.current = holderId;
+        addLog('error', `[자동매매] 다른 디바이스가 리더로 실행 중 — 이 디바이스 스캔 중지 (holder:${holderId.slice(0, 6)})`);
+      }
+      setAutoTradeLeaderNotice('다른 디바이스가 자동매매 리더로 실행 중이라 이 디바이스에서는 스캔이 중지됩니다.');
+      if (altAutoTrade.isActive) {
+        altAutoTrade.setActive(false);
+      }
+    });
+    return () => unsub();
+  }, [altAutoTrade.isActive, altAutoTrade.setActive, addLog]);
+
+  React.useEffect(() => {
+    const lockDocRef = autoTradeLeaderLockDocRef.current;
+    if (!lockDocRef || !altAutoTrade.isActive) return;
+    const myId = autoTradeLeaderSessionIdRef.current;
+    let cancelled = false;
+
+    const heartbeat = async () => {
+      const now = Date.now();
+      let ok = true;
+      try {
+        await runTransaction(db, async (tx) => {
+          const snap = await tx.get(lockDocRef);
+          const raw = snap.data() as { holderId?: string; expiresAt?: number } | undefined;
+          const holderId = typeof raw?.holderId === 'string' ? raw.holderId : '';
+          const expiresAt = typeof raw?.expiresAt === 'number' ? raw.expiresAt : 0;
+          if (holderId && holderId !== myId && expiresAt > now) {
+            ok = false;
+            return;
+          }
+          tx.set(lockDocRef, {
+            holderId: myId,
+            expiresAt: now + AUTO_TRADE_LEADER_LEASE_MS,
+            updatedAt: now,
+          }, { merge: true });
+        });
+      } catch {
+        ok = false;
+      }
+      if (!ok && !cancelled) {
+        setAutoTradeLeaderNotice('다른 디바이스가 자동매매 리더를 점유하여 이 디바이스 스캔이 중지되었습니다.');
+        addLog('error', '[자동매매] 리더 락 유지 실패 — 이 디바이스 자동매매를 중지합니다.');
+        altAutoTrade.setActive(false);
+      }
+    };
+
+    void heartbeat();
+    const id = window.setInterval(() => { void heartbeat(); }, AUTO_TRADE_LEADER_HEARTBEAT_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [altAutoTrade.isActive, altAutoTrade.setActive, addLog]);
+
+  React.useEffect(() => {
+    if (altAutoTrade.isActive) return;
+    void releaseAutoTradeLeaderLock();
+  }, [altAutoTrade.isActive, releaseAutoTradeLeaderLock]);
+
+  React.useEffect(() => {
+    return () => { void releaseAutoTradeLeaderLock(); };
+  }, [releaseAutoTradeLeaderLock]);
+
+  const handleToggleAutoTrade = useCallback(async () => {
+    if (altAutoTrade.isActive) {
+      altAutoTrade.setActive(false);
+      return;
+    }
+    const ok = await tryAcquireAutoTradeLeaderLock();
+    if (!ok) return;
+    altAutoTrade.setActive(true);
+  }, [altAutoTrade.isActive, altAutoTrade.setActive, tryAcquireAutoTradeLeaderLock]);
+
+  const handleTriggerAutoTradeNow = useCallback(async () => {
+    if (!altAutoTrade.isActive) {
+      const ok = await tryAcquireAutoTradeLeaderLock();
+      if (!ok) return;
+      altAutoTrade.setActive(true);
+    }
+    altAutoTrade.triggerNow();
+  }, [altAutoTrade.isActive, altAutoTrade.setActive, altAutoTrade.triggerNow, tryAcquireAutoTradeLeaderLock]);
 
   // Called whenever AltScanner updates its candidates (auto-scan result)
   // → also syncs TP/SL on existing matching paper orders/positions
@@ -1647,7 +1877,6 @@ function AppInner() {
         liveEntryOrderId: ackOrderId,
         liveEntrySubmittedAt: submittedAt,
       };
-      soundPlayer.playEntry();
       setLiveAltMetaMap(prev => ({ ...prev, [liveKey]: liveMeta }));
       if (ackOrderId) {
         upsertLiveAltEntryOrderRegistry(
@@ -1689,6 +1918,8 @@ function AppInner() {
 
       // Explicit UX feedback: filled / still-open / unknown.
       void (async () => {
+        const autoVoiceEnabled = normalizeAutoTradeVoiceAlert(liveAutoTradeSettingsRef.current.voiceAlertEnabled);
+        const voiceEnabled = params.entrySource === 'auto' ? autoVoiceEnabled : true;
         await new Promise(resolve => setTimeout(resolve, 900));
         const opened = futuresAllPositionsRef.current.find(p =>
           p.symbol === params.symbol &&
@@ -1697,6 +1928,7 @@ function AppInner() {
         );
         if (opened) {
           addLog('order', `[ALT실전] 포지션 오픈 확인 — ${params.symbol} ${params.direction.toUpperCase()} ${Math.abs(opened.positionAmt)}`);
+          announceAltEntry(params.symbol, params.direction, leverage, { mode: 'live', reservation: false, voiceEnabled });
           return;
         }
         const openOrder = ackOrderId
@@ -1704,6 +1936,7 @@ function AppInner() {
           : futuresAllOrdersRef.current.find(o => o.symbol === params.symbol && o.side === side);
         if (openOrder) {
           addLog('info', `[ALT실전] 진입 주문 대기중 — ${params.symbol} status:${openOrder.status}`);
+          announceAltEntry(params.symbol, params.direction, leverage, { mode: 'live', reservation: true, voiceEnabled });
           return;
         }
         addLog('info', `[ALT실전] 진입 주문 접수됨 — ${params.symbol} 포지션 오픈 확인 대기 (미체결/만료 여부 확인 필요)`);
@@ -1718,7 +1951,7 @@ function AppInner() {
         addLog('info', `[ALT실전] 진입 처리 완료 (${(elapsed / 1000).toFixed(1)}s)`);
       }
     }
-  }, [handleTickerSelect, addLog, futuresPlaceOrder, binanceApiKey, binanceApiSecret, soundPlayer, upsertLiveAltEntryOrderRegistry, captureLiveEntryFillFromTrades]);
+  }, [announceAltEntry, handleTickerSelect, addLog, futuresPlaceOrder, binanceApiKey, binanceApiSecret, upsertLiveAltEntryOrderRegistry, captureLiveEntryFillFromTrades]);
 
   // Connect forward ref so handleAutoTradeScan can call handleAltLiveTrade
   handleAltLiveTradeRef.current = handleAltLiveTrade;
@@ -1924,8 +2157,8 @@ function AppInner() {
       if (!tpOpen && slOpen) return 'tp';
       return null;
     }
-    if (hasSLRef && !slOpen) return 'sl';
-    if (hasTPRef && !tpOpen) return 'tp';
+    // Single-leg disappearance is not reliable enough (could be manual/time-stop cleanup).
+    // Keep TP/SL inference conservative unless opposite leg still proves a fill.
     return null;
   }, [futuresAllOrders]);
 
@@ -2131,7 +2364,6 @@ function AppInner() {
           const closePx = markPricesMapRef.current[req.symbol] ?? req.lastClosePrice ?? currentPriceRef.current ?? pos.entryPrice;
           paperTradingRef.current.closePosition(pos.id, closePx, 'expired');
           addLog('info', `[ALT모의] ${req.symbol} 타임스탑 청산 (${trigger === 'confirm' ? '사용자 확인' : '5분 자동'})`);
-          soundPlayer.playSl();
         }
         success = true;
       } catch (e) {
@@ -2139,8 +2371,11 @@ function AppInner() {
       }
     } else {
       const hintKey = req.liveMetaKey ?? `${req.symbol}_${req.direction}`;
+      const aliasKey = `${req.symbol}_${req.direction}`;
       const prevHint = liveCloseReasonHintRef.current[hintKey];
+      const prevAliasHint = liveCloseReasonHintRef.current[aliasKey];
       liveCloseReasonHintRef.current[hintKey] = 'time';
+      liveCloseReasonHintRef.current[aliasKey] = 'time';
       try {
         const livePos = futuresAllPositions.find(p =>
           p.symbol === req.symbol &&
@@ -2157,6 +2392,8 @@ function AppInner() {
       } catch (e) {
         if (prevHint) liveCloseReasonHintRef.current[hintKey] = prevHint;
         else delete liveCloseReasonHintRef.current[hintKey];
+        if (prevAliasHint) liveCloseReasonHintRef.current[aliasKey] = prevAliasHint;
+        else delete liveCloseReasonHintRef.current[aliasKey];
         addLog('error', `[ALT실전] ${req.symbol} 타임스탑 청산 실패: ${e instanceof Error ? e.message : 'unknown'}`);
       }
     }
@@ -2179,7 +2416,7 @@ function AppInner() {
         return next;
       });
     }
-  }, [addLog, futuresAllPositions, futuresCloseMarket, soundPlayer]);
+  }, [addLog, futuresAllPositions, futuresCloseMarket]);
 
   const applyTightenAndExtend = useCallback(async (reqKey: string, extendBars: 1 | 2, applyTp: boolean) => {
     const req = timeStopRequestsRef.current[reqKey];
@@ -2390,6 +2627,58 @@ function AppInner() {
       return changed ? next : prev;
     });
   }, [timeStopRequests, hiddenTimeStopKeys, paperTrading.positions, futuresAllPositions, liveAltMetaMap]);
+
+  React.useEffect(() => {
+    const fiveMinutesMs = 5 * 60 * 1000;
+    const id = window.setInterval(() => {
+      const now = Date.now();
+      const warned = timeStopWarnedRef.current;
+      const activeKeys = new Set<string>();
+      const dueCoins = new Set<string>();
+
+      for (const pos of paperTradingRef.current.positions) {
+        const meta = pos.altMeta;
+        if (!meta || meta.source !== 'altscanner' || meta.timeStopEnabled === false) continue;
+        const remain = meta.validUntilTime - now;
+        const warnKey = `paper:${pos.id}:${meta.validUntilTime}`;
+        activeKeys.add(warnKey);
+        if (remain > 0 && remain <= fiveMinutesMs && !warned[warnKey]) {
+          warned[warnKey] = now;
+          dueCoins.add(coinLabel(meta.symbol));
+        }
+      }
+
+      for (const [liveKey, meta] of Object.entries(liveAltMetaMapRef.current)) {
+        if (!meta || meta.timeStopEnabled === false) continue;
+        const pos = futuresAllPositionsRef.current.find(p =>
+          p.symbol === meta.symbol &&
+          Math.abs(p.positionAmt) > 0 &&
+          (meta.direction === 'long' ? p.positionAmt > 0 : p.positionAmt < 0),
+        );
+        if (!pos) continue;
+        const remain = meta.validUntilTime - now;
+        const warnKey = `live:${liveKey}:${meta.validUntilTime}`;
+        activeKeys.add(warnKey);
+        if (remain > 0 && remain <= fiveMinutesMs && !warned[warnKey]) {
+          warned[warnKey] = now;
+          dueCoins.add(coinLabel(meta.symbol));
+        }
+      }
+
+      for (const key of Object.keys(warned)) {
+        if (!activeKeys.has(key) && now - warned[key] > 60_000) {
+          delete warned[key];
+        }
+      }
+
+      if (dueCoins.size > 0) {
+        const message = `${Array.from(dueCoins).join(',')}코인 타임스탑 5분 전 입니다`;
+        addLog('info', `[타임스탑] ${message}`);
+        speakSound(message, { lang: 'ko-KR', rate: 1.0, pitch: 1.0 });
+      }
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [addLog, speakSound]);
 
   const activeTimeStopRequest = React.useMemo(() => {
     const pending = Object.values(timeStopRequests).filter(x => x.state === 'pending' && !hiddenTimeStopKeys[x.key]);
@@ -2611,7 +2900,7 @@ function AppInner() {
       const exitPrice = tracked.markPrice > 0
         ? tracked.markPrice
         : (markPricesMapRef.current[meta.symbol] ?? null);
-      const explicitReason = liveCloseReasonHintRef.current[key];
+      const explicitReason = liveCloseReasonHintRef.current[key] ?? liveCloseReasonHintRef.current[`${meta.symbol}_${meta.direction}`];
       const orderEvidenceReason = explicitReason ? null : inferLiveCloseReasonFromOrderEvidence(key);
       const clientSlEvidenceReason = explicitReason || orderEvidenceReason
         ? null
@@ -2645,8 +2934,6 @@ function AppInner() {
         entrySource: meta.entrySource,
       });
       removeAltManagedDrawingsForCandidate(meta.symbol, meta.candidateId);
-      if (closeReason === 'tp') soundPlayer.playTp();
-      else if (closeReason === 'sl' || closeReason === 'invalid' || closeReason === 'time') soundPlayer.playSl();
       cleanupKeys.push(key);
       const orphan = liveAltOrderRegistryRef.current[key];
       if (orphan) orphanCleanupEntries.push(orphan);
@@ -2698,7 +2985,7 @@ function AppInner() {
         return next;
       });
     }
-  }, [futuresAllPositions, liveAltMetaMap, liveCloseMetaSnapshotMap, inferLiveCloseReason, inferLiveCloseReasonFromOrderEvidence, inferLiveCloseReasonFromClientSlEvidence, cleanupAltOrphanOrders, enrichLiveHistoryRowFromTrades, soundPlayer, removeAltManagedDrawingsForCandidate]);
+  }, [futuresAllPositions, liveAltMetaMap, liveCloseMetaSnapshotMap, inferLiveCloseReason, inferLiveCloseReasonFromOrderEvidence, inferLiveCloseReasonFromClientSlEvidence, cleanupAltOrphanOrders, enrichLiveHistoryRowFromTrades, removeAltManagedDrawingsForCandidate]);
 
   React.useEffect(() => {
     const id = window.setInterval(() => {
@@ -2746,14 +3033,19 @@ function AppInner() {
     positionSide: 'LONG' | 'SHORT' | 'BOTH',
   ) => {
     const key = `${symbol}_${direction}`;
+    const aliasKey = `${symbol}_${direction}`;
     const prevHint = liveCloseReasonHintRef.current[key];
+    const prevAliasHint = liveCloseReasonHintRef.current[aliasKey];
     liveCloseReasonHintRef.current[key] = 'manual';
+    liveCloseReasonHintRef.current[aliasKey] = 'manual';
     try {
       await futuresCloseMarket(symbol, closeSide, qty, positionSide);
       addLog('info', `[ALT실전] ${symbol} 수동 시장가 청산 요청 완료`);
     } catch (e) {
       if (prevHint) liveCloseReasonHintRef.current[key] = prevHint;
       else delete liveCloseReasonHintRef.current[key];
+      if (prevAliasHint) liveCloseReasonHintRef.current[aliasKey] = prevAliasHint;
+      else delete liveCloseReasonHintRef.current[aliasKey];
       addLog('error', `[ALT실전] ${symbol} 수동 시장가 청산 실패: ${e instanceof Error ? e.message : 'unknown'}`);
       throw e;
     }
@@ -2767,6 +3059,7 @@ function AppInner() {
     limitPrice: number,
   ) => {
     const key = `${symbol}_${direction}`;
+    const aliasKey = `${symbol}_${direction}`;
     const metaSnapshot = liveAltMetaMapRef.current[key];
     if (metaSnapshot) {
       const pos = futuresAllPositionsRef.current.find(p =>
@@ -2804,13 +3097,17 @@ function AppInner() {
       }));
     }
     const prevHint = liveCloseReasonHintRef.current[key];
+    const prevAliasHint = liveCloseReasonHintRef.current[aliasKey];
     liveCloseReasonHintRef.current[key] = 'manual';
+    liveCloseReasonHintRef.current[aliasKey] = 'manual';
     try {
       await futuresPlaceOrder(closeSide, limitPrice, qty, 1, 'ISOLATED', true, symbol, 'IOC');
       addLog('info', `[ALT실전] ${symbol} 현재가(IOC) 청산 주문 완료 @ ${limitPrice}`);
     } catch (e) {
       if (prevHint) liveCloseReasonHintRef.current[key] = prevHint;
       else delete liveCloseReasonHintRef.current[key];
+      if (prevAliasHint) liveCloseReasonHintRef.current[aliasKey] = prevAliasHint;
+      else delete liveCloseReasonHintRef.current[aliasKey];
       addLog('error', `[ALT실전] ${symbol} 현재가(IOC) 청산 실패: ${e instanceof Error ? e.message : 'unknown'}`);
       throw e;
     }
@@ -2844,7 +3141,6 @@ function AppInner() {
             paperPosId={p.id}
             onClose={(price, reason) => {
               paperTrading.closePosition(p.id, price, reason);
-              soundPlayer.playSl();
             }}
             onTimeStopRequest={requestTimeStop}
           />
@@ -2864,8 +3160,11 @@ function AppInner() {
             qty={Math.abs(pos.positionAmt)}
             metaKey={key}
             onCloseMarket={(symbol, closeSide, qty, positionSide) => {
+              const aliasKey = `${meta.symbol}_${meta.direction}`;
               const prevHint = liveCloseReasonHintRef.current[key];
+              const prevAliasHint = liveCloseReasonHintRef.current[aliasKey];
               liveCloseReasonHintRef.current[key] = 'invalid';
+              liveCloseReasonHintRef.current[aliasKey] = 'invalid';
               addLog('info', `[ALT실전] ${symbol} 자동청산 (구조적 무효화) — MARKET ${closeSide} ${qty}`);
               futuresCloseMarket(symbol, closeSide, qty, positionSide)
                 .then(() => {
@@ -2874,6 +3173,8 @@ function AppInner() {
                 .catch((e: unknown) => {
                   if (prevHint) liveCloseReasonHintRef.current[key] = prevHint;
                   else delete liveCloseReasonHintRef.current[key];
+                  if (prevAliasHint) liveCloseReasonHintRef.current[aliasKey] = prevAliasHint;
+                  else delete liveCloseReasonHintRef.current[aliasKey];
                   addLog('error', `[ALT실전] ${symbol} 청산 실패: ${e instanceof Error ? e.message : 'unknown'}`);
                 });
             }}
@@ -3001,8 +3302,8 @@ function AppInner() {
         onOpenAutoTradeSettings={() => setShowAutoTradeSettings(true)}
         isAutoTradeActive={altAutoTrade.isActive}
         autoTradeScanning={altAutoTrade.scanning}
-        onToggleAutoTrade={() => altAutoTrade.setActive(!altAutoTrade.isActive)}
-        onTriggerAutoTradeNow={altAutoTrade.triggerNow}
+        onToggleAutoTrade={() => { void handleToggleAutoTrade(); }}
+        onTriggerAutoTradeNow={() => { void handleTriggerAutoTradeNow(); }}
         autoTradeMode={autoTradeMode}
         autoTradeCadenceMinutes={(autoTradeMode === 'live' ? liveAutoTradeSettings : paperAutoTradeSettings).scanCadenceMinutes}
         onChangeAutoTradeMode={handleChangeAutoTradeMode}
@@ -3012,6 +3313,11 @@ function AppInner() {
         errorLogs={errorLogs}
         onClearErrors={clearErrors}
       />
+      {autoTradeLeaderNotice && (
+        <div style={styles.autoTradeLockNotice}>
+          {autoTradeLeaderNotice}
+        </div>
+      )}
 
       {showAutoTradeSettings && (
         <AutoTradeSettingsModal
@@ -3299,6 +3605,15 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '0.92rem',
     padding: '8px 12px',
     margin: 8,
+  },
+  autoTradeLockNotice: {
+    margin: '6px 10px 0',
+    padding: '8px 12px',
+    borderRadius: 6,
+    border: '1px solid rgba(240,185,11,0.45)',
+    background: 'rgba(240,185,11,0.12)',
+    color: '#f0b90b',
+    fontSize: '0.82rem',
   },
   loadingOverlay: {
     position: 'absolute',
