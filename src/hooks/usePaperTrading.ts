@@ -140,7 +140,7 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
         entryFee: actualFee,
         tpPrice,
         slPrice,
-        altMeta,
+        altMeta: altMeta ? { ...altMeta, monitorStartTime: Date.now() } : undefined,
       };
       return {
         ...prev,
@@ -184,6 +184,10 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
         plannedTP: pos.altMeta?.plannedTP ?? null,
         plannedSL: pos.altMeta?.plannedSL ?? null,
         entrySource: pos.altMeta?.entrySource,
+        candidateId: pos.altMeta?.candidateId,
+        timeStopEnabledAtEntry: pos.altMeta?.timeStopEnabledAtEntry ?? pos.altMeta?.timeStopEnabled ?? null,
+        validUntilTimeAtEntry: pos.altMeta?.validUntilTimeAtEntry ?? pos.altMeta?.validUntilTime ?? null,
+        scanCadenceMinutesAtEntry: pos.altMeta?.scanCadenceMinutesAtEntry ?? null,
       };
       return {
         ...prev,
@@ -235,6 +239,10 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
         plannedTP: pos.altMeta?.plannedTP ?? null,
         plannedSL: pos.altMeta?.plannedSL ?? null,
         entrySource: pos.altMeta?.entrySource,
+        candidateId: pos.altMeta?.candidateId,
+        timeStopEnabledAtEntry: pos.altMeta?.timeStopEnabledAtEntry ?? pos.altMeta?.timeStopEnabled ?? null,
+        validUntilTimeAtEntry: pos.altMeta?.validUntilTimeAtEntry ?? pos.altMeta?.validUntilTime ?? null,
+        scanCadenceMinutesAtEntry: pos.altMeta?.scanCadenceMinutesAtEntry ?? null,
       };
       const isFull = qty >= totalQty;
       return {

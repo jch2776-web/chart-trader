@@ -1,5 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import type { FuturesPosition, FuturesOrder, LiveHistoryEntry, FuturesUserTrade } from '../types/futures';
+import {
+  governedBinanceFetch,
+  getBinanceGovernorSnapshot,
+  onBinanceGovernorEvent,
+} from '../lib/binanceRequestGovernor';
 
 const BASE = 'https://fapi.binance.com';
 
@@ -130,6 +135,8 @@ async function fetchSigned<T>(
   apiSecret: string,
   params: Record<string, string | number> = {},
   method: 'GET' | 'POST' | 'DELETE' = 'GET',
+  weight = 1,
+  scope: 'signed' | 'enrich' = 'signed',
 ): Promise<T> {
   const query = new URLSearchParams(
     Object.fromEntries(
@@ -139,9 +146,13 @@ async function fetchSigned<T>(
   );
   const sig = hmacSha256(apiSecret, query.toString());
   query.set('signature', sig);
-  const res = await fetch(`${BASE}${path}?${query}`, {
+  const res = await governedBinanceFetch(`${BASE}${path}?${query}`, {
     method,
     headers: { 'X-MBX-APIKEY': apiKey },
+  }, {
+    weight,
+    scope,
+    label: `${method}:${path}`,
   });
   if (!res.ok) {
     const text = await res.text();
@@ -187,7 +198,11 @@ const _infoCache: Record<string, { tickSize: number; stepSize: number }> = {};
 async function fetchSymbolInfo(symbol: string): Promise<{ tickSize: number; stepSize: number } | null> {
   if (_infoCache[symbol]) return _infoCache[symbol];
   try {
-    const res = await fetch(`${BASE}/fapi/v1/exchangeInfo?symbol=${symbol}`);
+    const res = await governedBinanceFetch(`${BASE}/fapi/v1/exchangeInfo?symbol=${symbol}`, undefined, {
+      weight: 1,
+      scope: 'public',
+      label: `GET:/fapi/v1/exchangeInfo:${symbol}`,
+    });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const data: any = await res.json();
     // Use find() to guarantee exact symbol match (API may return multiple contracts)
@@ -255,6 +270,19 @@ function findEntryTime(trades: any[], positionAmt: number, positionSide: string)
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
+function signedWeight(path: string, hasSymbolFilter: boolean): number {
+  if (path.includes('/positionRisk')) return hasSymbolFilter ? 2 : 5;
+  if (path.includes('/openOrders')) return hasSymbolFilter ? 3 : 10;
+  if (path.includes('/openAlgoOrders')) return hasSymbolFilter ? 4 : 12;
+  if (path.includes('/userTrades')) return 8;
+  if (path.includes('/balance')) return 5;
+  if (path.includes('/income')) return 10;
+  if (path.includes('/exchangeInfo')) return 1;
+  if (path.includes('/order') || path.includes('/algoOrder')) return 1;
+  if (path.includes('/leverage') || path.includes('/marginType')) return 1;
+  return 2;
+}
+
 export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: string) {
   const [positions, setPositions]         = useState<FuturesPosition[]>([]);
   const [orders, setOrders]               = useState<FuturesOrder[]>([]);
@@ -264,6 +292,8 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
   const [marginBalance, setMarginBalance] = useState<number>(0);
   const [loading, setLoading]             = useState(false);
   const [error, setError]                 = useState<string | null>(null);
+  const [pollIntervalMs, setPollIntervalMs] = useState(5000);
+  const [rateLimitCooldownUntil, setRateLimitCooldownUntil] = useState(0);
 
   // Client-side SL 상태 (localStorage 연동)
   const [clientSlMap, setClientSlMapState] = useState<ClientSlMap>(loadClientSlMap);
@@ -299,6 +329,8 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
   const apiSecretRef    = useRef(apiSecret);
   const tickerRef       = useRef(ticker);
   const firstFetchDone  = useRef(false);
+  const lastTradeFetchAtRef = useRef<Record<string, number>>({});
+  const entryTimeCacheRef = useRef<Record<string, number>>({});
   apiKeyRef.current    = apiKey;
   apiSecretRef.current = apiSecret;
   tickerRef.current    = ticker;
@@ -310,75 +342,44 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
       // Only show loading spinner on the very first fetch to avoid layout flicker
       if (isFirst) setLoading(true);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const [posRes, ordRes, algoOrdRes, tradeRes, balRes, allPosRes, allOrdRes, allAlgoOrdRes] = (await Promise.all([
-        fetchSigned('/fapi/v2/positionRisk', apiKeyRef.current, apiSecretRef.current, { symbol: tickerRef.current }),
-        fetchSigned('/fapi/v1/openOrders',   apiKeyRef.current, apiSecretRef.current, { symbol: tickerRef.current }),
-        // 조건부(Algo) 주문은 별도 엔드포인트에서 조회 (현재 심볼)
-        fetchSigned('/fapi/v1/openAlgoOrders', apiKeyRef.current, apiSecretRef.current, { symbol: tickerRef.current }),
-        // 최근 500건 거래 내역으로 실제 진입 시각 계산
-        fetchSigned('/fapi/v1/userTrades',   apiKeyRef.current, apiSecretRef.current, { symbol: tickerRef.current, limit: 500 }),
-        // USDT 가용 잔고
-        fetchSigned('/fapi/v2/balance',      apiKeyRef.current, apiSecretRef.current),
-        // 전체 포지션 (심볼 필터 없이)
-        fetchSigned('/fapi/v2/positionRisk', apiKeyRef.current, apiSecretRef.current),
-        // 전체 미체결 주문 (심볼 필터 없이)
-        fetchSigned('/fapi/v1/openOrders',   apiKeyRef.current, apiSecretRef.current),
-        // 전체 심볼 Algo 주문 (심볼 필터 없이) — TP/SL이 다른 심볼에 걸려있을 때도 표시
-        fetchSigned('/fapi/v1/openAlgoOrders', apiKeyRef.current, apiSecretRef.current).catch(() => []),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const [balRes, allPosRes, allOrdRes, allAlgoOrdRes] = (await Promise.all([
+        fetchSigned(
+          '/fapi/v2/balance',
+          apiKeyRef.current,
+          apiSecretRef.current,
+          {},
+          'GET',
+          signedWeight('/fapi/v2/balance', false),
+          'signed',
+        ),
+        fetchSigned(
+          '/fapi/v2/positionRisk',
+          apiKeyRef.current,
+          apiSecretRef.current,
+          {},
+          'GET',
+          signedWeight('/fapi/v2/positionRisk', false),
+          'signed',
+        ),
+        fetchSigned(
+          '/fapi/v1/openOrders',
+          apiKeyRef.current,
+          apiSecretRef.current,
+          {},
+          'GET',
+          signedWeight('/fapi/v1/openOrders', false),
+          'signed',
+        ),
+        fetchSigned(
+          '/fapi/v1/openAlgoOrders',
+          apiKeyRef.current,
+          apiSecretRef.current,
+          {},
+          'GET',
+          signedWeight('/fapi/v1/openAlgoOrders', false),
+          'signed',
+        ).catch(() => []),
       ])) as any[];
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const mapped: FuturesPosition[] = posRes
-        .filter((p: any) => parseFloat(p.positionAmt) !== 0)
-        .map((p: any) => {
-          const positionAmt = parseFloat(p.positionAmt);
-          const positionSide = p.positionSide as 'LONG' | 'SHORT' | 'BOTH';
-          return {
-            symbol:           p.symbol,
-            positionSide,
-            positionAmt,
-            entryPrice:       parseFloat(p.entryPrice),
-            markPrice:        parseFloat(p.markPrice),
-            unrealizedProfit: parseFloat(p.unRealizedProfit ?? p.unrealizedProfit ?? '0'),
-            leverage:         parseFloat(p.leverage),
-            liquidationPrice: parseFloat(p.liquidationPrice),
-            marginType:       p.marginType as 'isolated' | 'cross',
-            updateTime:       typeof p.updateTime === 'number' ? p.updateTime : undefined,
-            entryTime:        findEntryTime(tradeRes, positionAmt, positionSide),
-          };
-        });
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const mappedOrders: FuturesOrder[] = ordRes.map((o: any) => ({
-        symbol:    o.symbol,
-        orderId:   o.orderId,
-        side:      o.side as 'BUY' | 'SELL',
-        type:      o.type,
-        price:     parseFloat(o.price),
-        origQty:   parseFloat(o.origQty),
-        stopPrice: parseFloat(o.stopPrice),
-        status:    o.status,
-        time:      typeof o.time === 'number' ? o.time : undefined,
-        positionSide: (o.positionSide as 'LONG' | 'SHORT' | 'BOTH' | undefined) ?? undefined,
-      }));
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const mappedAlgoOrders: FuturesOrder[] = algoOrdRes.map((o: any) => ({
-        symbol:    o.symbol,
-        orderId:   String(o.algoId),
-        side:      o.side as 'BUY' | 'SELL',
-        type:      o.orderType ?? o.type,
-        price:     parseFloat(o.price ?? '0'),
-        origQty:   parseFloat(o.totalQty ?? o.origQty ?? o.quantity ?? '0'),
-        stopPrice: parseFloat(o.triggerPrice ?? o.stopPrice ?? '0'),
-        status:    o.algoStatus ?? o.status ?? 'NEW',
-        algoType:  o.algoType ?? 'CONDITIONAL',
-        isAlgo:    true,
-        time:      typeof o.createTime === 'number'
-          ? o.createTime
-          : (typeof o.bookTime === 'number' ? o.bookTime : (typeof o.time === 'number' ? o.time : undefined)),
-        positionSide: (o.positionSide as 'LONG' | 'SHORT' | 'BOTH' | undefined) ?? undefined,
-      }));
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const usdtBal = (balRes as any[]).find((b: any) => b.asset === 'USDT');
@@ -393,11 +394,12 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
       }
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const mappedAllPositions: FuturesPosition[] = allPosRes
+      const mappedAllPositionsBase: FuturesPosition[] = allPosRes
         .filter((p: any) => parseFloat(p.positionAmt) !== 0)
         .map((p: any) => {
           const positionAmt = parseFloat(p.positionAmt);
           const positionSide = p.positionSide as 'LONG' | 'SHORT' | 'BOTH';
+          const cacheKey = `${p.symbol}_${positionSide}`;
           return {
             symbol:           p.symbol,
             positionSide,
@@ -409,10 +411,7 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
             liquidationPrice: parseFloat(p.liquidationPrice),
             marginType:       p.marginType as 'isolated' | 'cross',
             updateTime:       typeof p.updateTime === 'number' ? p.updateTime : undefined,
-            // tradeRes is ticker-scoped; safely enrich only the currently queried symbol
-            entryTime:        p.symbol === tickerRef.current
-              ? findEntryTime(tradeRes, positionAmt, positionSide)
-              : undefined,
+            entryTime:        entryTimeCacheRef.current[cacheKey],
           };
         });
 
@@ -451,13 +450,53 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
         positionSide: (o.positionSide as 'LONG' | 'SHORT' | 'BOTH' | undefined) ?? undefined,
       }));
 
-      setPositions(mapped);
-      setOrders([...mappedOrders, ...mappedAlgoOrders]);
-      setAllPositions(mappedAllPositions);
+      let mappedAllPositions = mappedAllPositionsBase;
+      const now = Date.now();
+      const tickerPositions = mappedAllPositions.filter(p => p.symbol === tickerRef.current);
+      const lastTradeFetchAt = lastTradeFetchAtRef.current[tickerRef.current] ?? 0;
+      const shouldRefreshTickerTrades = tickerPositions.length > 0 && (isFirst || now - lastTradeFetchAt > 25_000);
+      if (shouldRefreshTickerTrades) {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const tradeRows = await fetchSigned<any[]>(
+            '/fapi/v1/userTrades',
+            apiKeyRef.current,
+            apiSecretRef.current,
+            { symbol: tickerRef.current, limit: 500 },
+            'GET',
+            signedWeight('/fapi/v1/userTrades', true),
+            'enrich',
+          );
+          lastTradeFetchAtRef.current[tickerRef.current] = now;
+          const tickerEntryMap: Record<string, number | undefined> = {};
+          for (const p of tickerPositions) {
+            const entry = findEntryTime(tradeRows, p.positionAmt, p.positionSide);
+            const cacheKey = `${p.symbol}_${p.positionSide}`;
+            if (entry != null) {
+              entryTimeCacheRef.current[cacheKey] = entry;
+              tickerEntryMap[cacheKey] = entry;
+            } else {
+              tickerEntryMap[cacheKey] = entryTimeCacheRef.current[cacheKey];
+            }
+          }
+          mappedAllPositions = mappedAllPositions.map(p => {
+            if (p.symbol !== tickerRef.current) return p;
+            const cacheKey = `${p.symbol}_${p.positionSide}`;
+            return { ...p, entryTime: tickerEntryMap[cacheKey] ?? p.entryTime };
+          });
+        } catch {
+          // Ignore enrichment failure; entryTime cache remains best-effort.
+        }
+      }
+
       // allOrders에는 전심볼 일반 주문 + 전심볼 Algo 주문을 함께 노출 (중복 제거: algoId 기준)
-      const algoIdSet = new Set(mappedAllAlgoOrders.map(o => o.orderId));
-      const filteredAlgoPerTicker = mappedAlgoOrders.filter(o => !algoIdSet.has(o.orderId));
-      setAllOrders([...mappedAllOrders, ...mappedAllAlgoOrders, ...filteredAlgoPerTicker]);
+      const combinedAllOrders = [...mappedAllOrders, ...mappedAllAlgoOrders];
+      const tickerOrders = combinedAllOrders.filter(o => o.symbol === tickerRef.current);
+
+      setPositions(mappedAllPositions.filter(p => p.symbol === tickerRef.current));
+      setOrders(tickerOrders);
+      setAllPositions(mappedAllPositions);
+      setAllOrders(combinedAllOrders);
       setError(null);
       firstFetchDone.current = true;
 
@@ -503,7 +542,7 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
             quantity:   qtyStr,
             recvWindow: 10000,
             ...(isHedge ? { positionSide: snapPosSide } : { reduceOnly: 'true' }),
-          }, 'POST');
+          }, 'POST', signedWeight('/fapi/v1/order', true), 'signed');
         }).then(() => {
           const next = { ...clientSlMapRef.current };
           delete next[snapKey];
@@ -530,21 +569,47 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
       setError(e instanceof Error ? e.message : '알 수 없는 오류');
     } finally {
       if (isFirst) setLoading(false);
+      const snap = getBinanceGovernorSnapshot();
+      setRateLimitCooldownUntil(snap.cooldownUntil);
     }
   }, []);
 
   useEffect(() => {
+    const unsub = onBinanceGovernorEvent((event) => {
+      if (event.type !== 'status') return;
+      setRateLimitCooldownUntil(Date.now() + event.retryAfterMs);
+    });
+    return () => unsub();
+  }, []);
+
+  useEffect(() => {
+    if (!apiKey || !apiSecret) {
+      setPollIntervalMs(5000);
+      return;
+    }
+    const hasActivity = allPositions.length > 0 || allOrders.length > 0 || Object.keys(clientSlMapRef.current).length > 0;
+    const cooled = rateLimitCooldownUntil > Date.now();
+    const nextPollMs = cooled ? (hasActivity ? 10_000 : 20_000) : (hasActivity ? 5_000 : 15_000);
+    setPollIntervalMs(prev => (prev === nextPollMs ? prev : nextPollMs));
+  }, [apiKey, apiSecret, allPositions.length, allOrders.length, rateLimitCooldownUntil]);
+
+  useEffect(() => {
     firstFetchDone.current = false;
+  }, [apiKey, apiSecret, ticker]);
+
+  useEffect(() => {
     if (!apiKey || !apiSecret) {
       setPositions([]);
       setOrders([]);
+      setAllPositions([]);
+      setAllOrders([]);
       setError(null);
       return;
     }
     fetchData();
-    const id = setInterval(fetchData, 5000);
+    const id = setInterval(fetchData, pollIntervalMs);
     return () => clearInterval(id);
-  }, [apiKey, apiSecret, ticker, fetchData]);
+  }, [apiKey, apiSecret, ticker, fetchData, pollIntervalMs]);
 
   // ── Place an order (default: LIMIT) ─────────────────────────────────────────
   const placeOrder = useCallback(async (
@@ -567,13 +632,29 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
       // 1. Set leverage (best-effort — Binance rejects if a position already exists
       //    and the requested leverage is lower than the current position's leverage)
       try {
-        await fetchSigned('/fapi/v1/leverage', key, secret, { symbol: sym, leverage, recvWindow: 10000 }, 'POST');
+        await fetchSigned(
+          '/fapi/v1/leverage',
+          key,
+          secret,
+          { symbol: sym, leverage, recvWindow: 10000 },
+          'POST',
+          signedWeight('/fapi/v1/leverage', true),
+          'signed',
+        );
       } catch { /* proceed with the exchange's current leverage setting */ }
 
       // 2. Set margin type (best-effort — Binance rejects changes while a position is open,
       //    error -4046 "No need to change", -4048 "Cannot change with open position", etc.)
       try {
-        await fetchSigned('/fapi/v1/marginType', key, secret, { symbol: sym, marginType, recvWindow: 10000 }, 'POST');
+        await fetchSigned(
+          '/fapi/v1/marginType',
+          key,
+          secret,
+          { symbol: sym, marginType, recvWindow: 10000 },
+          'POST',
+          signedWeight('/fapi/v1/marginType', true),
+          'signed',
+        );
       } catch { /* proceed with the exchange's current margin type */ }
     }
 
@@ -611,7 +692,7 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
       ...(options?.newClientOrderId ? { newClientOrderId: options.newClientOrderId } : {}),
       ...(reduceOnly ? { reduceOnly: 'true' } : {}),
       recvWindow: 10000,
-    }, 'POST');
+    }, 'POST', signedWeight('/fapi/v1/order', true), 'signed');
     options?.onAck?.({
       orderId: String(orderRes?.orderId ?? ''),
       status: typeof orderRes?.status === 'string' ? orderRes.status : undefined,
@@ -638,7 +719,15 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
     const sym = symbol ?? tickerRef.current;
     if (!key || !secret) throw new Error('API 키가 설정되지 않았습니다');
     try {
-      await fetchSigned('/fapi/v1/order', key, secret, { symbol: sym, orderId, recvWindow: 10000 }, 'DELETE');
+      await fetchSigned(
+        '/fapi/v1/order',
+        key,
+        secret,
+        { symbol: sym, orderId, recvWindow: 10000 },
+        'DELETE',
+        signedWeight('/fapi/v1/order', true),
+        'signed',
+      );
     } catch (e) {
       const msg = e instanceof Error ? e.message.toLowerCase() : '';
       const unknownOrder = msg.includes('-2011') || msg.includes('unknown order');
@@ -649,7 +738,7 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
         algoId: orderId,
         algoType: 'CONDITIONAL',
         recvWindow: 10000,
-      }, 'DELETE');
+      }, 'DELETE', signedWeight('/fapi/v1/algoOrder', true), 'signed');
     }
     await new Promise(resolve => setTimeout(resolve, 400));
     await fetchData();
@@ -672,7 +761,7 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
     await fetchSigned('/fapi/v1/order', key, secret, {
       symbol, side: closeSide, type: 'MARKET', quantity: qtyStr, recvWindow: 10000,
       ...(isHedge ? { positionSide } : { reduceOnly: 'true' }),
-    }, 'POST');
+    }, 'POST', signedWeight('/fapi/v1/order', true), 'signed');
     await new Promise(r => setTimeout(r, 600));
     await fetchData();
   }, [fetchData]);
@@ -728,7 +817,7 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
     // 성공 시 true, -4120 전환 에러 시 false, 그 외 에러는 throw
     const tryOrder = async (params: Record<string, string | number>): Promise<unknown | null> => {
       try {
-        return await fetchSigned('/fapi/v1/order', key, secret, params, 'POST');
+        return await fetchSigned('/fapi/v1/order', key, secret, params, 'POST', signedWeight('/fapi/v1/order', true), 'signed');
       } catch (e) {
         if (!isSwitchToAlgoErr(e)) throw e;
         return null;
@@ -752,13 +841,13 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
           algoType: 'CONDITIONAL',
           type: 'TAKE_PROFIT_MARKET',
           triggerPrice: priceStr,
-        }, 'POST');
+        }, 'POST', signedWeight('/fapi/v1/algoOrder', true), 'signed');
         pushPlaced(algo, 'TP');
       } catch {
         // 최후 수단: 일반 LIMIT 주문 (익절가에 GTC 청산 주문)
         const limit = await fetchSigned('/fapi/v1/order', key, secret, {
           ...closingParams, type: 'LIMIT', price: priceStr, timeInForce: 'GTC',
-        }, 'POST');
+        }, 'POST', signedWeight('/fapi/v1/order', true), 'signed');
         pushPlaced(limit, 'TP');
       }
     };
@@ -778,7 +867,7 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
           algoType: 'CONDITIONAL',
           type: 'STOP_MARKET',
           triggerPrice: priceStr,
-        }, 'POST');
+        }, 'POST', signedWeight('/fapi/v1/algoOrder', true), 'signed');
         pushPlaced(algo, 'SL');
       } catch {
         // Algo 주문도 실패하면 앱 감시 SL로 저장
@@ -813,7 +902,15 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
     if (startTime) params.startTime = startTime;
     if (endTime) params.endTime = endTime;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const rows = await fetchSigned<any[]>('/fapi/v1/userTrades', key, secret, params);
+    const rows = await fetchSigned<any[]>(
+      '/fapi/v1/userTrades',
+      key,
+      secret,
+      params,
+      'GET',
+      signedWeight('/fapi/v1/userTrades', true),
+      'enrich',
+    );
     return rows.map((t) => ({
       id: String(t.id ?? t.tradeId ?? ''),
       orderId: t.orderId != null ? String(t.orderId) : undefined,
@@ -838,7 +935,15 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
     if (startTime) params.startTime = startTime;
     if (endTime) params.endTime = endTime;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const res = await fetchSigned<any[]>('/fapi/v1/income', key, secret, params);
+    const res = await fetchSigned<any[]>(
+      '/fapi/v1/income',
+      key,
+      secret,
+      params,
+      'GET',
+      signedWeight('/fapi/v1/income', false),
+      'enrich',
+    );
     return res.map(r => ({
       tranId:  String(r.tranId),
       symbol:  r.symbol,
@@ -850,5 +955,26 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
     }));
   }, []);
 
-  return { positions, orders, allPositions, allOrders, balance, marginBalance, loading, error, refetch: fetchData, placeOrder, cancelOrder, placeTPSL, closeMarket, clientSlMap, recentClientSlTriggerMap, removeClientSL, fetchIncomeHistory, fetchUserTrades };
+  return {
+    positions,
+    orders,
+    allPositions,
+    allOrders,
+    balance,
+    marginBalance,
+    loading,
+    error,
+    pollIntervalMs,
+    rateLimitCooldownUntil,
+    refetch: fetchData,
+    placeOrder,
+    cancelOrder,
+    placeTPSL,
+    closeMarket,
+    clientSlMap,
+    recentClientSlTriggerMap,
+    removeClientSL,
+    fetchIncomeHistory,
+    fetchUserTrades,
+  };
 }

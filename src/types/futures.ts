@@ -46,6 +46,10 @@ export interface LiveTradeHistoryEntry {
   plannedTP?: number | null;
   plannedSL?: number | null;
   entrySource?: 'manual' | 'auto';
+  candidateId?: string;
+  timeStopEnabledAtEntry?: boolean | null;
+  validUntilTimeAtEntry?: number | null;
+  scanCadenceMinutesAtEntry?: number | null;
 }
 
 export interface FuturesUserTrade {

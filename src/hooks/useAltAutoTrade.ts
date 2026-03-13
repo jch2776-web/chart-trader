@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { runBreakoutScan } from '../components/AltScanner/breakoutScanner';
 import type { ScanCandidate, ScanInterval } from '../components/AltScanner/breakoutScanner';
+import { getBinanceGovernorSnapshot } from '../lib/binanceRequestGovernor';
 
 const AUTO_TRADE_KEY   = 'alt_auto_trade_active';
 const SCORE_THRESHOLD  = 90;
@@ -118,6 +119,13 @@ export function useAltAutoTrade({
   // ── Core scan routine ────────────────────────────────────────────────────────
   const runScans = useCallback(async () => {
     if (scanningRef.current) return;
+    const governor = getBinanceGovernorSnapshot();
+    if (governor.cooldownUntil > Date.now()) {
+      const remainSec = Math.ceil((governor.cooldownUntil - Date.now()) / 1000);
+      addLog(`⛔ 바이낸스 쿨다운 중(${remainSec}s) — 자동 스캔 연기`, 'warn');
+      setNextRunTime(governor.cooldownUntil);
+      return;
+    }
     const syms = symbolsRef.current;
     if (syms.length === 0) { addLog('심볼 목록이 비어있습니다', 'warn'); return; }
 
@@ -165,7 +173,15 @@ export function useAltAutoTrade({
           },
           (c) => { candidates.push(c); },
           abortCtrl.signal,
-          { concurrency: AUTO_CONCURRENCY, delayMs: AUTO_DELAY_MS },
+          {
+            concurrency: AUTO_CONCURRENCY,
+            delayMs: AUTO_DELAY_MS,
+            scanTag: `auto-trade:${interval}`,
+            busyPolicy: 'skip',
+            onStatus: (message, level) => {
+              addLog(`[${interval}] ${message}`, level === 'error' ? 'error' : (level === 'warn' ? 'warn' : 'info'));
+            },
+          },
         );
       } catch (e) {
         addLog(`[${interval}] 스캔 오류: ${e instanceof Error ? e.message : String(e)}`, 'error');
@@ -240,10 +256,19 @@ export function useAltAutoTrade({
 
   // ── Manual trigger ───────────────────────────────────────────────────────────
   const triggerNow = useCallback(() => {
-    if (scanningRef.current) return;
+    if (scanningRef.current) {
+      addLog('이미 자동 스캔이 실행 중입니다', 'warn');
+      return;
+    }
+    const governor = getBinanceGovernorSnapshot();
+    if (governor.cooldownUntil > Date.now()) {
+      const remainSec = Math.ceil((governor.cooldownUntil - Date.now()) / 1000);
+      addLog(`바이낸스 쿨다운 중(${remainSec}s) — 지금 스캔 불가`, 'warn');
+      return;
+    }
     // Do not update scheduled slot marker so the next cadence boundary still runs.
     runScansRef.current();
-  }, []);
+  }, [addLog]);
 
   return { isActive, setActive, scanning, logs, lastRunTime, nextRunTime, triggerNow };
 }

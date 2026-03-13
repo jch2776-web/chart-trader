@@ -4,6 +4,7 @@ import type { ClientSlMap } from '../../hooks/useBinanceFutures';
 import type { PaperHistoryEntry, PaperPosition, PaperOrder, AltMeta } from '../../types/paperTrading';
 import { downloadExcel } from '../../utils/exportExcel';
 import type { ExcelCell } from '../../utils/exportExcel';
+import { fetchBinanceKlinesCached } from '../../lib/binanceKlineCache';
 
 interface Props {
   allPositions: FuturesPosition[];
@@ -52,7 +53,7 @@ interface Props {
   ) => Promise<void>;
 }
 
-type Tab = 'positions' | 'orders' | 'paper-orders' | 'paper-history' | 'paper-asset' | 'live-history' | 'live-asset';
+type Tab = 'positions' | 'orders' | 'paper-orders' | 'paper-history' | 'paper-asset' | 'paper-performance' | 'live-history' | 'live-asset' | 'live-performance';
 
 // ── TP/SL modal state ─────────────────────────────────────────────────────────
 interface TPSLModal {
@@ -128,6 +129,10 @@ interface UnifiedHistoryRow {
   plannedTP?: number | null;
   plannedSL?: number | null;
   entrySource?: 'manual' | 'auto';
+  candidateId?: string;
+  timeStopEnabledAtEntry?: boolean | null;
+  validUntilTimeAtEntry?: number | null;
+  scanCadenceMinutesAtEntry?: number | null;
 }
 
 function reasonLabel(reason: UnifiedHistoryReason): string {
@@ -599,6 +604,323 @@ function AltAnalyticsSection({ rows, mode }: { rows: UnifiedHistoryRow[]; mode: 
   );
 }
 
+interface CohortSummary extends MetricSummary {
+  avgHoldMin: number | null;
+}
+
+function summarizeCohort(rows: UnifiedHistoryRow[]): CohortSummary {
+  const base = summarizeRows(rows);
+  const holdRows = rows.filter(r => r.entryTime != null && r.exitTime > (r.entryTime ?? 0));
+  const avgHoldMin = holdRows.length > 0
+    ? holdRows.reduce((s, r) => s + ((r.exitTime - (r.entryTime ?? r.exitTime)) / 60000), 0) / holdRows.length
+    : null;
+  return { ...base, avgHoldMin };
+}
+
+function toKlineInterval(iv?: string): '15m' | '1h' | '4h' | '1d' {
+  if (iv === '15m' || iv === '1h' || iv === '4h' || iv === '1d') return iv;
+  return '1h';
+}
+
+function intervalMsFromStr(iv?: string): number {
+  if (iv === '15m') return 15 * 60_000;
+  if (iv === '1h') return 60 * 60_000;
+  if (iv === '4h') return 4 * 60 * 60_000;
+  return 24 * 60 * 60_000;
+}
+
+function simulatePnl(row: UnifiedHistoryRow, exitPrice: number | null): number | null {
+  if (exitPrice == null || row.entryPrice == null) return null;
+  const dir = row.positionSide === 'LONG' ? 1 : -1;
+  return (exitPrice - row.entryPrice) * dir * row.qty;
+}
+
+function PerformanceAnalysisSection({
+  rows,
+  mode,
+  active,
+}: {
+  rows: UnifiedHistoryRow[];
+  mode: 'paper' | 'live';
+  active: boolean;
+}) {
+  const [cfLoading, setCfLoading] = useState(false);
+  const [cfSummary, setCfSummary] = useState<{
+    helpedOff: number;
+    hurtOff: number;
+    avgDeltaOff: number | null;
+    avgDeltaOffPlus1: number | null;
+    avgDeltaOffPlus3: number | null;
+    helpedOn: number;
+    hurtOn: number;
+    avgDeltaOn: number | null;
+    samplesOff: number;
+    samplesOn: number;
+    avgMfePct: number | null;
+    avgMaePct: number | null;
+  } | null>(null);
+
+  const altRows = useMemo(() => rows.filter(r => r.isAltTrade), [rows]);
+  const onRows = useMemo(() => altRows.filter(r => r.timeStopEnabledAtEntry !== false), [altRows]);
+  const offRows = useMemo(() => altRows.filter(r => r.timeStopEnabledAtEntry === false), [altRows]);
+  const onSummary = useMemo(() => summarizeCohort(onRows), [onRows]);
+  const offSummary = useMemo(() => summarizeCohort(offRows), [offRows]);
+
+  useEffect(() => {
+    if (!active) return;
+    const target = altRows
+      .filter(r => r.entryPrice != null && r.entryPrice > 0 && r.validUntilTimeAtEntry != null)
+      .slice(0, 20);
+    if (target.length === 0) {
+      setCfSummary(null);
+      return;
+    }
+    let cancelled = false;
+    setCfLoading(true);
+    void (async () => {
+      let helpedOff = 0;
+      let hurtOff = 0;
+      let deltaOffSum = 0;
+      let deltaOffCount = 0;
+      let deltaOffPlus1Sum = 0;
+      let deltaOffPlus1Count = 0;
+      let deltaOffPlus3Sum = 0;
+      let deltaOffPlus3Count = 0;
+      let helpedOn = 0;
+      let hurtOn = 0;
+      let deltaOnSum = 0;
+      let deltaOnCount = 0;
+      let mfeSum = 0;
+      let maeSum = 0;
+      let mfeMaeCount = 0;
+
+      const seriesCache = new Map<string, Awaited<ReturnType<typeof fetchBinanceKlinesCached>>>();
+      for (const row of target) {
+        if (cancelled) return;
+        const interval = toKlineInterval(row.interval);
+        const cacheKey = `${row.symbol}_${interval}`;
+        let candles = seriesCache.get(cacheKey);
+        if (!candles) {
+          try {
+            candles = await fetchBinanceKlinesCached(row.symbol, interval, 400);
+            seriesCache.set(cacheKey, candles);
+          } catch {
+            continue;
+          }
+        }
+        if (!candles || candles.length < 5) continue;
+        const ivMs = intervalMsFromStr(interval);
+        const expiry = row.validUntilTimeAtEntry ?? 0;
+        const idx = candles.findIndex(c => (c.time + ivMs) >= expiry);
+        if (idx < 0) continue;
+        const atExpiry = candles[idx]?.close ?? null;
+        const plus1 = candles[idx + 1]?.close ?? atExpiry;
+        const plus3 = candles[idx + 3]?.close ?? candles[candles.length - 1]?.close ?? atExpiry;
+        const latest = candles[candles.length - 1]?.close ?? null;
+        const cfPrice = latest ?? plus3 ?? plus1 ?? atExpiry;
+        const simulated = simulatePnl(row, cfPrice);
+        if (simulated == null || row.pnl == null) continue;
+
+        if (row.closeReason === 'time' || row.closeReason === 'expired') {
+          const delta = simulated - row.pnl; // OFF 가정 - 실측(time-stop)
+          deltaOffSum += delta;
+          deltaOffCount += 1;
+          const simulatedPlus1 = simulatePnl(row, plus1);
+          if (simulatedPlus1 != null) {
+            deltaOffPlus1Sum += simulatedPlus1 - row.pnl;
+            deltaOffPlus1Count += 1;
+          }
+          const simulatedPlus3 = simulatePnl(row, plus3);
+          if (simulatedPlus3 != null) {
+            deltaOffPlus3Sum += simulatedPlus3 - row.pnl;
+            deltaOffPlus3Count += 1;
+          }
+          if (delta < 0) helpedOff += 1;
+          else if (delta > 0) hurtOff += 1;
+
+          const baseExit = row.exitPrice ?? atExpiry;
+          if (baseExit != null && baseExit > 0) {
+            const window = candles.slice(idx, Math.min(candles.length, idx + 4));
+            if (window.length > 0) {
+              const maxHigh = Math.max(...window.map(c => c.high));
+              const minLow = Math.min(...window.map(c => c.low));
+              const isLong = row.positionSide === 'LONG';
+              const mfePct = isLong
+                ? ((maxHigh - baseExit) / baseExit) * 100
+                : ((baseExit - minLow) / baseExit) * 100;
+              const maePct = isLong
+                ? ((minLow - baseExit) / baseExit) * 100
+                : ((baseExit - maxHigh) / baseExit) * 100;
+              mfeSum += mfePct;
+              maeSum += maePct;
+              mfeMaeCount += 1;
+            }
+          }
+        } else if (row.timeStopEnabledAtEntry === false) {
+          const hypoExit = simulatePnl(row, atExpiry);
+          if (hypoExit == null) continue;
+          const delta = row.pnl - hypoExit; // 실측(OFF) - ON 가정
+          deltaOnSum += delta;
+          deltaOnCount += 1;
+          if (delta < 0) helpedOn += 1;
+          else if (delta > 0) hurtOn += 1;
+        }
+      }
+
+      if (cancelled) return;
+      setCfSummary({
+        helpedOff,
+        hurtOff,
+        avgDeltaOff: deltaOffCount > 0 ? deltaOffSum / deltaOffCount : null,
+        avgDeltaOffPlus1: deltaOffPlus1Count > 0 ? deltaOffPlus1Sum / deltaOffPlus1Count : null,
+        avgDeltaOffPlus3: deltaOffPlus3Count > 0 ? deltaOffPlus3Sum / deltaOffPlus3Count : null,
+        helpedOn,
+        hurtOn,
+        avgDeltaOn: deltaOnCount > 0 ? deltaOnSum / deltaOnCount : null,
+        samplesOff: deltaOffCount,
+        samplesOn: deltaOnCount,
+        avgMfePct: mfeMaeCount > 0 ? mfeSum / mfeMaeCount : null,
+        avgMaePct: mfeMaeCount > 0 ? maeSum / mfeMaeCount : null,
+      });
+      setCfLoading(false);
+    })().finally(() => {
+      if (!cancelled) setCfLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [active, altRows]);
+
+  const byTimeframe = useMemo(() => {
+    const map = new Map<string, UnifiedHistoryRow[]>();
+    for (const row of altRows) {
+      const k = row.interval ?? 'unknown';
+      map.set(k, [...(map.get(k) ?? []), row]);
+    }
+    return Array.from(map.entries())
+      .map(([k, grouped]) => ({ key: k, label: fmtShortInterval(k), ...summarizeCohort(grouped) }))
+      .sort((a, b) => (ALT_INTERVAL_ORDER[a.key] ?? 999) - (ALT_INTERVAL_ORDER[b.key] ?? 999));
+  }, [altRows]);
+
+  const bySide = useMemo(() => {
+    return [
+      { key: 'long', label: 'LONG', ...summarizeCohort(altRows.filter(r => r.positionSide === 'LONG')) },
+      { key: 'short', label: 'SHORT', ...summarizeCohort(altRows.filter(r => r.positionSide === 'SHORT')) },
+    ];
+  }, [altRows]);
+
+  const byEntrySource = useMemo(() => {
+    return [
+      { key: 'auto', label: 'ALT 자동', ...summarizeCohort(altRows.filter(r => r.entrySource === 'auto')) },
+      { key: 'manual', label: 'ALT 수동', ...summarizeCohort(altRows.filter(r => r.entrySource !== 'auto')) },
+    ];
+  }, [altRows]);
+
+  const byLeverage = useMemo(() => {
+    const buckets: Record<string, UnifiedHistoryRow[]> = {
+      '<=5x': [],
+      '6-10x': [],
+      '11-20x': [],
+      '21x+': [],
+      'unknown': [],
+    };
+    for (const row of altRows) {
+      const lv = row.leverage ?? 0;
+      if (!lv || !isFinite(lv)) buckets.unknown.push(row);
+      else if (lv <= 5) buckets['<=5x'].push(row);
+      else if (lv <= 10) buckets['6-10x'].push(row);
+      else if (lv <= 20) buckets['11-20x'].push(row);
+      else buckets['21x+'].push(row);
+    }
+    return Object.entries(buckets)
+      .map(([k, grouped]) => ({ key: k, label: k, ...summarizeCohort(grouped) }))
+      .filter(x => x.count > 0);
+  }, [altRows]);
+
+  const byCadence = useMemo(() => {
+    const map = new Map<string, UnifiedHistoryRow[]>();
+    for (const row of altRows) {
+      const key = row.scanCadenceMinutesAtEntry != null ? `${row.scanCadenceMinutesAtEntry}m` : 'unknown';
+      map.set(key, [...(map.get(key) ?? []), row]);
+    }
+    return Array.from(map.entries())
+      .map(([k, grouped]) => ({ key: k, label: k === 'unknown' ? '미지정' : k, ...summarizeCohort(grouped) }))
+      .sort((a, b) => a.label.localeCompare(b.label, 'ko'));
+  }, [altRows]);
+
+  return (
+    <div style={{ padding: '10px 14px 12px', color: '#d4d9e1' }}>
+      <div style={{ fontSize: '0.82rem', color: '#f0b90b', fontWeight: 700, marginBottom: 10 }}>
+        성과분석 ({mode === 'paper' ? '모의' : '실전'})
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 10, marginBottom: 10 }}>
+        <div style={{ border: '1px solid #1f2b3f', borderRadius: 10, padding: '10px 12px', background: 'rgba(255,255,255,0.02)' }}>
+          <div style={{ fontSize: '0.74rem', color: '#9aa4b5', marginBottom: 6 }}>타임스탑 ON 코호트</div>
+          <div style={{ fontSize: '0.88rem', color: '#dbe5f5', fontWeight: 700, marginBottom: 3 }}>거래 {onSummary.count}건 · 승률 {onSummary.winRate.toFixed(1)}%</div>
+          <div style={{ fontSize: '0.76rem', color: onSummary.totalPnl >= 0 ? '#0ecb81' : '#f6465d' }}>총손익 {onSummary.totalPnl >= 0 ? '+' : ''}{onSummary.totalPnl.toFixed(2)} USDT</div>
+          <div style={{ fontSize: '0.72rem', color: '#7f8aa0', marginTop: 3 }}>평균 보유 {onSummary.avgHoldMin != null ? `${onSummary.avgHoldMin.toFixed(1)}분` : '—'}</div>
+        </div>
+        <div style={{ border: '1px solid #1f2b3f', borderRadius: 10, padding: '10px 12px', background: 'rgba(255,255,255,0.02)' }}>
+          <div style={{ fontSize: '0.74rem', color: '#9aa4b5', marginBottom: 6 }}>타임스탑 OFF 코호트</div>
+          <div style={{ fontSize: '0.88rem', color: '#dbe5f5', fontWeight: 700, marginBottom: 3 }}>거래 {offSummary.count}건 · 승률 {offSummary.winRate.toFixed(1)}%</div>
+          <div style={{ fontSize: '0.76rem', color: offSummary.totalPnl >= 0 ? '#0ecb81' : '#f6465d' }}>총손익 {offSummary.totalPnl >= 0 ? '+' : ''}{offSummary.totalPnl.toFixed(2)} USDT</div>
+          <div style={{ fontSize: '0.72rem', color: '#7f8aa0', marginTop: 3 }}>평균 보유 {offSummary.avgHoldMin != null ? `${offSummary.avgHoldMin.toFixed(1)}분` : '—'}</div>
+        </div>
+      </div>
+
+      <div style={{ border: '1px solid #1f2b3f', borderRadius: 10, padding: '10px 12px', background: 'rgba(255,255,255,0.02)', marginBottom: 10 }}>
+        <div style={{ fontSize: '0.75rem', color: '#9aa4b5', marginBottom: 6 }}>타임스탑 가정/시뮬레이션 비교</div>
+        {cfLoading ? (
+          <div style={{ fontSize: '0.73rem', color: '#7f8aa0' }}>시뮬레이션 계산 중...</div>
+        ) : !cfSummary ? (
+          <div style={{ fontSize: '0.73rem', color: '#7f8aa0' }}>분석 가능한 메타데이터가 부족합니다.</div>
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10 }}>
+            <div>
+              <div style={{ fontSize: '0.72rem', color: '#d4d9e1', marginBottom: 4 }}>실측(time-stop) vs OFF 가정</div>
+              <div style={{ fontSize: '0.7rem', color: '#9aa4b5' }}>표본 {cfSummary.samplesOff}건 · 도움 {cfSummary.helpedOff}건 · 손해 {cfSummary.hurtOff}건</div>
+              <div style={{ fontSize: '0.72rem', color: (cfSummary.avgDeltaOff ?? 0) <= 0 ? '#0ecb81' : '#f6465d', marginTop: 2 }}>
+                평균 델타 {cfSummary.avgDeltaOff != null ? `${cfSummary.avgDeltaOff >= 0 ? '+' : ''}${cfSummary.avgDeltaOff.toFixed(2)} USDT` : '—'}
+              </div>
+              <div style={{ fontSize: '0.69rem', color: '#7f8aa0', marginTop: 2 }}>
+                +1봉: {cfSummary.avgDeltaOffPlus1 != null ? `${cfSummary.avgDeltaOffPlus1 >= 0 ? '+' : ''}${cfSummary.avgDeltaOffPlus1.toFixed(2)} USDT` : '—'} · +3봉: {cfSummary.avgDeltaOffPlus3 != null ? `${cfSummary.avgDeltaOffPlus3 >= 0 ? '+' : ''}${cfSummary.avgDeltaOffPlus3.toFixed(2)} USDT` : '—'}
+              </div>
+            </div>
+            <div>
+              <div style={{ fontSize: '0.72rem', color: '#d4d9e1', marginBottom: 4 }}>실측(OFF) vs ON 가정</div>
+              <div style={{ fontSize: '0.7rem', color: '#9aa4b5' }}>표본 {cfSummary.samplesOn}건 · 도움 {cfSummary.helpedOn}건 · 손해 {cfSummary.hurtOn}건</div>
+              <div style={{ fontSize: '0.72rem', color: (cfSummary.avgDeltaOn ?? 0) >= 0 ? '#0ecb81' : '#f6465d', marginTop: 2 }}>
+                평균 델타 {cfSummary.avgDeltaOn != null ? `${cfSummary.avgDeltaOn >= 0 ? '+' : ''}${cfSummary.avgDeltaOn.toFixed(2)} USDT` : '—'}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={{ border: '1px solid #1f2b3f', borderRadius: 10, padding: '10px 12px', background: 'rgba(255,255,255,0.02)', marginBottom: 10 }}>
+        <div style={{ fontSize: '0.75rem', color: '#9aa4b5', marginBottom: 6 }}>이벤트 스터디 (타임스탑 이후 3봉)</div>
+        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+          <div style={{ fontSize: '0.72rem', color: '#d4d9e1' }}>
+            평균 MFE(유리한 최대변동): {cfSummary?.avgMfePct != null ? `${cfSummary.avgMfePct >= 0 ? '+' : ''}${cfSummary.avgMfePct.toFixed(2)}%` : '—'}
+          </div>
+          <div style={{ fontSize: '0.72rem', color: '#d4d9e1' }}>
+            평균 MAE(불리한 최대변동): {cfSummary?.avgMaePct != null ? `${cfSummary.avgMaePct >= 0 ? '+' : ''}${cfSummary.avgMaePct.toFixed(2)}%` : '—'}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 10 }}>
+        <AnalyticsGroupBars title="타임프레임별 성과" rows={byTimeframe} />
+        <AnalyticsGroupBars title="LONG/SHORT 성과" rows={bySide} />
+        <AnalyticsGroupBars title="진입출처 성과" rows={byEntrySource} />
+        <AnalyticsGroupBars title="레버리지 버킷 성과" rows={byLeverage} />
+        <AnalyticsGroupBars title="스캔 주기 버킷 성과" rows={byCadence} />
+      </div>
+
+      <AltAnalyticsSection rows={rows} mode={mode} />
+    </div>
+  );
+}
+
 // ── Horizontal bar meter (price slider) ──────────────────────────────────────
 interface TickDef { pct: number; label: string; major: boolean; }
 
@@ -888,30 +1210,6 @@ function PaperAssetChart({ history, initialBalance }: { history: PaperHistoryEnt
   const [period, setPeriod] = useState<AssetPeriod>('1M');
 
   const sorted = useMemo(() => [...history].sort((a, b) => a.exitTime - b.exitTime), [history]);
-  const analyticsRows = useMemo<UnifiedHistoryRow[]>(
-    () => sorted.map(h => ({
-      id: h.id,
-      symbol: h.symbol,
-      positionSide: h.positionSide,
-      qty: h.qty,
-      leverage: h.leverage,
-      entryPrice: h.entryPrice,
-      exitPrice: h.exitPrice,
-      pnl: h.pnl,
-      fees: h.fees,
-      entryTime: h.entryTime,
-      exitTime: h.exitTime,
-      closeReason: h.closeReason,
-      interval: h.interval,
-      isAltTrade: h.isAltTrade,
-      candidateScore: h.candidateScore ?? null,
-      plannedEntry: h.plannedEntry ?? null,
-      plannedTP: h.plannedTP ?? null,
-      plannedSL: h.plannedSL ?? null,
-      entrySource: h.entrySource,
-    })),
-    [sorted],
-  );
   const cutMs = useMemo(() => (period === 'ALL' ? 0 : Date.now() - PERIOD_OFFSETS[period]), [period]);
 
   const baselineCumPnl = useMemo(() => {
@@ -1053,9 +1351,6 @@ function PaperAssetChart({ history, initialBalance }: { history: PaperHistoryEnt
           fmtTooltip={v => `${v.toFixed(2)}%`}
         />
       </div>
-
-      <AltAnalyticsSection rows={analyticsRows} mode="paper" />
-
     </div>
   );
 }
@@ -1072,30 +1367,6 @@ function LiveAssetChart({
   const [period, setPeriod] = useState<AssetPeriod>('1M');
 
   const sorted = useMemo(() => [...history].sort((a, b) => a.exitTime - b.exitTime), [history]);
-  const analyticsRows = useMemo<UnifiedHistoryRow[]>(
-    () => sorted.map(h => ({
-      id: h.id,
-      symbol: h.symbol,
-      positionSide: h.positionSide,
-      qty: h.qty,
-      leverage: h.leverage,
-      entryPrice: h.entryPrice,
-      exitPrice: h.exitPrice,
-      pnl: h.pnl,
-      fees: h.fees,
-      entryTime: h.entryTime,
-      exitTime: h.exitTime,
-      closeReason: h.closeReason,
-      interval: h.interval,
-      isAltTrade: h.isAltTrade,
-      candidateScore: h.candidateScore ?? null,
-      plannedEntry: h.plannedEntry ?? null,
-      plannedTP: h.plannedTP ?? null,
-      plannedSL: h.plannedSL ?? null,
-      entrySource: h.entrySource,
-    })),
-    [sorted],
-  );
   const cutMs  = useMemo(() => (period === 'ALL' ? 0 : Date.now() - PERIOD_OFFSETS[period]), [period]);
 
   const baselineCumPnl = useMemo(() => {
@@ -1167,7 +1438,6 @@ function LiveAssetChart({
         <AssetLineChart pts={winRatePts} gradId="lg-winrate" color="#a78bfa" label="승률 추이" period={period}
           fmtTooltip={v => `${v.toFixed(1)}%`} />
       </div>
-      <AltAnalyticsSection rows={analyticsRows} mode="live" />
     </div>
   );
 }
@@ -1561,6 +1831,17 @@ export function BottomPanel({
     return () => clearInterval(tid);
   }, []);
   useEffect(() => {
+    if (isPaperMode) {
+      if (tab === 'live-history' || tab === 'live-asset' || tab === 'live-performance' || tab === 'orders') {
+        setTab('positions');
+      }
+      return;
+    }
+    if (tab === 'paper-orders' || tab === 'paper-history' || tab === 'paper-asset' || tab === 'paper-performance') {
+      setTab('positions');
+    }
+  }, [isPaperMode, tab]);
+  useEffect(() => {
     if (tab === 'paper-history') setPaperHistoryLimit(10);
     if (tab === 'live-history') setLiveHistoryLimit(10);
   }, [tab]);
@@ -1589,6 +1870,10 @@ export function BottomPanel({
       plannedTP: h.plannedTP ?? null,
       plannedSL: h.plannedSL ?? null,
       entrySource: h.entrySource,
+      candidateId: h.candidateId,
+      timeStopEnabledAtEntry: h.timeStopEnabledAtEntry ?? null,
+      validUntilTimeAtEntry: h.validUntilTimeAtEntry ?? null,
+      scanCadenceMinutesAtEntry: h.scanCadenceMinutesAtEntry ?? null,
     })),
     [paperHistory],
   );
@@ -1614,6 +1899,10 @@ export function BottomPanel({
       plannedTP: h.plannedTP ?? null,
       plannedSL: h.plannedSL ?? null,
       entrySource: h.entrySource,
+      candidateId: h.candidateId,
+      timeStopEnabledAtEntry: h.timeStopEnabledAtEntry ?? null,
+      validUntilTimeAtEntry: h.validUntilTimeAtEntry ?? null,
+      scanCadenceMinutesAtEntry: h.scanCadenceMinutesAtEntry ?? null,
     })),
     [liveHistory],
   );
@@ -1888,6 +2177,9 @@ export function BottomPanel({
             <button style={{ ...s.tab, ...(tab === 'paper-asset' ? s.tabActive : {}) }} onClick={() => setTab('paper-asset')}>
               자산현황
             </button>
+            <button style={{ ...s.tab, ...(tab === 'paper-performance' ? s.tabActive : {}) }} onClick={() => setTab('paper-performance')}>
+              성과분석
+            </button>
             <div style={{ flex: 1 }} />
             <span style={{ fontSize: '0.78rem', color: '#848e9c', paddingRight: 8 }}>
               잔고: <span style={{ color: '#f0b90b', fontWeight: 700 }}>{(paperBalance ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT</span>
@@ -1926,6 +2218,9 @@ export function BottomPanel({
             </button>
             <button style={{ ...s.tab, ...(tab === 'live-asset' ? s.tabActive : {}) }} onClick={() => setTab('live-asset')}>
               자산현황
+            </button>
+            <button style={{ ...s.tab, ...(tab === 'live-performance' ? s.tabActive : {}) }} onClick={() => setTab('live-performance')}>
+              성과분석
             </button>
           </>
         )}
@@ -2023,6 +2318,9 @@ export function BottomPanel({
             initialBalance={paperInitialBalance ?? 10000}
           />
         )}
+        {isPaperMode && tab === 'paper-performance' && (
+          <PerformanceAnalysisSection rows={paperHistoryRows} mode="paper" active={tab === 'paper-performance'} />
+        )}
 
         {/* Live history tab */}
         {!isPaperMode && tab === 'live-history' && (
@@ -2032,6 +2330,9 @@ export function BottomPanel({
         {/* Live asset tab */}
         {!isPaperMode && tab === 'live-asset' && (
           <LiveAssetChart history={liveHistory ?? []} balanceHistory={liveBalanceHistory} />
+        )}
+        {!isPaperMode && tab === 'live-performance' && (
+          <PerformanceAnalysisSection rows={liveHistoryRows} mode="live" active={tab === 'live-performance'} />
         )}
 
         {/* Positions tab */}

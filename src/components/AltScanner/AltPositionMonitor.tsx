@@ -4,6 +4,16 @@ import type { PaperHistoryEntry } from '../../types/paperTrading';
 import type { AltMeta } from '../../types/paperTrading';
 import { useBinanceWS } from '../../hooks/useBinanceWS';
 
+function intervalToMs(iv: Interval): number {
+  if (iv === '1m') return 60_000;
+  if (iv === '3m') return 3 * 60_000;
+  if (iv === '5m') return 5 * 60_000;
+  if (iv === '15m') return 15 * 60_000;
+  if (iv === '1h') return 60 * 60_000;
+  if (iv === '4h') return 4 * 60 * 60_000;
+  return 24 * 60 * 60_000;
+}
+
 export interface TimeStopRequestPayload {
   mode: 'paper' | 'live';
   symbol: string;
@@ -41,6 +51,10 @@ export function AltPositionMonitor({ meta, qty, positionSide, paperPosId, onClos
   const timeStopRequestedRef = useRef(false);
   const handleCandle = useCallback((candle: Candle, isClosed: boolean) => {
     if (!isClosed) return;
+    const ivMs = intervalToMs(meta.scanInterval as Interval);
+    const candleCloseTime = candle.time + ivMs;
+    const monitorAfter = Math.max(meta.signalCloseTime ?? 0, meta.monitorStartTime ?? 0);
+    if (monitorAfter > 0 && candleCloseTime <= monitorAfter + 1000) return;
 
     // ── Structural invalidation (close breaches SL) ────────────────────────
     if (meta.direction === 'long' && candle.close < meta.slPrice) {
@@ -108,6 +122,10 @@ export function LiveAltPositionMonitor({ meta, positionSide, qty, onCloseMarket,
 
   const handleCandle = useCallback((candle: Candle, isClosed: boolean) => {
     if (!isClosed) return;
+    const ivMs = intervalToMs(meta.scanInterval as Interval);
+    const candleCloseTime = candle.time + ivMs;
+    const monitorAfter = Math.max(meta.signalCloseTime ?? 0, meta.monitorStartTime ?? 0, meta.liveEntryTime ?? 0, meta.liveEntrySubmittedAt ?? 0);
+    if (monitorAfter > 0 && candleCloseTime <= monitorAfter + 1000) return;
 
     if (!firedRef.current && meta.direction === 'long' && candle.close < meta.slPrice) {
       firedRef.current = true;

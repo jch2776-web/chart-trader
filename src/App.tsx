@@ -10,6 +10,7 @@ import { useBinanceKlines } from './hooks/useBinanceKlines';
 import { useBinanceWS } from './hooks/useBinanceWS';
 import { useBinanceFutures, getPositionMode } from './hooks/useBinanceFutures';
 import type { PlacedTPSLOrderRef } from './hooks/useBinanceFutures';
+import { onBinanceGovernorEvent } from './lib/binanceRequestGovernor';
 import { usePaperTrading } from './hooks/usePaperTrading';
 import { useTickers } from './hooks/useTickers';
 import { use24hStats } from './hooks/use24hStats';
@@ -80,6 +81,7 @@ function leverageSpeech(leverage: number): string {
 }
 
 const LIVE_MARGIN_BAL_HISTORY_KEY = 'live-futures-margin-balance-history';
+const ALT_LIFECYCLE_DEBUG_KEY = 'alt-lifecycle-debug';
 const AUTO_TRADE_LEADER_LOCK_COLLECTION = 'auto_trade_leader_locks';
 const AUTO_TRADE_LEADER_LEASE_MS = 35_000;
 const AUTO_TRADE_LEADER_HEARTBEAT_MS = 10_000;
@@ -503,6 +505,17 @@ function AppInner() {
     ].slice(-200));
   }, []);
 
+  const appendAltLifecycleDebug = useCallback((event: Record<string, unknown>) => {
+    try {
+      const key = uk(ALT_LIFECYCLE_DEBUG_KEY);
+      const cur = JSON.parse(localStorage.getItem(key) ?? '[]') as Record<string, unknown>[];
+      const next = [{ ts: Date.now(), ...event }, ...cur].slice(0, 300);
+      localStorage.setItem(key, JSON.stringify(next));
+    } catch {
+      // ignore diagnostics persistence failures
+    }
+  }, []);
+
   const addFlash = useCallback((f: Omit<BreakoutFlash, 'id' | 'startTime'>) => {
     const id = uid();
     const flash: BreakoutFlash = { ...f, id, startTime: Date.now() };
@@ -774,6 +787,8 @@ function AppInner() {
     marginBalance: futuresMarginBalance,
     loading: futuresLoading,
     error: futuresError,
+    pollIntervalMs: futuresPollIntervalMs,
+    rateLimitCooldownUntil: futuresRateLimitCooldownUntil,
     refetch: futuresRefetch,
     placeOrder: futuresPlaceOrder,
     cancelOrder: futuresCancelOrder,
@@ -788,6 +803,58 @@ function AppInner() {
   futuresAllPositionsRef.current = futuresAllPositions;
   const futuresAllOrdersRef = useRef(futuresAllOrders);
   futuresAllOrdersRef.current = futuresAllOrders;
+  const lastGovernorLogRef = useRef<Record<string, number>>({});
+  const lastPollIntervalRef = useRef<number | null>(null);
+  const lastCooldownRef = useRef<number>(0);
+
+  React.useEffect(() => {
+    const unsub = onBinanceGovernorEvent((event) => {
+      const now = Date.now();
+      const shouldLog = (key: string, gapMs: number) => {
+        const prev = lastGovernorLogRef.current[key] ?? 0;
+        if (now - prev < gapMs) return false;
+        lastGovernorLogRef.current[key] = now;
+        return true;
+      };
+      if (event.type === 'scan-queued' && shouldLog(`scanq:${event.tag}:${event.activeTag}`, 7000)) {
+        addLog('info', `[요청보호] 스캔 대기열 등록 — ${event.tag} (진행중:${event.activeTag})`);
+      } else if (event.type === 'scan-skipped' && shouldLog(`scans:${event.tag}:${event.activeTag}`, 5000)) {
+        addLog('info', `[요청보호] 스캔 건너뜀 — ${event.tag} (진행중:${event.activeTag})`);
+      } else if (event.type === 'status') {
+        const sec = Math.ceil(event.retryAfterMs / 1000);
+        if (shouldLog(`status:${event.status}`, 4000)) {
+          addLog('error', `[요청보호] Binance ${event.status} 감지 — ${sec}s 백오프 적용`);
+        }
+      } else if (event.type === 'delayed' && shouldLog(`delay:${event.scope}`, 8000)) {
+        addLog('info', `[요청보호] ${event.scope} 요청 ${Math.round(event.waitMs)}ms 지연 처리`);
+      }
+    });
+    return () => unsub();
+  }, [addLog]);
+
+  React.useEffect(() => {
+    if (!binanceApiKey || !binanceApiSecret) return;
+    const prev = lastPollIntervalRef.current;
+    if (prev == null) {
+      lastPollIntervalRef.current = futuresPollIntervalMs;
+      return;
+    }
+    if (prev !== futuresPollIntervalMs) {
+      const msg = futuresPollIntervalMs > prev
+        ? `[실전폴링] 부하 절감을 위해 폴링 간격을 ${futuresPollIntervalMs / 1000}s로 완화`
+        : `[실전폴링] 실시간 추적을 위해 폴링 간격을 ${futuresPollIntervalMs / 1000}s로 복원`;
+      addLog('info', msg);
+      lastPollIntervalRef.current = futuresPollIntervalMs;
+    }
+  }, [futuresPollIntervalMs, binanceApiKey, binanceApiSecret, addLog]);
+
+  React.useEffect(() => {
+    if (futuresRateLimitCooldownUntil <= Date.now()) return;
+    if (futuresRateLimitCooldownUntil === lastCooldownRef.current) return;
+    lastCooldownRef.current = futuresRateLimitCooldownUntil;
+    const sec = Math.max(1, Math.ceil((futuresRateLimitCooldownUntil - Date.now()) / 1000));
+    addLog('error', `[요청보호] 418/429 쿨다운 활성 — ${sec}s 동안 스캔/요청 속도 제한`);
+  }, [futuresRateLimitCooldownUntil, addLog]);
 
   // ── Live trading history ──────────────────────────────────────────────
   const [liveHistory, setLiveHistory] = useState<LiveTradeHistoryEntry[]>(() => {
@@ -1426,10 +1493,15 @@ function AppInner() {
       plannedSL: params.plannedSL,
       scanInterval: params.scanInterval,
       validUntilTime: params.validUntilTime,
+      signalCloseTime: params.signalCloseTime,
+      monitorStartTime: params.monitorStartTime ?? Date.now(),
       slPrice: params.slPrice,
       drawingsSnapshot: params.drawingsSnapshot,
       entrySource: params.entrySource,
       timeStopEnabled: params.timeStopEnabled,
+      timeStopEnabledAtEntry: params.timeStopEnabledAtEntry ?? params.timeStopEnabled ?? true,
+      validUntilTimeAtEntry: params.validUntilTimeAtEntry ?? params.validUntilTime,
+      scanCadenceMinutesAtEntry: params.scanCadenceMinutesAtEntry ?? null,
     };
     const side: 'BUY' | 'SELL' = params.direction === 'long' ? 'BUY' : 'SELL';
     type TriggerType = 'limit' | 'close_above' | 'close_below';
@@ -1472,9 +1544,50 @@ function AppInner() {
   // Forward refs — populated after their targets are defined below
   const handleAltLiveTradeRef    = useRef<((params: AltTradeParams) => void) | null>(null);
   const altAutoTradeSetActiveRef = useRef<((v: boolean) => void) | null>(null);
+  const recentAltAutoCandidateRef = useRef<Record<string, number>>({});
 
   // ── AltScanner auto-trade: convert ScanCandidate → AltTradeParams and route by mode ──
   const handleAutoTradeScan = useCallback((c: ScanCandidate) => {
+    if (c.status === 'INVALID' || c.status === 'EXPIRED') {
+      addLog('info', `[자동매매] ${c.symbol} ${c.direction.toUpperCase()} — 시그널 상태(${c.status})로 진입 건너뜀`);
+      return;
+    }
+    const now = Date.now();
+    const intervalMs = intervalToMs(c.interval);
+    const remainingTtl = c.validUntilTime - now;
+    const minTtl = Math.max(90_000, Math.floor(intervalMs * 0.25));
+    if (remainingTtl <= minTtl) {
+      addLog('info', `[자동매매] ${c.symbol} ${c.direction.toUpperCase()} — TTL 부족(${Math.max(0, Math.floor(remainingTtl / 1000))}s), 진입 건너뜀`);
+      return;
+    }
+    if (now - c.asOfCloseTime > Math.max(intervalMs, 4 * 60_000)) {
+      addLog('info', `[자동매매] ${c.symbol} ${c.direction.toUpperCase()} — 후보 시각이 오래되어 진입 건너뜀`);
+      return;
+    }
+    const mark = markPricesMapRef.current[c.symbol] ?? 0;
+    if (mark > 0) {
+      if (c.direction === 'long' && mark <= c.slPrice) {
+        addLog('info', `[자동매매] ${c.symbol} LONG — 현재가(${mark.toFixed(4)})가 SL(${c.slPrice.toFixed(4)}) 이하, 진입 건너뜀`);
+        return;
+      }
+      if (c.direction === 'short' && mark >= c.slPrice) {
+        addLog('info', `[자동매매] ${c.symbol} SHORT — 현재가(${mark.toFixed(4)})가 SL(${c.slPrice.toFixed(4)}) 이상, 진입 건너뜀`);
+        return;
+      }
+    }
+
+    const dedupeKey = `${c.symbol}_${c.direction}_${c.asOfCloseTime}`;
+    const prevSeen = recentAltAutoCandidateRef.current[dedupeKey] ?? 0;
+    if (now - prevSeen < Math.max(120_000, intervalMs)) {
+      addLog('info', `[자동매매] ${c.symbol} ${c.direction.toUpperCase()} — 동일 슬롯 후보 재진입 방지로 건너뜀`);
+      return;
+    }
+    recentAltAutoCandidateRef.current[dedupeKey] = now;
+    const dedupeCutoff = now - 12 * 60 * 60 * 1000;
+    for (const [key, ts] of Object.entries(recentAltAutoCandidateRef.current)) {
+      if (ts < dedupeCutoff) delete recentAltAutoCandidateRef.current[key];
+    }
+
     const autoSettings = (autoTradeModeRef.current === 'live' ? liveAutoTradeSettingsRef : paperAutoTradeSettingsRef).current;
     const drawingsSnapshot = [
       ...c.drawingGroups.breakout,
@@ -1499,9 +1612,14 @@ function AppInner() {
       plannedSL: c.slPrice ?? null,
       scanInterval: c.interval,
       validUntilTime: c.validUntilTime,
+      signalCloseTime: c.asOfCloseTime,
+      monitorStartTime: now,
       drawingsSnapshot,
       entrySource: 'auto',
       timeStopEnabled: normalizeAutoTradeTimeStop(autoSettings.timeStopEnabled),
+      timeStopEnabledAtEntry: normalizeAutoTradeTimeStop(autoSettings.timeStopEnabled),
+      validUntilTimeAtEntry: c.validUntilTime,
+      scanCadenceMinutesAtEntry: autoSettings.scanCadenceMinutes,
       breakoutType:    c.breakoutType,
       candidateStatus: c.status,
       triggerPriceAtNextClose: c.triggerPriceAtNextClose,
@@ -1837,10 +1955,15 @@ function AppInner() {
       plannedSL: params.plannedSL,
       scanInterval: params.scanInterval,
       validUntilTime: params.validUntilTime,
+      signalCloseTime: params.signalCloseTime,
+      monitorStartTime: params.monitorStartTime ?? Date.now(),
       slPrice: params.slPrice,
       drawingsSnapshot: params.drawingsSnapshot,
       entrySource: params.entrySource,
       timeStopEnabled: params.timeStopEnabled,
+      timeStopEnabledAtEntry: params.timeStopEnabledAtEntry ?? params.timeStopEnabled ?? true,
+      validUntilTimeAtEntry: params.validUntilTimeAtEntry ?? params.validUntilTime,
+      scanCadenceMinutesAtEntry: params.scanCadenceMinutesAtEntry ?? null,
     };
 
     handleTickerSelect(params.symbol);
@@ -1851,6 +1974,17 @@ function AppInner() {
     let ackStatusRaw: string | undefined;
     let ackTime: number | undefined;
     const requestStartedAt = Date.now();
+    appendAltLifecycleDebug({
+      event: 'live-entry-request',
+      symbol: params.symbol,
+      direction: params.direction,
+      candidateId: params.candidateId,
+      entrySource: params.entrySource,
+      candidateStatus: params.candidateStatus,
+      signalCloseTime: params.signalCloseTime ?? null,
+      validUntilTime: params.validUntilTime,
+      requestAt: requestStartedAt,
+    });
     addLog('info', `[ALT실전] 진입 요청 시작 — ${side} ${qty} ${params.symbol} (fill 우선: MARKET)`);
 
     try {
@@ -1867,6 +2001,15 @@ function AppInner() {
       const submittedAt = ackTime ?? Date.now();
 
       addLog('info', `[ALT실전] 진입 주문 접수 — ${params.symbol} status:${ackStatus}${ackOrderId ? ` #${ackOrderId}` : ''}`);
+      appendAltLifecycleDebug({
+        event: 'live-entry-ack',
+        symbol: params.symbol,
+        direction: params.direction,
+        candidateId: params.candidateId,
+        ackOrderId: ackOrderId ?? null,
+        ackStatus,
+        ackTime: submittedAt,
+      });
       if (ackStatus === 'REJECTED' || ackStatus === 'CANCELED' || ackStatus === 'EXPIRED') {
         addLog('error', `[ALT실전] 진입 주문 미체결 종료 — ${params.symbol} status:${ackStatus}`);
         return;
@@ -1951,7 +2094,7 @@ function AppInner() {
         addLog('info', `[ALT실전] 진입 처리 완료 (${(elapsed / 1000).toFixed(1)}s)`);
       }
     }
-  }, [announceAltEntry, handleTickerSelect, addLog, futuresPlaceOrder, binanceApiKey, binanceApiSecret, upsertLiveAltEntryOrderRegistry, captureLiveEntryFillFromTrades]);
+  }, [announceAltEntry, handleTickerSelect, addLog, futuresPlaceOrder, binanceApiKey, binanceApiSecret, upsertLiveAltEntryOrderRegistry, captureLiveEntryFillFromTrades, appendAltLifecycleDebug]);
 
   // Connect forward ref so handleAutoTradeScan can call handleAltLiveTrade
   handleAltLiveTradeRef.current = handleAltLiveTrade;
@@ -2206,7 +2349,15 @@ function AppInner() {
         () => {},
         (c) => { candidates.push(c); },
         undefined,
-        { concurrency: 1, delayMs: 0 },
+        {
+          concurrency: 1,
+          delayMs: 0,
+          scanTag: `timestop-eval:${req.symbol}:${iv}`,
+          busyPolicy: 'queue',
+          onStatus: (message, level) => {
+            if (level === 'warn') addLog('info', `[타임스탑 재평가] ${message}`);
+          },
+        },
       );
       const candidate = candidates[0];
 
@@ -2853,6 +3004,7 @@ function AppInner() {
     const cleanupKeys: string[] = [];
     const orphanCleanupEntries: LiveAltOrderRegistryEntry[] = [];
     const enrichTargets: Array<{ rowId: string; meta: AltMeta; tracked: LiveTrackedAltPosition; exitTime: number; reasonSource: 'explicit' | 'order' | 'fallback' }> = [];
+    const monitorStartPatch: Record<string, number> = {};
 
     const allKeys = new Set<string>([
       ...Object.keys(liveAltMetaMap),
@@ -2868,6 +3020,10 @@ function AppInner() {
         (meta.direction === 'long' ? p.positionAmt > 0 : p.positionAmt < 0),
       );
       if (pos) {
+        const expectedMonitorStart = pos.entryTime ?? Date.now();
+        if (!meta.monitorStartTime || meta.monitorStartTime < expectedMonitorStart) {
+          monitorStartPatch[key] = expectedMonitorStart;
+        }
         nextTracked[key] = {
           symbol: pos.symbol,
           direction: meta.direction,
@@ -2912,6 +3068,21 @@ function AppInner() {
       const pnl = exitPrice != null
         ? parseFloat((((tracked.direction === 'long' ? exitPrice - tracked.entryPrice : tracked.entryPrice - exitPrice) * tracked.qty)).toFixed(8))
         : null;
+      appendAltLifecycleDebug({
+        event: 'live-close-detected',
+        key,
+        symbol: meta.symbol,
+        direction: meta.direction,
+        candidateId: meta.candidateId,
+        reason: closeReason,
+        reasonSource,
+        exitPrice,
+        entryPrice: tracked.entryPrice,
+        qty: tracked.qty,
+        entryTime: tracked.entryTime ?? meta.liveEntryTime ?? null,
+        signalCloseTime: meta.signalCloseTime ?? null,
+        monitorStartTime: meta.monitorStartTime ?? null,
+      });
       appended.push({
         id: rowId,
         symbol: meta.symbol,
@@ -2932,6 +3103,10 @@ function AppInner() {
         plannedTP: meta.plannedTP,
         plannedSL: meta.plannedSL,
         entrySource: meta.entrySource,
+        candidateId: meta.candidateId,
+        timeStopEnabledAtEntry: meta.timeStopEnabledAtEntry ?? meta.timeStopEnabled ?? null,
+        validUntilTimeAtEntry: meta.validUntilTimeAtEntry ?? meta.validUntilTime ?? null,
+        scanCadenceMinutesAtEntry: meta.scanCadenceMinutesAtEntry ?? null,
       });
       removeAltManagedDrawingsForCandidate(meta.symbol, meta.candidateId);
       cleanupKeys.push(key);
@@ -2943,6 +3118,21 @@ function AppInner() {
     }
 
     liveTrackedRef.current = nextTracked;
+
+    if (Object.keys(monitorStartPatch).length > 0) {
+      setLiveAltMetaMap(prev => {
+        let changed = false;
+        const next = { ...prev };
+        for (const [key, startTs] of Object.entries(monitorStartPatch)) {
+          const cur = next[key];
+          if (!cur) continue;
+          if (cur.monitorStartTime && cur.monitorStartTime >= startTs) continue;
+          next[key] = { ...cur, monitorStartTime: startTs };
+          changed = true;
+        }
+        return changed ? next : prev;
+      });
+    }
 
     if (appended.length > 0) {
       setLiveHistory(prev => [...appended, ...prev].slice(0, 1000));
@@ -2985,7 +3175,7 @@ function AppInner() {
         return next;
       });
     }
-  }, [futuresAllPositions, liveAltMetaMap, liveCloseMetaSnapshotMap, inferLiveCloseReason, inferLiveCloseReasonFromOrderEvidence, inferLiveCloseReasonFromClientSlEvidence, cleanupAltOrphanOrders, enrichLiveHistoryRowFromTrades, removeAltManagedDrawingsForCandidate]);
+  }, [futuresAllPositions, liveAltMetaMap, liveCloseMetaSnapshotMap, inferLiveCloseReason, inferLiveCloseReasonFromOrderEvidence, inferLiveCloseReasonFromClientSlEvidence, cleanupAltOrphanOrders, enrichLiveHistoryRowFromTrades, removeAltManagedDrawingsForCandidate, appendAltLifecycleDebug]);
 
   React.useEffect(() => {
     const id = window.setInterval(() => {

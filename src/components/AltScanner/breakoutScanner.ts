@@ -8,6 +8,8 @@ import {
   intervalToMs, getTtlBars, getVolFactor, triggerPrice,
   type TriggerSpec,
 } from './timeUtils';
+import { fetchBinanceKlinesCached } from '../../lib/binanceKlineCache';
+import { acquireScanSlot, getBinanceGovernorSnapshot } from '../../lib/binanceRequestGovernor';
 
 export type ScanInterval = '15m' | '1h' | '4h' | '1d';
 export type ScanDirection = 'both' | 'long' | 'short';
@@ -71,18 +73,7 @@ async function fetchKlines(
   limit: number,
   signal?: AbortSignal,
 ): Promise<Candle[]> {
-  const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
-  const res = await fetch(url, { signal });
-  if (!res.ok) throw new Error(`klines ${symbol} ${res.status}`);
-  const raw = await res.json() as unknown[][];
-  return raw.map(r => ({
-    time:   r[0] as number,
-    open:   parseFloat(r[1] as string),
-    high:   parseFloat(r[2] as string),
-    low:    parseFloat(r[3] as string),
-    close:  parseFloat(r[4] as string),
-    volume: parseFloat(r[5] as string),
-  }));
+  return fetchBinanceKlinesCached(symbol, interval, limit, signal);
 }
 
 // ── Closed-candle filtering ────────────────────────────────────────────────
@@ -567,6 +558,12 @@ export interface ScanOptions {
   concurrency?: number;
   /** Milliseconds to wait after each symbol completes before starting the next (default 350). */
   delayMs?: number;
+  /** Global scan tag for mutex/logging. */
+  scanTag?: string;
+  /** Busy behavior when another heavy scan is already running. */
+  busyPolicy?: 'queue' | 'skip';
+  /** Optional status callback for queue/skip/cooldown messages. */
+  onStatus?: (message: string, level: 'info' | 'warn' | 'error') => void;
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────
@@ -579,10 +576,51 @@ export async function runBreakoutScan(
   signal?: AbortSignal,
   options?: ScanOptions,
 ): Promise<void> {
-  const concurrency = Math.max(1, options?.concurrency ?? 3);
-  const delayMs     = Math.max(0, options?.delayMs     ?? 350);
+  const governorBefore = getBinanceGovernorSnapshot();
+  if (governorBefore.cooldownUntil > Date.now()) {
+    const remainSec = Math.ceil((governorBefore.cooldownUntil - Date.now()) / 1000);
+    options?.onStatus?.(`바이낸스 쿨다운 중(${remainSec}s) — 스캔 일시 중단`, 'warn');
+    return;
+  }
+
+  const scanTag = options?.scanTag ?? `scan:${interval}:${direction}`;
+  const scanSlot = await acquireScanSlot({
+    tag: scanTag,
+    policy: options?.busyPolicy ?? 'queue',
+  });
+  if (!scanSlot) {
+    options?.onStatus?.('다른 스캔이 진행 중이라 이번 스캔은 건너뜀', 'warn');
+    return;
+  }
+  if (scanSlot.waitedMs >= 200) {
+    options?.onStatus?.(`다른 스캔 종료 대기 후 시작 (${(scanSlot.waitedMs / 1000).toFixed(1)}s)`, 'info');
+  }
+
   const total = symbols.length;
   let done = 0;
+  if (total === 0) {
+    scanSlot.release();
+    return;
+  }
+
+  const baseConcurrency = Math.max(1, options?.concurrency ?? 3);
+  const baseDelayMs = Math.max(0, options?.delayMs ?? 350);
+  const loadAdaptive =
+    total >= 220 ? { c: 1, d: 900 } :
+    total >= 120 ? { c: 2, d: 650 } :
+    total >= 70 ? { c: 2, d: 500 } :
+    { c: baseConcurrency, d: baseDelayMs };
+  const governor = getBinanceGovernorSnapshot();
+  const concurrency = Math.max(1, Math.min(loadAdaptive.c, governor.scanConcurrencyCap));
+  const delayMs = Math.max(loadAdaptive.d, baseDelayMs) + Math.max(0, governor.scanDelayPenaltyMs);
+
+  if (concurrency < baseConcurrency) {
+    options?.onStatus?.(`요청 부하 보호로 동시 스캔 수를 ${baseConcurrency}→${concurrency}로 조정`, 'warn');
+  }
+  if (delayMs > baseDelayMs + 50) {
+    options?.onStatus?.(`요청 부하 보호로 심볼 간 지연을 ${delayMs}ms로 조정`, 'info');
+  }
+
   const queue = [...symbols];
 
   async function worker() {
@@ -601,5 +639,9 @@ export async function runBreakoutScan(
     }
   }
 
-  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+  try {
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+  } finally {
+    scanSlot.release();
+  }
 }

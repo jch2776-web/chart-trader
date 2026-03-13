@@ -7,6 +7,8 @@ import { runBreakoutScan } from './breakoutScanner';
 import type { ScanCandidate, ScanInterval, ScanDirection, CandidateStatus } from './breakoutScanner';
 import { useBinanceWS } from '../../hooks/useBinanceWS';
 import { revalidateCandidate } from './validateSignal';
+import { fetchBinanceKlinesCached } from '../../lib/binanceKlineCache';
+import { getBinanceGovernorSnapshot } from '../../lib/binanceRequestGovernor';
 import {
   intervalToMs, getNextAlignedCloseTime, defaultAutoScan,
   fmtCountdown, fmtDateTime,
@@ -31,9 +33,14 @@ export interface AltTradeParams {
   plannedSL: number | null;
   scanInterval: Interval;
   validUntilTime: number;
+  signalCloseTime?: number;
+  monitorStartTime?: number;
   drawingsSnapshot: Drawing[];
   entrySource?: 'manual' | 'auto';
   timeStopEnabled?: boolean;
+  timeStopEnabledAtEntry?: boolean | null;
+  validUntilTimeAtEntry?: number | null;
+  scanCadenceMinutesAtEntry?: number | null;
   // Signal classification — used for conditional entry logic
   breakoutType: 'trendline' | 'hline' | 'box';
   candidateStatus: CandidateStatus;
@@ -271,7 +278,11 @@ function TradingInfoPanel({
     plannedSL: c.slPrice ?? null,
     scanInterval: c.interval,
     validUntilTime: c.validUntilTime,
+    signalCloseTime: c.asOfCloseTime,
+    monitorStartTime: Date.now(),
     drawingsSnapshot,
+    timeStopEnabledAtEntry: true,
+    validUntilTimeAtEntry: c.validUntilTime,
     breakoutType: c.breakoutType,
     candidateStatus: c.status,
     triggerPriceAtNextClose: c.triggerPriceAtNextClose,
@@ -767,6 +778,7 @@ export function AltScannerModal({
   const [autoScanEnabled, setAutoScanEnabled] = useState<boolean>(() => defaultAutoScan('1h'));
   const [nextAutoScanAt, setNextAutoScanAt]   = useState<number | null>(null);
   const [lastScanAt, setLastScanAt]           = useState<number | null>(null);
+  const [scanNotice, setScanNotice]           = useState<string>('');
 
   // 1-second ticker for countdown + EXPIRED updates
   const [nowMs, setNowMs] = useState(Date.now());
@@ -822,17 +834,8 @@ export function AltScannerModal({
     if (!snapshotMeta) { setSnapshotCandles([]); return; }
     setSelected(null); // clear any previously selected candidate
     setSnapshotCandles([]); // show "로딩 중…" while fetching
-    const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${snapshotMeta.symbol}&interval=${snapshotMeta.scanInterval}&limit=300`;
-    fetch(url)
-      .then(r => r.json())
-      .then((raw: unknown[][]) => setSnapshotCandles(raw.map(r => ({
-        time:   r[0] as number,
-        open:   parseFloat(r[1] as string),
-        high:   parseFloat(r[2] as string),
-        low:    parseFloat(r[3] as string),
-        close:  parseFloat(r[4] as string),
-        volume: parseFloat(r[5] as string),
-      }))))
+    fetchBinanceKlinesCached(snapshotMeta.symbol, snapshotMeta.scanInterval, 300)
+      .then(rows => setSnapshotCandles(rows))
       .catch(() => {});
   }, [snapshotMeta?.candidateId]);
 
@@ -844,17 +847,8 @@ export function AltScannerModal({
       return;
     }
     setChartViewCandles([]);
-    const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${selected.symbol}&interval=${chartViewInterval}&limit=300`;
-    fetch(url)
-      .then(r => r.json())
-      .then((raw: unknown[][]) => setChartViewCandles(raw.map(r => ({
-        time:   r[0] as number,
-        open:   parseFloat(r[1] as string),
-        high:   parseFloat(r[2] as string),
-        low:    parseFloat(r[3] as string),
-        close:  parseFloat(r[4] as string),
-        volume: parseFloat(r[5] as string),
-      }))))
+    fetchBinanceKlinesCached(selected.symbol, chartViewInterval, 300)
+      .then(rows => setChartViewCandles(rows))
       .catch(() => {});
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.symbol, selected?.direction, chartViewInterval]);
@@ -908,8 +902,15 @@ export function AltScannerModal({
   // ── Manual scan ───────────────────────────────────────────────────────────
   const handleScan = useCallback(async () => {
     if (scanning) { abortRef.current?.abort(); return; }
+    const gov = getBinanceGovernorSnapshot();
+    if (gov.cooldownUntil > Date.now()) {
+      const remain = Math.ceil((gov.cooldownUntil - Date.now()) / 1000);
+      setScanNotice(`쿨다운 중: ${remain}s 후 재시도`);
+      return;
+    }
     abortRef.current = new AbortController();
     setScanning(true);
+    setScanNotice('');
     setCandidatesCache(prev => ({ ...prev, [scanInterval]: [] }));
     setSelected(null);
     setProgress({ done: 0, total: symbols.length });
@@ -923,7 +924,12 @@ export function AltScannerModal({
             return so !== 0 ? so : b.score - a.score;
           }),
         })),
-        abortRef.current.signal);
+        abortRef.current.signal,
+        {
+          scanTag: `modal-manual:${scanInterval}:${direction}`,
+          busyPolicy: 'queue',
+          onStatus: (message) => setScanNotice(message),
+        });
     } finally {
       setScanning(false);
       setLastScanAt(Date.now());
@@ -992,6 +998,11 @@ export function AltScannerModal({
             }),
           })),
           abortRef.current.signal,
+          {
+            scanTag: `modal-auto:${scanInterval}:${direction}`,
+            busyPolicy: 'skip',
+            onStatus: (message) => setScanNotice(message),
+          },
         );
       } finally {
         if (!abortRef.current?.signal.aborted) {
@@ -1129,6 +1140,11 @@ export function AltScannerModal({
             </button>
           </div>
         </div>
+        {scanNotice && (
+          <div style={{ padding: '4px 16px', borderBottom: '1px solid #2a2e39', color: '#f0b90b', fontSize: '0.74rem', background: 'rgba(240,185,11,0.08)' }}>
+            {scanNotice}
+          </div>
+        )}
 
         {/* ── Controls ────────────────────────────────────────────────────── */}
         <div style={S.controls}>

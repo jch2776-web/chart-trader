@@ -12,10 +12,15 @@ export interface AltMeta {
   plannedSL: number | null;
   scanInterval: Interval;
   validUntilTime: number;
+  signalCloseTime?: number;
+  monitorStartTime?: number;
   slPrice: number;            // invalidation threshold (used by AltPositionMonitor)
   drawingsSnapshot: Drawing[];
   entrySource?: 'manual' | 'auto';
   timeStopEnabled?: boolean;
+  timeStopEnabledAtEntry?: boolean | null;
+  validUntilTimeAtEntry?: number | null;
+  scanCadenceMinutesAtEntry?: number | null;
   // Live ALT entry provenance/enrichment (optional for backward compatibility)
   liveEntryOrderId?: string;
   liveEntrySubmittedAt?: number;
@@ -78,6 +83,10 @@ export interface PaperHistoryEntry {
   plannedTP?: number | null;
   plannedSL?: number | null;
   entrySource?: 'manual' | 'auto';
+  candidateId?: string;
+  timeStopEnabledAtEntry?: boolean | null;
+  validUntilTimeAtEntry?: number | null;
+  scanCadenceMinutesAtEntry?: number | null;
 }
 
 export interface PaperState {
