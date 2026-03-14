@@ -64,9 +64,15 @@ function getViewedPosts(): Set<string> {
 // ── Sub-component: Comments section ──────────────────────────────────────────
 
 function CommentSection({ postId, currentUser }: { postId: string; currentUser: string }) {
-  const [comments, setComments] = useState<BoardComment[]>([]);
-  const [text, setText]         = useState('');
-  const [submitting, setSubmitting] = useState(false);
+  const [comments, setComments]       = useState<BoardComment[]>([]);
+  const [text, setText]               = useState('');
+  const [submitting, setSubmitting]   = useState(false);
+  // edit state
+  const [editingId, setEditingId]     = useState<string | null>(null);
+  const [editText, setEditText]       = useState('');
+  const [editSaving, setEditSaving]   = useState(false);
+  // delete confirm
+  const [deleteId, setDeleteId]       = useState<string | null>(null);
 
   useEffect(() => {
     const q = query(
@@ -79,6 +85,7 @@ function CommentSection({ postId, currentUser }: { postId: string; currentUser: 
         author:    d.data().author as string,
         text:      d.data().text as string,
         createdAt: (d.data().createdAt?.toMillis?.() ?? Date.now()) as number,
+        updatedAt: d.data().updatedAt?.toMillis?.() as number | undefined,
       })));
     });
   }, [postId]);
@@ -98,15 +105,79 @@ function CommentSection({ postId, currentUser }: { postId: string; currentUser: 
     }
   }, [text, submitting, postId, currentUser]);
 
+  const startEdit = (c: BoardComment) => { setEditingId(c.id); setEditText(c.text); };
+  const cancelEdit = () => { setEditingId(null); setEditText(''); };
+
+  const saveEdit = useCallback(async () => {
+    if (!editingId || !editText.trim() || editSaving) return;
+    setEditSaving(true);
+    try {
+      await updateDoc(doc(db, 'board_posts', postId, 'comments', editingId), {
+        text: editText.trim(), updatedAt: serverTimestamp(),
+      });
+      cancelEdit();
+    } finally {
+      setEditSaving(false);
+    }
+  }, [editingId, editText, editSaving, postId]);
+
+  const handleDelete = useCallback(async (commentId: string) => {
+    setDeleteId(null);
+    await deleteDoc(doc(db, 'board_posts', postId, 'comments', commentId));
+    await updateDoc(doc(db, 'board_posts', postId), { commentCount: increment(-1) });
+  }, [postId]);
+
   return (
     <div style={cs.wrap}>
       {comments.length > 0 && (
         <div style={cs.list}>
           {comments.map(c => (
             <div key={c.id} style={cs.comment}>
-              <span style={cs.commentAuthor}>👤 {c.author}</span>
-              <span style={cs.commentText}>{c.text}</span>
-              <span style={cs.commentDate}>{formatDate(c.createdAt)}</span>
+              {editingId === c.id ? (
+                /* ── Inline edit row ── */
+                <div style={cs.editRow}>
+                  <input
+                    style={cs.editInput}
+                    value={editText}
+                    onChange={e => setEditText(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveEdit(); }
+                      if (e.key === 'Escape') cancelEdit();
+                    }}
+                    maxLength={300}
+                    autoFocus
+                  />
+                  <button
+                    style={{ ...cs.editSaveBtn, opacity: (!editText.trim() || editSaving) ? 0.4 : 1 }}
+                    onClick={saveEdit}
+                    disabled={!editText.trim() || editSaving}
+                  >{editSaving ? '저장 중' : '저장'}</button>
+                  <button style={cs.editCancelBtn} onClick={cancelEdit}>취소</button>
+                </div>
+              ) : deleteId === c.id ? (
+                /* ── Delete confirm row ── */
+                <div style={cs.deleteConfirmRow}>
+                  <span style={cs.deleteConfirmMsg}>이 댓글을 삭제하시겠습니까?</span>
+                  <button style={cs.deleteConfirmBtn} onClick={() => handleDelete(c.id)}>삭제</button>
+                  <button style={cs.editCancelBtn} onClick={() => setDeleteId(null)}>취소</button>
+                </div>
+              ) : (
+                /* ── Normal view ── */
+                <>
+                  <span style={cs.commentAuthor}>👤 {c.author}</span>
+                  <span style={cs.commentText}>{c.text}</span>
+                  <div style={cs.commentMeta}>
+                    <span style={cs.commentDate}>{formatDate(c.createdAt)}</span>
+                    {c.updatedAt && <span style={cs.commentEdited}>(수정됨)</span>}
+                  </div>
+                  {c.author === currentUser && (
+                    <div style={cs.commentOwnerBtns}>
+                      <button style={cs.commentEditBtn} onClick={() => startEdit(c)}>수정</button>
+                      <button style={cs.commentDeleteBtn} onClick={() => setDeleteId(c.id)}>삭제</button>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           ))}
         </div>
@@ -133,15 +204,30 @@ function CommentSection({ postId, currentUser }: { postId: string; currentUser: 
 }
 
 const cs: Record<string, React.CSSProperties> = {
-  wrap:          { display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4 },
-  list:          { display: 'flex', flexDirection: 'column', gap: 6 },
-  comment:       { display: 'flex', alignItems: 'baseline', gap: 8, background: 'rgba(255,255,255,0.03)', borderRadius: 5, padding: '7px 10px', flexWrap: 'wrap' },
-  commentAuthor: { color: '#5e6673', fontSize: '0.75rem', fontWeight: 700, flexShrink: 0 },
-  commentText:   { color: '#c0c4cc', fontSize: '0.82rem', flex: 1, lineHeight: 1.5 },
-  commentDate:   { color: '#3a4558', fontSize: '0.68rem', fontFamily: 'monospace', flexShrink: 0 },
-  inputRow:      { display: 'flex', gap: 8 },
-  input:         { flex: 1, background: '#0d1520', border: '1px solid #2a2e39', borderRadius: 5, color: '#d1d4dc', fontSize: '0.85rem', padding: '7px 10px', outline: 'none', fontFamily: 'inherit' },
-  sendBtn:       { background: '#2a3550', border: '1px solid #3a4870', borderRadius: 5, color: '#7aa2e0', cursor: 'pointer', fontSize: '0.82rem', fontWeight: 600, padding: '7px 16px', fontFamily: 'inherit', flexShrink: 0 },
+  wrap:             { display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4 },
+  list:             { display: 'flex', flexDirection: 'column', gap: 6 },
+  comment:          { display: 'flex', alignItems: 'baseline', gap: 8, background: 'rgba(255,255,255,0.03)', borderRadius: 5, padding: '7px 10px', flexWrap: 'wrap' },
+  commentAuthor:    { color: '#5e6673', fontSize: '0.75rem', fontWeight: 700, flexShrink: 0 },
+  commentText:      { color: '#c0c4cc', fontSize: '0.82rem', flex: 1, lineHeight: 1.5, minWidth: 0 },
+  commentMeta:      { display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 },
+  commentDate:      { color: '#3a4558', fontSize: '0.68rem', fontFamily: 'monospace' },
+  commentEdited:    { color: '#3a4558', fontSize: '0.65rem', fontStyle: 'italic' },
+  commentOwnerBtns: { display: 'flex', gap: 4, flexShrink: 0, marginLeft: 2 },
+  commentEditBtn:   { background: 'none', border: '1px solid rgba(59,139,235,0.25)', borderRadius: 3, color: '#4a88d0', cursor: 'pointer', fontSize: '0.65rem', fontWeight: 600, padding: '1px 6px', fontFamily: 'inherit', opacity: 0.75 },
+  commentDeleteBtn: { background: 'none', border: '1px solid rgba(246,70,93,0.25)', borderRadius: 3, color: '#f6465d', cursor: 'pointer', fontSize: '0.65rem', fontWeight: 600, padding: '1px 6px', fontFamily: 'inherit', opacity: 0.7 },
+  // edit inline
+  editRow:          { display: 'flex', alignItems: 'center', gap: 6, width: '100%', flexWrap: 'wrap' },
+  editInput:        { flex: 1, minWidth: 120, background: '#0d1520', border: '1px solid #3a4870', borderRadius: 4, color: '#d1d4dc', fontSize: '0.82rem', padding: '5px 8px', outline: 'none', fontFamily: 'inherit' },
+  editSaveBtn:      { background: '#2a3550', border: '1px solid #3a4870', borderRadius: 4, color: '#7aa2e0', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 600, padding: '4px 12px', fontFamily: 'inherit', flexShrink: 0 },
+  editCancelBtn:    { background: 'none', border: '1px solid #2a3040', borderRadius: 4, color: '#5e6673', cursor: 'pointer', fontSize: '0.75rem', padding: '4px 10px', fontFamily: 'inherit', flexShrink: 0 },
+  // delete confirm inline
+  deleteConfirmRow: { display: 'flex', alignItems: 'center', gap: 8, width: '100%', flexWrap: 'wrap' },
+  deleteConfirmMsg: { color: '#f6465d', fontSize: '0.78rem', flex: 1 },
+  deleteConfirmBtn: { background: 'rgba(246,70,93,0.12)', border: '1px solid rgba(246,70,93,0.4)', borderRadius: 4, color: '#f6465d', cursor: 'pointer', fontSize: '0.75rem', fontWeight: 700, padding: '4px 12px', fontFamily: 'inherit', flexShrink: 0 },
+  // input row
+  inputRow:         { display: 'flex', gap: 8 },
+  input:            { flex: 1, background: '#0d1520', border: '1px solid #2a2e39', borderRadius: 5, color: '#d1d4dc', fontSize: '0.85rem', padding: '7px 10px', outline: 'none', fontFamily: 'inherit' },
+  sendBtn:          { background: '#2a3550', border: '1px solid #3a4870', borderRadius: 5, color: '#7aa2e0', cursor: 'pointer', fontSize: '0.82rem', fontWeight: 600, padding: '7px 16px', fontFamily: 'inherit', flexShrink: 0 },
 };
 
 // ── Sub-component: Confirm dialog ─────────────────────────────────────────────

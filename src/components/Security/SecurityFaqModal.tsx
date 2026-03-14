@@ -215,6 +215,41 @@ const ITEMS: FaqItem[] = [
     ),
   },
 
+  // ── 자동매매 실전 모드 ────────────────────────────────────────────────────
+  {
+    id: 'live-auto-risk',
+    category: 'sl',
+    risk: 'high',
+    q: '자동매매 실전 모드 활성화 시 어떤 위험이 있나요?',
+    a: (
+      <>
+        자동매매 실전 모드는 설정한 주기마다 <strong>실제 바이낸스 계좌에 시장가 주문을 자동 실행</strong>합니다.
+        다음 사항을 반드시 확인하세요:<br /><br />
+        <ul style={{ margin: '4px 0 0 16px', padding: 0, lineHeight: 1.9 }}>
+          <li><strong style={{ color: '#ef5350' }}>레버리지와 마진 설정을 보수적으로 유지하세요</strong> — 10x 이하, 잔고의 1~2% 리스크 권장</li>
+          <li>실전 자동매매 활성 중 앱을 새로고침하면 다음 주기까지 스캔이 중단됩니다</li>
+          <li>포지션은 최대 타임프레임별 2개 × 3개 인터벌 = 최대 6개까지 동시에 열릴 수 있습니다</li>
+          <li>ALT 타임스탑/SL 모니터는 앱이 열려 있을 때만 동작합니다 — 거래소 SL 주문 등록 여부를 반드시 확인하세요</li>
+          <li>Hedge 모드(양방향 포지션) 계좌에서는 실전 자동매매가 지원되지 않습니다</li>
+        </ul>
+      </>
+    ),
+  },
+  {
+    id: 'live-position-mode',
+    category: 'sl',
+    risk: 'medium',
+    q: '바이낸스 포지션 모드(단방향/헤지)에 따라 동작이 달라지나요?',
+    a: (
+      <>
+        네. 이 앱은 <strong>단방향(One-way) 포지션 모드</strong>를 기준으로 설계되었습니다.<br /><br />
+        <strong style={{ color: '#f0b90b' }}>Hedge(헤지) 모드</strong>에서는 ALT 실전 자동매매 진입이 차단되며,
+        오류 로그에 <code>헤지 모드 감지</code> 메시지가 표시됩니다.
+        바이낸스 선물 계정 설정에서 <strong>단방향 모드로 변경</strong>한 후 사용하세요.
+      </>
+    ),
+  },
+
   // ── 앱 기능 ────────────────────────────────────────────────────────────────
   {
     id: 'feature-sound',
@@ -574,6 +609,8 @@ const s: Record<string, React.CSSProperties> = {
     fontSize: '0.82rem',
     lineHeight: 1.75,
     padding: '12px 14px 14px',
+    overflowY: 'auto',
+    maxHeight: 320,
   },
   footer: {
     borderTop: '1px solid #2a2e39',

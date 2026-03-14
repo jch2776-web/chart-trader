@@ -10,7 +10,7 @@ import { useBinanceKlines } from './hooks/useBinanceKlines';
 import { useBinanceWS } from './hooks/useBinanceWS';
 import { useBinanceFutures, getPositionMode } from './hooks/useBinanceFutures';
 import type { PlacedTPSLOrderRef } from './hooks/useBinanceFutures';
-import { onBinanceGovernorEvent } from './lib/binanceRequestGovernor';
+import { onBinanceGovernorEvent, getBinanceGovernorSnapshot } from './lib/binanceRequestGovernor';
 import { usePaperTrading } from './hooks/usePaperTrading';
 import { useTickers } from './hooks/useTickers';
 import { use24hStats } from './hooks/use24hStats';
@@ -35,6 +35,7 @@ import { formatPrice } from './utils/priceFormat';
 import { BoardModal } from './components/Board/BoardModal';
 import { UserBoardModal } from './components/Board/UserBoardModal';
 import { DisclaimerModal, hasAgreedDisclaimer } from './components/Disclaimer/DisclaimerModal';
+import { SiteDisclaimerModal } from './components/Disclaimer/SiteDisclaimerModal';
 import { SecurityFaqModal } from './components/Security/SecurityFaqModal';
 import { AltScannerModal } from './components/AltScanner/AltScannerModal';
 import type { AltTradeParams } from './components/AltScanner/AltScannerModal';
@@ -47,6 +48,7 @@ import type { TimeStopRequestPayload } from './components/AltScanner/AltPosition
 import { TimeStopDecisionModal } from './components/AltScanner/TimeStopDecisionModal';
 import type { AltMeta } from './types/paperTrading';
 import { useAltAutoTrade } from './hooks/useAltAutoTrade';
+import type { ScanLifecycleEvent } from './hooks/useAltAutoTrade';
 import { useSoundPlayer } from './hooks/useSoundPlayer';
 import { SoundSettingsModal } from './components/SoundSettingsModal';
 import { AutoTradeSettingsModal, DEFAULT_AUTO_TRADE_SETTINGS, DEFAULT_LIVE_AUTO_TRADE_SETTINGS } from './components/AutoTradeSettingsModal';
@@ -372,6 +374,8 @@ function AppInner() {
     return () => window.clearInterval(id);
   }, [timeStopRequests]);
   const [showDisclaimer, setShowDisclaimer] = useState(() => !hasAgreedDisclaimer());
+  // Show site disclaimer every page load after the main disclaimer has been agreed
+  const [showSiteDisclaimer, setShowSiteDisclaimer] = useState(() => hasAgreedDisclaimer());
   const [multiPanelTickers, setMultiPanelTickers] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem(uk('multi-panels')) ?? '["BTCUSDT","ETHUSDT"]'); }
     catch { return ['BTCUSDT', 'ETHUSDT']; }
@@ -806,6 +810,7 @@ function AppInner() {
   const lastGovernorLogRef = useRef<Record<string, number>>({});
   const lastPollIntervalRef = useRef<number | null>(null);
   const lastCooldownRef = useRef<number>(0);
+  const [apiWeightUsed, setApiWeightUsed] = React.useState(0);
 
   React.useEffect(() => {
     const unsub = onBinanceGovernorEvent((event) => {
@@ -828,9 +833,19 @@ function AppInner() {
       } else if (event.type === 'delayed' && shouldLog(`delay:${event.scope}`, 8000)) {
         addLog('info', `[요청보호] ${event.scope} 요청 ${Math.round(event.waitMs)}ms 지연 처리`);
       }
+      // Update API weight gauge on every governor event
+      setApiWeightUsed(getBinanceGovernorSnapshot().usedWeight1m);
     });
     return () => unsub();
   }, [addLog]);
+
+  // Poll API weight every 5s even when no requests are firing
+  React.useEffect(() => {
+    const id = window.setInterval(() => {
+      setApiWeightUsed(getBinanceGovernorSnapshot().usedWeight1m);
+    }, 5000);
+    return () => window.clearInterval(id);
+  }, []);
 
   React.useEffect(() => {
     if (!binanceApiKey || !binanceApiSecret) return;
@@ -904,6 +919,7 @@ function AppInner() {
     });
   }, [futuresMarginBalance, binanceApiKey, binanceApiSecret]);
   const liveTrackedRef = useRef<Record<string, LiveTrackedAltPosition>>({});
+  const manualLiveTrackedRef = useRef<Record<string, LiveTrackedAltPosition>>({});
   const liveCloseReasonHintRef = useRef<Record<string, LiveCloseReason>>({});
   const liveEntryFillRetryRef = useRef<Record<string, LiveEntryFillRetryState>>({});
   const liveHistoryEnrichQueueRef = useRef<Record<string, LiveHistoryEnrichTask>>({});
@@ -1647,6 +1663,19 @@ function AppInner() {
     }
   }, [handleAltPaperTrade, binanceApiKey, binanceApiSecret, addLog]);
 
+  const handleScanEvent = React.useCallback((event: ScanLifecycleEvent) => {
+    const ivLabel = (iv: string) =>
+      iv === '15m' ? '15분' : iv === '1h' ? '1시간' : iv === '4h' ? '4시간' : '일봉';
+    if (event.type === 'interval_start') {
+      speakSound(`${ivLabel(event.interval)} 타임프레임 스캔 시작`, { lang: 'ko-KR', rate: 1.1, pitch: 1.0 });
+    } else if (event.type === 'interval_done') {
+      const voice = event.entered > 0
+        ? `${ivLabel(event.interval)} 스캔 완료, ${event.entered}개 진입`
+        : `${ivLabel(event.interval)} 스캔 완료`;
+      speakSound(voice, { lang: 'ko-KR', rate: 1.1, pitch: 1.0 });
+    }
+  }, [speakSound]);
+
   const altAutoTrade = useAltAutoTrade({
     symbols: tickers.map(t => t.symbol),
     onEnterTrade: handleAutoTradeScan,
@@ -1654,6 +1683,7 @@ function AppInner() {
       const mappedType: ActivityLog['type'] = type === 'error' ? 'error' : type === 'success' ? 'order' : 'info';
       addLog(mappedType, `[자동매매] ${msg}`);
     },
+    onScanEvent: handleScanEvent,
     enterLabel: autoTradeMode === 'live' ? '실전진입' : '모의진입',
     scanIntervals: (autoTradeMode === 'live' ? liveAutoTradeSettings : paperAutoTradeSettings).scanIntervals,
     cadenceMinutes: (autoTradeMode === 'live' ? liveAutoTradeSettings : paperAutoTradeSettings).scanCadenceMinutes,
@@ -1985,17 +2015,29 @@ function AppInner() {
       validUntilTime: params.validUntilTime,
       requestAt: requestStartedAt,
     });
-    addLog('info', `[ALT실전] 진입 요청 시작 — ${side} ${qty} ${params.symbol} (fill 우선: MARKET)`);
+    const liveOrderType = liveAutoTradeSettingsRef.current.liveEntryOrderType ?? 'MARKET';
+    const isLimitIoc = liveOrderType === 'LIMIT_IOC';
+    addLog('info', `[ALT실전] 진입 요청 시작 — ${side} ${qty} ${params.symbol} (${isLimitIoc ? `지정가 IOC @ ${effectiveEntryPrice}` : '시장가 MARKET'})`);
 
     try {
-      await futuresPlaceOrder(side, effectiveEntryPrice, qty, leverage, liveMarginType, false, params.symbol, 'GTC', {
-        orderType: 'MARKET',
-        onAck: (ack) => {
-          ackOrderId = ack.orderId || undefined;
-          ackStatusRaw = ack.status;
-          ackTime = ack.time;
+      await futuresPlaceOrder(
+        side,
+        effectiveEntryPrice,
+        qty,
+        leverage,
+        liveMarginType,
+        false,
+        params.symbol,
+        isLimitIoc ? 'IOC' : 'GTC',
+        {
+          ...(isLimitIoc ? {} : { orderType: 'MARKET' as const }),
+          onAck: (ack) => {
+            ackOrderId = ack.orderId || undefined;
+            ackStatusRaw = ack.status;
+            ackTime = ack.time;
+          },
         },
-      });
+      );
 
       const ackStatus = ackStatusRaw ?? 'UNKNOWN';
       const submittedAt = ackTime ?? Date.now();
@@ -2576,7 +2618,7 @@ function AppInner() {
       return;
     }
     if (req.state !== 'pending') return;
-    if (req.eval.status !== 'done' || req.eval.tightenOk !== true || req.eval.flipSuggested === true || req.eval.newSl == null) {
+    if (req.eval.status !== 'done' || req.eval.flipSuggested === true) {
       setTimeStopRequests(prev => {
         const cur = prev[reqKey];
         if (!cur) return prev;
@@ -2590,7 +2632,10 @@ function AppInner() {
       });
       return;
     }
-    const tightenedSl = req.eval.newSl;
+    // tightenOk=true: SL can be improved → update SL on extend
+    // tightenOk=false: just extend the deadline without touching SL
+    const doUpdateSl = req.eval.tightenOk === true && req.eval.newSl != null;
+    const tightenedSl = doUpdateSl ? req.eval.newSl! : req.currentSl;
 
     setTimeStopRequests(prev => {
       const cur = prev[reqKey];
@@ -2616,7 +2661,7 @@ function AppInner() {
           plannedSL: tightenedSl,
           ...(applyTp && req.eval.newTp != null ? { plannedTP: req.eval.newTp } : {}),
         });
-        addLog('info', `[ALT모의] ${req.symbol} SL 갱신(${tightenedSl.toFixed(6)}) 후 ${extendBars}봉 연장`);
+        addLog('info', `[ALT모의] ${req.symbol} ${doUpdateSl ? `SL 갱신(${tightenedSl.toFixed(6)}) 후 ` : ''}${extendBars}봉 연장`);
         success = true;
       } catch (e) {
         failureMessage = e instanceof Error ? e.message : 'unknown';
@@ -2685,7 +2730,7 @@ function AppInner() {
           };
         });
 
-        addLog('info', `[ALT실전] ${req.symbol} SL 갱신(${tightenedSl.toFixed(6)}) 후 ${extendBars}봉 연장`);
+        addLog('info', `[ALT실전] ${req.symbol} ${doUpdateSl ? `SL 갱신(${tightenedSl.toFixed(6)}) 후 ` : ''}${extendBars}봉 연장`);
         success = true;
       } catch (e) {
         failureMessage = e instanceof Error ? e.message : 'unknown';
@@ -3020,8 +3065,15 @@ function AppInner() {
         (meta.direction === 'long' ? p.positionAmt > 0 : p.positionAmt < 0),
       );
       if (pos) {
-        const expectedMonitorStart = pos.entryTime ?? Date.now();
-        if (!meta.monitorStartTime || meta.monitorStartTime < expectedMonitorStart) {
+        const expectedMonitorStart =
+          pos.entryTime
+          ?? meta.monitorStartTime
+          ?? meta.liveEntryTime
+          ?? meta.liveEntrySubmittedAt
+          ?? snapTracked?.entryTime
+          ?? nextTracked[key]?.entryTime
+          ?? null;
+        if (expectedMonitorStart != null && (!meta.monitorStartTime || meta.monitorStartTime < expectedMonitorStart)) {
           monitorStartPatch[key] = expectedMonitorStart;
         }
         nextTracked[key] = {
@@ -3176,6 +3228,81 @@ function AppInner() {
       });
     }
   }, [futuresAllPositions, liveAltMetaMap, liveCloseMetaSnapshotMap, inferLiveCloseReason, inferLiveCloseReasonFromOrderEvidence, inferLiveCloseReasonFromClientSlEvidence, cleanupAltOrphanOrders, enrichLiveHistoryRowFromTrades, removeAltManagedDrawingsForCandidate, appendAltLifecycleDebug]);
+
+  // ── Manual (non-ALT) live position history tracking ─────────────────────────
+  React.useEffect(() => {
+    if (!binanceApiKey || !binanceApiSecret) return;
+    const altKeys = new Set<string>([
+      ...Object.keys(liveAltMetaMap),
+      ...Object.keys(liveCloseMetaSnapshotMap),
+    ]);
+    const nextManual = { ...manualLiveTrackedRef.current };
+    const appended: LiveTradeHistoryEntry[] = [];
+
+    // Build set of currently open non-ALT positions
+    const openNonAltKeys = new Set<string>();
+    for (const pos of futuresAllPositions) {
+      if (Math.abs(pos.positionAmt) === 0) continue;
+      const direction: 'long' | 'short' = pos.positionAmt > 0 ? 'long' : 'short';
+      const key = `${pos.symbol}_${direction}`;
+      if (altKeys.has(key)) continue; // ALT-managed
+      openNonAltKeys.add(key);
+      nextManual[key] = {
+        symbol: pos.symbol,
+        direction,
+        qty: Math.abs(pos.positionAmt),
+        entryPrice: pos.entryPrice,
+        markPrice: pos.markPrice,
+        leverage: pos.leverage,
+        positionSide: pos.positionSide,
+        entryTime: pos.entryTime ?? nextManual[key]?.entryTime,
+        seenOpen: true,
+      };
+    }
+
+    // Detect closed positions
+    for (const [key, tracked] of Object.entries(manualLiveTrackedRef.current)) {
+      if (!tracked.seenOpen) continue;
+      if (openNonAltKeys.has(key)) continue; // still open
+      if (altKeys.has(key)) {
+        // Became ALT-managed — stop tracking here
+        delete nextManual[key];
+        continue;
+      }
+      const exitTime = Date.now();
+      const exitPrice = tracked.markPrice > 0
+        ? tracked.markPrice
+        : (markPricesMapRef.current[tracked.symbol] ?? null);
+      const closeReason: LiveCloseReason = liveCloseReasonHintRef.current[key] ?? 'manual';
+      const pnl = exitPrice != null
+        ? parseFloat((((tracked.direction === 'long' ? exitPrice - tracked.entryPrice : tracked.entryPrice - exitPrice) * tracked.qty)).toFixed(8))
+        : null;
+      appended.push({
+        id: uid(),
+        symbol: tracked.symbol,
+        positionSide: tracked.direction === 'long' ? 'LONG' : 'SHORT',
+        qty: tracked.qty,
+        leverage: tracked.leverage,
+        entryPrice: tracked.entryPrice,
+        exitPrice,
+        pnl,
+        fees: null,
+        entryTime: tracked.entryTime ?? null,
+        exitTime,
+        closeReason,
+        isAltTrade: false,
+        entrySource: 'manual',
+      });
+      delete nextManual[key];
+      delete liveCloseReasonHintRef.current[key];
+    }
+
+    manualLiveTrackedRef.current = nextManual;
+
+    if (appended.length > 0) {
+      setLiveHistory(prev => [...appended, ...prev].slice(0, 1000));
+    }
+  }, [futuresAllPositions, liveAltMetaMap, liveCloseMetaSnapshotMap, binanceApiKey, binanceApiSecret]);
 
   React.useEffect(() => {
     const id = window.setInterval(() => {
@@ -3492,6 +3619,7 @@ function AppInner() {
         onOpenAutoTradeSettings={() => setShowAutoTradeSettings(true)}
         isAutoTradeActive={altAutoTrade.isActive}
         autoTradeScanning={altAutoTrade.scanning}
+        autoScanProgress={altAutoTrade.scanProgress ?? undefined}
         onToggleAutoTrade={() => { void handleToggleAutoTrade(); }}
         onTriggerAutoTradeNow={() => { void handleTriggerAutoTradeNow(); }}
         autoTradeMode={autoTradeMode}
@@ -3502,6 +3630,16 @@ function AppInner() {
         onToggleMobilePanel={(panel) => setMobilePanel(p => p === panel ? 'none' : panel)}
         errorLogs={errorLogs}
         onClearErrors={clearErrors}
+        liveBalance={futuresBalance > 0 ? futuresBalance : undefined}
+        liveMarginBalance={futuresMarginBalance > 0 ? futuresMarginBalance : undefined}
+        liveUnrealizedPnl={futuresAllPositions.length > 0 ? futuresAllPositions.reduce((s, p) => s + (p.unrealizedProfit ?? 0), 0) : undefined}
+        paperBalance={paperTrading.balance}
+        paperUnrealizedPnl={paperTrading.positions.length > 0 ? paperTrading.positions.reduce((s, p) => {
+          const mark = markPricesMapRef.current[p.symbol] ?? p.entryPrice;
+          const pnl = (p.positionSide === 'LONG' ? mark - p.entryPrice : p.entryPrice - mark) * Math.abs(p.positionAmt);
+          return s + pnl;
+        }, 0) : undefined}
+        apiWeightUsed={apiWeightUsed}
       />
       {autoTradeLeaderNotice && (
         <div style={styles.autoTradeLockNotice}>
@@ -3549,7 +3687,14 @@ function AppInner() {
       )}
 
       {showDisclaimer && (
-        <DisclaimerModal onAgree={() => setShowDisclaimer(false)} />
+        <DisclaimerModal onAgree={() => {
+          setShowDisclaimer(false);
+          setShowSiteDisclaimer(true);
+        }} />
+      )}
+
+      {!showDisclaimer && showSiteDisclaimer && (
+        <SiteDisclaimerModal onConfirm={() => setShowSiteDisclaimer(false)} />
       )}
 
       {showSecurityFaq && (

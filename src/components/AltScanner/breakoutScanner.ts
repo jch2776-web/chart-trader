@@ -604,11 +604,13 @@ export async function runBreakoutScan(
   }
 
   const baseConcurrency = Math.max(1, options?.concurrency ?? 3);
-  const baseDelayMs = Math.max(0, options?.delayMs ?? 350);
+  const baseDelayMs = Math.max(0, options?.delayMs ?? 200);
+  // Governor (SOFT_WEIGHT_LIMIT=1800/min) handles throttling automatically.
+  // These caps prevent burst overuse before governor kicks in.
   const loadAdaptive =
-    total >= 220 ? { c: 1, d: 900 } :
-    total >= 120 ? { c: 2, d: 650 } :
-    total >= 70 ? { c: 2, d: 500 } :
+    total >= 220 ? { c: 5, d: 200 } :
+    total >= 120 ? { c: 5, d: 200 } :
+    total >= 70  ? { c: 4, d: 150 } :
     { c: baseConcurrency, d: baseDelayMs };
   const governor = getBinanceGovernorSnapshot();
   const concurrency = Math.max(1, Math.min(loadAdaptive.c, governor.scanConcurrencyCap));

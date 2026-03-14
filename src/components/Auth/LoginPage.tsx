@@ -29,7 +29,7 @@ export function LoginPage() {
           <span style={styles.logoMark}>◈</span>
           <span style={styles.logoText}>Chart Trader</span>
         </div>
-        <div style={styles.subtitle}>개인화된 바이낸스 선물 차트</div>
+        <div style={styles.subtitle}>자동화된 트레이딩 도구</div>
 
         {/* Tabs */}
         <div style={styles.tabs}>
@@ -97,8 +97,8 @@ export function LoginPage() {
 
         {/* Notice */}
         <div style={styles.notice}>
-          ⚠ 계정 정보 및 모든 설정은 이 기기의 브라우저 localStorage에만 저장됩니다.
-          공용 PC에서는 사용 후 반드시 로그아웃하세요.
+          ⚠ 본 사이트는 Binance 거래소와 무관한 독립 트레이딩 도구입니다. 거래의 모든 책임은 이용자 본인에게 있으며, 본 사이트는 참고 목적으로만 사용하십시오.<br /><br />
+          계정 정보 및 모든 설정은 이 기기의 브라우저 localStorage에만 저장됩니다. 공용 PC에서는 사용 후 반드시 로그아웃하세요.
         </div>
       </div>
     </div>
@@ -237,7 +237,7 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 4,
     color: '#7a6b2e',
     fontSize: '0.72rem',
-    lineHeight: 1.6,
+    lineHeight: 1.65,
     padding: '8px 10px',
     marginTop: 2,
   },

@@ -13,6 +13,7 @@ export interface AutoTradeSettings {
   scanCadenceMinutes?: number;
   timeStopEnabled?: boolean;
   voiceAlertEnabled?: boolean;
+  liveEntryOrderType?: 'MARKET' | 'LIMIT_IOC';
 }
 
 const CADENCE_PRESETS = [15, 30, 60, 120, 240] as const;
@@ -60,6 +61,7 @@ export const DEFAULT_LIVE_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
   scanCadenceMinutes: DEFAULT_SCAN_CADENCE_MINUTES,
   timeStopEnabled: true,
   voiceAlertEnabled: true,
+  liveEntryOrderType: 'MARKET',
 };
 
 interface Props {
@@ -224,6 +226,33 @@ function SettingsEditor({
         </span>
       </div>
 
+      {/* Scan schedule reference */}
+      <div style={{ background: 'rgba(59,139,235,0.05)', border: '1px solid rgba(59,139,235,0.1)', borderRadius: 7, padding: '10px 12px', marginTop: -6 }}>
+        <div style={{ fontSize: '0.62rem', color: '#4a7fc1', fontWeight: 700, marginBottom: 7, letterSpacing: '0.04em', textTransform: 'uppercase' as const }}>스캔 실행 예상 일정</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {ALL_SCAN_TFS.filter(tf => draft.scanIntervals.includes(tf)).map(tf => {
+            const tfMin = tfToMinutes(tf);
+            const effectiveMin = Math.max(tfMin, cadence);
+            const perDay = Math.round(1440 / effectiveMin);
+            const label = effectiveMin >= 1440 ? '매일 1회' : effectiveMin >= 60 ? `${effectiveMin / 60}h마다` : `${effectiveMin}m마다`;
+            const barPct = Math.min(100, (perDay / 96) * 100);
+            return (
+              <div key={tf} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: '0.67rem', color: '#8a9ab5', width: 28, flexShrink: 0, fontWeight: 600 }}>{tf}</span>
+                <div style={{ flex: 1, height: 6, background: 'rgba(255,255,255,0.06)', borderRadius: 3, overflow: 'hidden' }}>
+                  <div style={{ height: '100%', width: `${barPct}%`, background: isLive ? '#f6465d' : '#0ecb81', borderRadius: 3, opacity: 0.75 }} />
+                </div>
+                <span style={{ fontSize: '0.62rem', color: '#5d7280', width: 56, textAlign: 'right' as const, flexShrink: 0 }}>{label}</span>
+                <span style={{ fontSize: '0.62rem', color: '#3d5060', width: 38, textAlign: 'right' as const, flexShrink: 0 }}>{perDay}회/일</span>
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ fontSize: '0.59rem', color: '#3d5060', marginTop: 8, lineHeight: 1.55 }}>
+          실제 스캔은 무인 주기·TF 경계가 겹칠 때만 실행됩니다. 15m 설정이라도 주기가 1h이면 매시 정각에만 스캔합니다.
+        </div>
+      </div>
+
       {/* Time-stop toggle (unattended auto-trade scope) */}
       <div style={s.fieldRow}>
         <label style={s.label}>타임스탑</label>
@@ -242,12 +271,36 @@ function SettingsEditor({
           </button>
         </div>
         <span style={s.hint}>
-          OFF면 자동매매 진입 포지션의 시간 만료 청산/프롬프트를 비활성화합니다.
+          ON: 유효시간 5분 전 음성 알림 → 만료 시 결정 모달 팝업 (15분 내 미응답 시 자동청산).
         </span>
         <span style={s.hint}>
-          구조적 무효화(SL 기반) 감시는 계속 동작합니다.
+          OFF: 시간 만료 후에도 자동청산하지 않습니다. 구조적 무효화(SL 기반) 감시는 ON/OFF 무관하게 항상 동작합니다.
+        </span>
+        <span style={s.hint}>
+          ※ 설정은 저장 후 새로 진입하는 포지션부터 적용됩니다.
         </span>
       </div>
+
+      {/* Live entry order type — only shown for live mode */}
+      {isLive && (
+        <div style={s.fieldRow}>
+          <label style={s.label}>실전 진입 주문 방식</label>
+          <div style={{ display: 'flex', gap: 6 }}>
+            {(['MARKET', 'LIMIT_IOC'] as const).map(t => (
+              <button
+                key={t}
+                style={{ ...s.toggleChip, ...((draft.liveEntryOrderType ?? 'MARKET') === t ? s.toggleChipActiveLive : {}) }}
+                onClick={() => set('liveEntryOrderType', t)}
+              >
+                {t === 'MARKET' ? '시장가(Market)' : '지정가 IOC'}
+              </button>
+            ))}
+          </div>
+          <span style={s.hint}>
+            시장가: 즉시 체결 (슬리피지 있음) · 지정가 IOC: 스캔 시점 가격으로 즉시 체결 시도, 미체결 시 자동 취소 (슬리피지 없음, 진입 실패 가능)
+          </span>
+        </div>
+      )}
 
       {/* Voice alert toggle (unattended auto-trade scope) */}
       <div style={s.fieldRow}>

@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect, useMemo, useId } from 'react';
+import React, { useRef, useState, useEffect, useMemo } from 'react';
 import type { FuturesPosition, FuturesOrder, LiveTradeHistoryEntry } from '../../types/futures';
 import type { ClientSlMap } from '../../hooks/useBinanceFutures';
 import type { PaperHistoryEntry, PaperPosition, PaperOrder, AltMeta } from '../../types/paperTrading';
@@ -196,409 +196,73 @@ function summarizeRows(rows: UnifiedHistoryRow[]): MetricSummary {
 }
 
 
-function AnalyticsSummaryCards({ summary }: { summary: MetricSummary }) {
-  const pnlColor2 = summary.totalPnl >= 0 ? '#0ecb81' : '#f6465d';
-  const chips = [
-    { label: '거래수', value: `${summary.count}`, color: '#d4d9e1' },
-    { label: '승률', value: `${summary.winRate.toFixed(1)}%`, color: '#d4d9e1' },
-    { label: '총 손익', value: `${summary.totalPnl >= 0 ? '+' : ''}${summary.totalPnl.toFixed(2)} USDT`, color: pnlColor2 },
-    { label: '평균 손익', value: `${summary.avgPnl >= 0 ? '+' : ''}${summary.avgPnl.toFixed(2)} USDT`, color: summary.avgPnl >= 0 ? '#0ecb81' : '#f6465d' },
-    { label: '평균 ROI', value: summary.avgRoi != null ? `${summary.avgRoi >= 0 ? '+' : ''}${summary.avgRoi.toFixed(2)}%` : '—', color: '#d4d9e1' },
-  ];
-  return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 8, marginBottom: 10 }}>
-      {chips.map(chip => (
-        <div key={chip.label} style={{ border: '1px solid rgba(255,255,255,0.08)', borderRadius: 10, padding: '8px 10px', background: 'rgba(255,255,255,0.02)' }}>
-          <div style={{ fontSize: '0.67rem', color: '#6f7c90', marginBottom: 3, letterSpacing: '0.02em' }}>{chip.label}</div>
-          <div style={{ fontSize: '0.83rem', color: chip.color, fontWeight: 700, fontFamily: '"SF Mono",Consolas,monospace' }}>{chip.value}</div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 interface AnalyticsGroupRow extends MetricSummary {
   key: string;
   label: string;
   color?: string;
 }
 
-interface AnalyticsPieSlice {
-  key: string;
-  label: string;
-  value: number;
-  color: string;
-}
-
-function piePoint(cx: number, cy: number, radius: number, angleDeg: number) {
-  const rad = (angleDeg - 90) * (Math.PI / 180);
-  return { x: cx + radius * Math.cos(rad), y: cy + radius * Math.sin(rad) };
-}
-
-function pieSlicePath(
-  cx: number,
-  cy: number,
-  radius: number,
-  startDeg: number,
-  endDeg: number,
-  offsetX: number,
-  offsetY: number,
-) {
-  const cX = cx + offsetX;
-  const cY = cy + offsetY;
-  const start = piePoint(cX, cY, radius, startDeg);
-  const end = piePoint(cX, cY, radius, endDeg);
-  const largeArc = endDeg - startDeg > 180 ? 1 : 0;
-  return `M ${cX} ${cY} L ${start.x} ${start.y} A ${radius} ${radius} 0 ${largeArc} 1 ${end.x} ${end.y} Z`;
-}
-
-function withAlpha(color: string, alphaHex: string) {
-  return color.startsWith('#') && (color.length === 7 || color.length === 4)
-    ? `${color}${alphaHex}`
-    : color;
-}
-
 function AnalyticsGroupBars({
-  title,
   rows,
   emptyText = '데이터 없음',
 }: {
-  title: string;
   rows: AnalyticsGroupRow[];
   emptyText?: string;
 }) {
   const [entered, setEntered] = useState(false);
   useEffect(() => {
-    const id = requestAnimationFrame(() => setEntered(true));
+    setEntered(false);
+    const id = requestAnimationFrame(() => {
+      requestAnimationFrame(() => setEntered(true));
+    });
     return () => cancelAnimationFrame(id);
-  }, []);
+  }, [rows]);
   const maxAbs = Math.max(1, ...rows.map(r => Math.abs(r.totalPnl)));
   return (
-    <div style={{ border: '1px solid rgba(151,167,191,0.2)', borderRadius: 12, padding: '10px 12px', background: 'rgba(20,28,41,0.52)', backdropFilter: 'blur(8px)' }}>
-      <div style={{ color: '#b8c4d8', fontSize: '0.77rem', marginBottom: 8, fontWeight: 600, letterSpacing: '0.01em' }}>{title}</div>
+    <div style={{ borderRadius: 10, padding: '8px 10px', background: 'rgba(10,16,28,0.55)', border: '1px solid rgba(255,255,255,0.06)' }}>
       {rows.length === 0 ? (
         <div style={{ color: '#5d6776', fontSize: '0.72rem', minHeight: 28 }}>{emptyText}</div>
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
           {rows.map((row, idx) => {
             const ratio = Math.abs(row.totalPnl) / maxAbs;
-            const targetWidth = Math.max(2, ratio * 48);
+            const targetWidth = Math.max(3, ratio * 46);
             const pos = row.totalPnl >= 0;
+            const accent = pos ? '#0ecb81' : '#f6465d';
             return (
-              <div key={row.key} style={{ display: 'grid', gridTemplateColumns: '86px 1fr 126px', gap: 8, alignItems: 'center' }}>
-                <span style={{ color: row.color ?? '#c9d0db', fontSize: '0.72rem' }}>{row.label}</span>
-                <div style={{ position: 'relative', height: 14, borderRadius: 8, background: '#141b26', border: '1px solid #1b2635' }}>
-                  <div style={{ position: 'absolute', top: 0, bottom: 0, left: '50%', width: 1, background: '#2f3d51' }} />
+              <div key={row.key} style={{ display: 'grid', gridTemplateColumns: '72px 1fr auto', gap: 7, alignItems: 'center' }}>
+                <span style={{ color: row.color ?? '#c9d0db', fontSize: '0.71rem', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.label}</span>
+                <div style={{ position: 'relative', height: 12, borderRadius: 6, background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.06)', overflow: 'hidden' }}>
+                  <div style={{ position: 'absolute', top: 0, bottom: 0, left: '50%', width: 1, background: 'rgba(255,255,255,0.12)', zIndex: 1 }} />
                   <div
                     style={{
                       position: 'absolute',
-                      top: 1,
-                      bottom: 1,
+                      top: 0, bottom: 0,
                       left: pos ? '50%' : undefined,
                       right: pos ? undefined : '50%',
-                      width: `${entered ? targetWidth : 0}%`,
-                      background: pos ? 'linear-gradient(90deg,#0ecb81,#0ecb8166)' : 'linear-gradient(90deg,#f6465d66,#f6465d)',
-                      borderRadius: 7,
-                      transition: 'width 620ms cubic-bezier(0.22,1,0.36,1)',
-                      transitionDelay: `${idx * 70}ms`,
+                      width: entered ? `${targetWidth}%` : '0%',
+                      background: pos
+                        ? `linear-gradient(90deg, rgba(14,203,129,0.9), rgba(14,203,129,0.35))`
+                        : `linear-gradient(270deg, rgba(246,70,93,0.9), rgba(246,70,93,0.35))`,
+                      boxShadow: entered ? `0 0 8px ${accent}44` : 'none',
+                      borderRadius: 6,
+                      transition: `width 700ms cubic-bezier(0.16,1,0.3,1) ${idx * 80}ms, box-shadow 400ms ease ${idx * 80 + 300}ms`,
                     }}
                   />
                 </div>
-                <span style={{ fontSize: '0.7rem', color: '#9aa4b5', textAlign: 'right', fontFamily: '"SF Mono",Consolas,monospace', opacity: entered ? 1 : 0.55, transition: 'opacity 360ms ease', transitionDelay: `${idx * 70 + 80}ms` }}>
-                  {row.totalPnl >= 0 ? '+' : ''}{row.totalPnl.toFixed(1)} | {row.winRate.toFixed(0)}%
+                <span style={{
+                  fontSize: '0.67rem', color: pos ? '#0ecb81' : '#f6465d',
+                  fontFamily: '"SF Mono",Consolas,monospace', fontWeight: 700,
+                  opacity: entered ? 1 : 0,
+                  transition: `opacity 400ms ease ${idx * 80 + 200}ms`,
+                  minWidth: 90, textAlign: 'right',
+                }}>
+                  {row.totalPnl >= 0 ? '+' : ''}{row.totalPnl.toFixed(1)} · {row.winRate.toFixed(0)}%
                 </span>
               </div>
             );
           })}
         </div>
-      )}
-    </div>
-  );
-}
-
-function AnalyticsPieCard({
-  title,
-  slices,
-  emptyText = '데이터 없음',
-}: {
-  title: string;
-  slices: AnalyticsPieSlice[];
-  emptyText?: string;
-}) {
-  const [entered, setEntered] = useState(false);
-  const gradientPrefix = useId().replace(/[:]/g, '');
-  useEffect(() => {
-    const id = requestAnimationFrame(() => setEntered(true));
-    return () => cancelAnimationFrame(id);
-  }, []);
-  const total = slices.reduce((s, x) => s + x.value, 0);
-  const visibleSlices = slices.filter(x => x.value > 0);
-  const chartSize = 192;
-  const cx = chartSize / 2;
-  const cy = chartSize / 2;
-  const radius = 50;
-  const geometry = useMemo(() => {
-    let start = -90;
-    return visibleSlices.map(slice => {
-      const ratio = slice.value / Math.max(total, 1);
-      const span = ratio * 360;
-      const end = start + span;
-      const mid = start + span / 2;
-      const explode = Math.max(4, Math.min(8, span * 0.045));
-      const rad = (mid - 90) * (Math.PI / 180);
-      const ox = Math.cos(rad) * explode;
-      const oy = Math.sin(rad) * explode;
-      const labelPos = piePoint(cx + ox, cy + oy, radius * 0.56, mid);
-      const shape = {
-        ...slice,
-        gradId: `${gradientPrefix}-${slice.key}`,
-        pct: ratio * 100,
-        path: pieSlicePath(cx, cy, radius, start, end, ox, oy),
-        innerX: labelPos.x,
-        innerY: labelPos.y,
-      };
-      start = end;
-      return shape;
-    });
-  }, [visibleSlices, total, cx, cy, radius, gradientPrefix]);
-
-  return (
-    <div style={{ border: '1px solid rgba(151,167,191,0.2)', borderRadius: 12, padding: '10px 12px', background: 'linear-gradient(180deg, rgba(31,44,62,0.34), rgba(20,28,41,0.44))', backdropFilter: 'blur(8px)' }}>
-      <div style={{ color: '#b8c4d8', fontSize: '0.77rem', marginBottom: 8, fontWeight: 600, letterSpacing: '0.01em' }}>{title}</div>
-      {total <= 0 ? (
-        <div style={{ color: '#5d6776', fontSize: '0.72rem' }}>{emptyText}</div>
-      ) : (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, overflow: 'visible' }}>
-          <div style={{ width: chartSize, height: chartSize, flexShrink: 0 }}>
-            <svg
-              width={chartSize}
-              height={chartSize}
-              viewBox={`0 0 ${chartSize} ${chartSize}`}
-              style={{
-                transform: entered ? 'scale(1)' : 'scale(0.92)',
-                opacity: entered ? 1 : 0.72,
-                transition: 'transform 360ms cubic-bezier(0.22,1,0.36,1), opacity 280ms ease',
-                overflow: 'visible',
-              }}
-            >
-              <defs>
-                {geometry.map(g => (
-                  <linearGradient key={g.gradId} id={g.gradId} x1="0%" y1="0%" x2="100%" y2="100%">
-                    <stop offset="0%" stopColor={withAlpha(g.color, 'f0')} />
-                    <stop offset="55%" stopColor={withAlpha(g.color, '99')} />
-                    <stop offset="100%" stopColor={withAlpha(g.color, '3a')} />
-                  </linearGradient>
-                ))}
-              </defs>
-              {geometry.map(g => (
-                <g key={g.key}>
-                  <path
-                    d={g.path}
-                    fill={`url(#${g.gradId})`}
-                    stroke={withAlpha('#dbe8ff', '7a')}
-                    strokeWidth={1.4}
-                    style={{ filter: `drop-shadow(0 0 10px ${withAlpha(g.color, '77')})` }}
-                  />
-                  <text
-                    x={g.innerX}
-                    y={g.innerY}
-                    fill="#eef5ff"
-                    fontSize={11}
-                    fontWeight={700}
-                    textAnchor="middle"
-                    dominantBaseline="middle"
-                    style={{ textShadow: '0 0 6px rgba(12,19,33,0.55)' }}
-                  >
-                    {g.pct.toFixed(0)}%
-                  </text>
-                </g>
-              ))}
-            </svg>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, width: '100%' }}>
-            {visibleSlices.map(x => (
-              <div key={x.key} style={{ display: 'grid', gridTemplateColumns: '8px 1fr auto', alignItems: 'center', gap: 6, fontSize: '0.71rem' }}>
-                <span style={{ width: 8, height: 8, borderRadius: '50%', background: x.color }} />
-                <span style={{ color: '#c9d0db' }}>{x.label}</span>
-                <span style={{ color: '#9aa4b5' }}>{x.value} ({((x.value / total) * 100).toFixed(0)}%)</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function AltAnalyticsSection({ rows, mode }: { rows: UnifiedHistoryRow[]; mode: 'paper' | 'live' }) {
-  const [revealed, setRevealed] = useState(false);
-  useEffect(() => {
-    const id = requestAnimationFrame(() => setRevealed(true));
-    return () => cancelAnimationFrame(id);
-  }, []);
-  const altRows = useMemo(() => rows.filter(r => r.isAltTrade), [rows]);
-  const totalSummary = useMemo(() => summarizeRows(altRows), [altRows]);
-  const timeframeRows = useMemo<AnalyticsGroupRow[]>(() => {
-    const grouped = new Map<string, UnifiedHistoryRow[]>();
-    for (const row of altRows) {
-      const key = row.interval ?? 'unknown';
-      grouped.set(key, [...(grouped.get(key) ?? []), row]);
-    }
-    return Array.from(grouped.entries())
-      .map(([interval, groupedRows]) => ({
-        key: interval,
-        label: fmtShortInterval(interval === 'unknown' ? undefined : interval),
-        ...summarizeRows(groupedRows),
-      }))
-      .sort((a, b) => (ALT_INTERVAL_ORDER[a.key] ?? 999) - (ALT_INTERVAL_ORDER[b.key] ?? 999));
-  }, [altRows]);
-  const leverageRows = useMemo<AnalyticsGroupRow[]>(() => {
-    const grouped = new Map<string, UnifiedHistoryRow[]>();
-    for (const row of altRows) {
-      const lv = row.leverage != null && row.leverage > 0
-        ? (Number.isInteger(row.leverage) ? `${row.leverage}` : row.leverage.toFixed(1))
-        : 'unknown';
-      grouped.set(lv, [...(grouped.get(lv) ?? []), row]);
-    }
-    return Array.from(grouped.entries())
-      .map(([lv, groupedRows]) => ({
-        key: lv,
-        label: lv === 'unknown' ? '미지정' : `${lv}x`,
-        ...summarizeRows(groupedRows),
-      }))
-      .sort((a, b) => {
-        const an = a.key === 'unknown' ? Number.POSITIVE_INFINITY : parseFloat(a.key);
-        const bn = b.key === 'unknown' ? Number.POSITIVE_INFINITY : parseFloat(b.key);
-        return an - bn;
-      });
-  }, [altRows]);
-  const entrySourceRows = useMemo<AnalyticsGroupRow[]>(() => {
-    const altAutoRows = rows.filter(r => r.isAltTrade && r.entrySource === 'auto');
-    // Legacy ALT rows without entrySource are classified as ALT manual to avoid "미지정" bucket.
-    const altManualRows = rows.filter(r => r.isAltTrade && r.entrySource !== 'auto');
-    const userRows = rows.filter(r => !r.isAltTrade);
-    return [
-      { key: 'alt-auto', label: 'ALT 자동', color: '#66e0ff', ...summarizeRows(altAutoRows) },
-      { key: 'alt-manual', label: 'ALT 수동', color: '#7fb7ff', ...summarizeRows(altManualRows) },
-      { key: 'user-manual', label: '사용자 진입', color: '#b6c0d0', ...summarizeRows(userRows) },
-    ];
-  }, [rows]);
-  const sideRows = useMemo<AnalyticsGroupRow[]>(() => {
-    const longRows = altRows.filter(r => r.positionSide === 'LONG');
-    const shortRows = altRows.filter(r => r.positionSide === 'SHORT');
-    return [
-      { key: 'long', label: 'LONG', color: '#0ecb81', ...summarizeRows(longRows) },
-      { key: 'short', label: 'SHORT', color: '#f6465d', ...summarizeRows(shortRows) },
-    ];
-  }, [altRows]);
-  const hourlyRows = useMemo<AnalyticsGroupRow[]>(() => {
-    const buckets = Array.from({ length: 6 }, (_, i) => {
-      const from = i * 4;
-      const to = from + 3;
-      return {
-        key: `${from}`,
-        label: `${String(from).padStart(2, '0')}-${String(to).padStart(2, '0')}h`,
-        rows: [] as UnifiedHistoryRow[],
-      };
-    });
-    for (const row of altRows) {
-      const ts = row.entryTime ?? row.exitTime;
-      const hour = new Date(ts).getHours();
-      const idx = Math.min(5, Math.max(0, Math.floor(hour / 4)));
-      buckets[idx].rows.push(row);
-    }
-    return buckets.map(x => ({
-      key: x.key,
-      label: x.label,
-      ...summarizeRows(x.rows),
-    }));
-  }, [altRows]);
-  const closeTypeRows = useMemo<AnalyticsGroupRow[]>(() => {
-    const manualRows = altRows.filter(r => r.closeReason === 'manual');
-    const autoRows = altRows.filter(r => r.closeReason !== 'manual');
-    return [
-      { key: 'manual', label: '수동 청산', ...summarizeRows(manualRows) },
-      { key: 'auto', label: '자동/시스템 청산', ...summarizeRows(autoRows) },
-    ];
-  }, [altRows]);
-  const closeReasonRows = useMemo<AnalyticsGroupRow[]>(() => {
-    const grouped = new Map<string, UnifiedHistoryRow[]>();
-    for (const row of altRows) {
-      const key = row.closeReason ?? 'unknown';
-      grouped.set(key, [...(grouped.get(key) ?? []), row]);
-    }
-    return Array.from(grouped.entries())
-      .map(([reason, groupedRows]) => ({
-        key: reason,
-        label: reasonLabel(reason as UnifiedHistoryReason),
-        color: reasonColorByReason(reason as UnifiedHistoryReason),
-        ...summarizeRows(groupedRows),
-      }))
-      .sort((a, b) => b.count - a.count);
-  }, [altRows]);
-  const entrySourceSlices = useMemo<AnalyticsPieSlice[]>(
-    () => entrySourceRows.map(r => ({
-      key: r.key,
-      label: r.label,
-      value: r.count,
-      color: r.key === 'alt-auto' ? '#3bd8ff' : r.key === 'alt-manual' ? '#6f8bff' : '#8da2c2',
-    })),
-    [entrySourceRows],
-  );
-  const sideSlices = useMemo<AnalyticsPieSlice[]>(
-    () => sideRows.map(r => ({
-      key: r.key,
-      label: r.label,
-      value: r.count,
-      color: r.key === 'long' ? '#0ecb81' : '#f6465d',
-    })),
-    [sideRows],
-  );
-  const closeReasonSlices = useMemo<AnalyticsPieSlice[]>(
-    () => closeReasonRows.map(r => ({
-      key: r.key,
-      label: r.label,
-      value: r.count,
-      color: r.color ?? '#848e9c',
-    })),
-    [closeReasonRows],
-  );
-
-  return (
-    <div
-      style={{
-        marginTop: 14,
-        borderTop: '1px solid #1a2535',
-        paddingTop: 12,
-        opacity: revealed ? 1 : 0,
-        transform: revealed ? 'translateY(0) scale(1)' : 'translateY(8px) scale(0.992)',
-        transition: 'opacity 420ms ease, transform 420ms cubic-bezier(0.22,1,0.36,1)',
-      }}
-    >
-      <div style={{ fontSize: '0.78rem', color: '#3b8beb', fontWeight: 700, letterSpacing: '0.02em', marginBottom: 8 }}>
-        ALT추천 누적 통계 ({mode === 'paper' ? '모의' : '실전'})
-      </div>
-      {altRows.length === 0 ? (
-        <div style={{ fontSize: '0.75rem', color: '#5d6776', padding: '8px 0' }}>ALT추천 종료 히스토리가 없어 통계를 계산할 수 없습니다.</div>
-      ) : (
-        <>
-          <AnalyticsSummaryCards summary={totalSummary} />
-
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10, marginBottom: 10 }}>
-            <AnalyticsPieCard title="진입 출처 분포" slices={entrySourceSlices} />
-            <AnalyticsPieCard title="LONG/SHORT 분포" slices={sideSlices} />
-            <AnalyticsPieCard title="종료 사유 분포" slices={closeReasonSlices} />
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 10 }}>
-            <AnalyticsGroupBars title="타임프레임별 성과 (총손익 | 승률)" rows={timeframeRows} />
-            <AnalyticsGroupBars title="레버리지별 성과 (총손익 | 승률)" rows={leverageRows} />
-            <AnalyticsGroupBars title="진입 출처별 성과" rows={entrySourceRows.filter(r => r.count > 0)} />
-            <AnalyticsGroupBars title="LONG / SHORT 성과 비교" rows={sideRows.filter(r => r.count > 0)} />
-            <AnalyticsGroupBars title="시간대별 성과 비교 (진입시간 기준)" rows={hourlyRows} />
-            <AnalyticsGroupBars title="수동/자동 청산 성과" rows={closeTypeRows.filter(r => r.count > 0)} />
-          </div>
-        </>
       )}
     </div>
   );
@@ -635,6 +299,120 @@ function simulatePnl(row: UnifiedHistoryRow, exitPrice: number | null): number |
   return (exitPrice - row.entryPrice) * dir * row.qty;
 }
 
+// ── Type for counterfactual simulation result ─────────────────────────────────
+interface CfSummary {
+  helpedOff: number; hurtOff: number;
+  avgDeltaOff: number | null; avgDeltaOffPlus1: number | null; avgDeltaOffPlus3: number | null;
+  helpedOn: number; hurtOn: number; avgDeltaOn: number | null;
+  samplesOff: number; samplesOn: number;
+  avgMfePct: number | null; avgMaePct: number | null;
+}
+// Module-level: survives tab switches / component remounts within the same session
+const _cfModuleCache = new Map<string, CfSummary>();
+
+// ── 24-hour ring chart (KST) ─────────────────────────────────────────────────
+function HourlyRingChart({ data }: {
+  data: Array<{ hour: number; totalPnl: number; count: number }>;
+}) {
+  const [hoveredHour, setHoveredHour] = useState<number | null>(null);
+  const cx = 70, cy = 70, R = 54, r = 30;
+  const maxAbs = Math.max(1, ...data.map(d => Math.abs(d.totalPnl)));
+  const GAP = 1.5;
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const segments = data.map(({ hour, totalPnl, count }) => {
+    const s = toRad((hour / 24) * 360 - 90);
+    const e = toRad(((hour + 1) / 24) * 360 - 90 - GAP);
+    const x1 = cx + R * Math.cos(s), y1 = cy + R * Math.sin(s);
+    const x2 = cx + R * Math.cos(e), y2 = cy + R * Math.sin(e);
+    const x3 = cx + r * Math.cos(e), y3 = cy + r * Math.sin(e);
+    const x4 = cx + r * Math.cos(s), y4 = cy + r * Math.sin(s);
+    const d = `M ${x1.toFixed(2)} ${y1.toFixed(2)} A ${R} ${R} 0 0 1 ${x2.toFixed(2)} ${y2.toFixed(2)} L ${x3.toFixed(2)} ${y3.toFixed(2)} A ${r} ${r} 0 0 0 ${x4.toFixed(2)} ${y4.toFixed(2)} Z`;
+    const intensity = count > 0 ? 0.2 + (Math.abs(totalPnl) / maxAbs) * 0.7 : 0;
+    const fill = count === 0
+      ? 'rgba(255,255,255,0.05)'
+      : totalPnl > 0 ? `rgba(14,203,129,${intensity.toFixed(2)})` : `rgba(246,70,93,${intensity.toFixed(2)})`;
+    const midAngleRad = toRad(((hour + 0.5) / 24) * 360 - 90);
+    const midR = (R + r) / 2;
+    const mx = cx + midR * Math.cos(midAngleRad);
+    const my = cy + midR * Math.sin(midAngleRad);
+    return { d, fill, hour, totalPnl, count, mx, my };
+  });
+  const hov = hoveredHour !== null ? data.find(d => d.hour === hoveredHour) ?? null : null;
+  return (
+    <svg width={140} height={140} viewBox="0 0 140 140" style={{ flexShrink: 0 }}>
+      {segments.map(seg => {
+        const isHov = seg.hour === hoveredHour;
+        const dimmed = hoveredHour !== null && !isHov;
+        return (
+          <path
+            key={seg.hour}
+            d={seg.d}
+            fill={seg.fill}
+            stroke={isHov ? (seg.totalPnl > 0 ? '#0ecb81' : seg.count === 0 ? '#3d506a' : '#f6465d') : '#1a2232'}
+            strokeWidth={isHov ? 1.5 : 0.8}
+            style={{
+              transformOrigin: `${seg.mx.toFixed(2)}px ${seg.my.toFixed(2)}px`,
+              transform: isHov ? 'scale(1.14)' : 'scale(1)',
+              opacity: dimmed ? 0.35 : 1,
+              transition: 'transform 140ms ease, opacity 140ms ease, stroke 140ms ease',
+              cursor: seg.count > 0 ? 'pointer' : 'default',
+            }}
+            onMouseEnter={() => setHoveredHour(seg.hour)}
+            onMouseLeave={() => setHoveredHour(null)}
+          />
+        );
+      })}
+      {[0, 6, 12, 18].map(h => {
+        const a = toRad((h / 24) * 360 - 90);
+        const lx = (cx + (R + 9) * Math.cos(a)).toFixed(1);
+        const ly = (cy + (R + 9) * Math.sin(a)).toFixed(1);
+        return <text key={h} x={lx} y={ly} textAnchor="middle" dominantBaseline="middle" fontSize={7} fill="#3d506a" style={{ pointerEvents: 'none' }}>{h}h</text>;
+      })}
+      {hov && hov.count > 0 ? (
+        <>
+          <text x={cx} y={cy - 13} textAnchor="middle" fontSize={7} fill="#8fa8c0" style={{ pointerEvents: 'none' }}>
+            {String(hov.hour).padStart(2, '0')}:00~{String((hov.hour + 1) % 24).padStart(2, '0')}:00
+          </text>
+          <text x={cx} y={cy - 2} textAnchor="middle" fontSize={6.5} fill="#5d7080" style={{ pointerEvents: 'none' }}>{hov.count}건</text>
+          <text x={cx} y={cy + 10} textAnchor="middle" fontSize={8} fontWeight="700" fill={hov.totalPnl >= 0 ? '#0ecb81' : '#f6465d'} style={{ pointerEvents: 'none' }}>
+            {hov.totalPnl >= 0 ? '+' : ''}{hov.totalPnl.toFixed(1)}
+          </text>
+        </>
+      ) : (
+        <>
+          <text x={cx} y={cy - 5} textAnchor="middle" fontSize={7.5} fill="#4a6070" style={{ pointerEvents: 'none' }}>KST</text>
+          <text x={cx} y={cy + 6} textAnchor="middle" fontSize={6.5} fill="#3a5060" style={{ pointerEvents: 'none' }}>청산시각</text>
+        </>
+      )}
+    </svg>
+  );
+}
+
+// ── Reusable card components (defined outside to avoid remount on parent render) ─
+function PerfCard({ children, style }: { children: React.ReactNode; style?: React.CSSProperties }) {
+  return (
+    <div style={{
+      border: '1px solid rgba(255,255,255,0.07)',
+      borderRadius: 14,
+      background: 'linear-gradient(145deg, rgba(26,38,56,0.85), rgba(14,22,36,0.7))',
+      backdropFilter: 'blur(6px)',
+      padding: '13px 15px',
+      marginBottom: 10,
+      ...style,
+    }}>{children}</div>
+  );
+}
+
+function PerfCardTitle({ icon, title, badge }: { icon: string; title: string; badge?: React.ReactNode }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 11 }}>
+      <span style={{ fontSize: '0.85rem' }}>{icon}</span>
+      <span style={{ fontSize: '0.77rem', color: '#b8c8e0', fontWeight: 700, letterSpacing: '0.01em' }}>{title}</span>
+      {badge && <div style={{ marginLeft: 'auto' }}>{badge}</div>}
+    </div>
+  );
+}
+
 function PerformanceAnalysisSection({
   rows,
   mode,
@@ -645,26 +423,34 @@ function PerformanceAnalysisSection({
   active: boolean;
 }) {
   const [cfLoading, setCfLoading] = useState(false);
-  const [cfSummary, setCfSummary] = useState<{
-    helpedOff: number;
-    hurtOff: number;
-    avgDeltaOff: number | null;
-    avgDeltaOffPlus1: number | null;
-    avgDeltaOffPlus3: number | null;
-    helpedOn: number;
-    hurtOn: number;
-    avgDeltaOn: number | null;
-    samplesOff: number;
-    samplesOn: number;
-    avgMfePct: number | null;
-    avgMaePct: number | null;
-  } | null>(null);
+  const [revealed, setRevealed] = useState(false);
+  const [drillKey, setDrillKey] = useState<'timeframe' | 'side' | 'source' | 'leverage' | 'cadence'>('timeframe');
+  const [cfSummary, setCfSummary] = useState<CfSummary | null>(null);
 
   const altRows = useMemo(() => rows.filter(r => r.isAltTrade), [rows]);
+  const overallSummary = useMemo(() => summarizeCohort(rows), [rows]);
   const onRows = useMemo(() => altRows.filter(r => r.timeStopEnabledAtEntry !== false), [altRows]);
   const offRows = useMemo(() => altRows.filter(r => r.timeStopEnabledAtEntry === false), [altRows]);
   const onSummary = useMemo(() => summarizeCohort(onRows), [onRows]);
   const offSummary = useMemo(() => summarizeCohort(offRows), [offRows]);
+  const maxDrawdownProxy = useMemo(() => {
+    const sorted = [...rows].sort((a, b) => a.exitTime - b.exitTime);
+    let cum = 0;
+    let peak = 0;
+    let maxDd = 0;
+    for (const row of sorted) {
+      cum += row.pnl ?? 0;
+      if (cum > peak) peak = cum;
+      maxDd = Math.max(maxDd, peak - cum);
+    }
+    return maxDd;
+  }, [rows]);
+
+  useEffect(() => {
+    if (!active) return;
+    const id = requestAnimationFrame(() => setRevealed(true));
+    return () => cancelAnimationFrame(id);
+  }, [active, mode]);
 
   useEffect(() => {
     if (!active) return;
@@ -672,11 +458,17 @@ function PerformanceAnalysisSection({
       .filter(r => r.entryPrice != null && r.entryPrice > 0 && r.validUntilTimeAtEntry != null)
       .slice(0, 20);
     if (target.length === 0) {
-      setCfSummary(null);
       return;
     }
+    // ── Cache check: skip expensive API calls if data hasn't changed ──────────
+    const cfCacheKey = target.map(r => `${r.exitTime}:${r.validUntilTimeAtEntry ?? 0}`).join('|');
+    if (_cfModuleCache.has(cfCacheKey)) {
+      setCfSummary(_cfModuleCache.get(cfCacheKey)!);
+      return;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
     let cancelled = false;
-    setCfLoading(true);
+    const startLoadingTimer = window.setTimeout(() => setCfLoading(true), 0);
     void (async () => {
       let helpedOff = 0;
       let hurtOff = 0;
@@ -722,7 +514,7 @@ function PerformanceAnalysisSection({
         if (simulated == null || row.pnl == null) continue;
 
         if (row.closeReason === 'time' || row.closeReason === 'expired') {
-          const delta = simulated - row.pnl; // OFF 가정 - 실측(time-stop)
+          const delta = simulated - row.pnl;
           deltaOffSum += delta;
           deltaOffCount += 1;
           const simulatedPlus1 = simulatePnl(row, plus1);
@@ -759,7 +551,7 @@ function PerformanceAnalysisSection({
         } else if (row.timeStopEnabledAtEntry === false) {
           const hypoExit = simulatePnl(row, atExpiry);
           if (hypoExit == null) continue;
-          const delta = row.pnl - hypoExit; // 실측(OFF) - ON 가정
+          const delta = row.pnl - hypoExit;
           deltaOnSum += delta;
           deltaOnCount += 1;
           if (delta < 0) helpedOn += 1;
@@ -768,7 +560,7 @@ function PerformanceAnalysisSection({
       }
 
       if (cancelled) return;
-      setCfSummary({
+      const cfResult: CfSummary = {
         helpedOff,
         hurtOff,
         avgDeltaOff: deltaOffCount > 0 ? deltaOffSum / deltaOffCount : null,
@@ -781,12 +573,18 @@ function PerformanceAnalysisSection({
         samplesOn: deltaOnCount,
         avgMfePct: mfeMaeCount > 0 ? mfeSum / mfeMaeCount : null,
         avgMaePct: mfeMaeCount > 0 ? maeSum / mfeMaeCount : null,
-      });
+      };
+      _cfModuleCache.set(cfCacheKey, cfResult);
+      setCfSummary(cfResult);
       setCfLoading(false);
     })().finally(() => {
       if (!cancelled) setCfLoading(false);
     });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      window.clearTimeout(startLoadingTimer);
+      setCfLoading(false);
+    };
   }, [active, altRows]);
 
   const byTimeframe = useMemo(() => {
@@ -815,24 +613,16 @@ function PerformanceAnalysisSection({
   }, [altRows]);
 
   const byLeverage = useMemo(() => {
-    const buckets: Record<string, UnifiedHistoryRow[]> = {
-      '<=5x': [],
-      '6-10x': [],
-      '11-20x': [],
-      '21x+': [],
-      'unknown': [],
-    };
+    const map = new Map<string, UnifiedHistoryRow[]>();
     for (const row of altRows) {
       const lv = row.leverage ?? 0;
-      if (!lv || !isFinite(lv)) buckets.unknown.push(row);
-      else if (lv <= 5) buckets['<=5x'].push(row);
-      else if (lv <= 10) buckets['6-10x'].push(row);
-      else if (lv <= 20) buckets['11-20x'].push(row);
-      else buckets['21x+'].push(row);
+      const key = lv && isFinite(lv) ? `${lv}x` : 'unknown';
+      map.set(key, [...(map.get(key) ?? []), row]);
     }
-    return Object.entries(buckets)
-      .map(([k, grouped]) => ({ key: k, label: k, ...summarizeCohort(grouped) }))
-      .filter(x => x.count > 0);
+    return Array.from(map.entries())
+      .map(([k, grouped]) => ({ key: k, label: k === 'unknown' ? '미지정' : k, ...summarizeCohort(grouped) }))
+      .filter(x => x.count > 0)
+      .sort((a, b) => (parseInt(a.label) || 999) - (parseInt(b.label) || 999));
   }, [altRows]);
 
   const byCadence = useMemo(() => {
@@ -845,78 +635,482 @@ function PerformanceAnalysisSection({
       .map(([k, grouped]) => ({ key: k, label: k === 'unknown' ? '미지정' : k, ...summarizeCohort(grouped) }))
       .sort((a, b) => a.label.localeCompare(b.label, 'ko'));
   }, [altRows]);
+  const hasCounterfactualTarget = useMemo(
+    () => altRows.some(r => r.entryPrice != null && r.entryPrice > 0 && r.validUntilTimeAtEntry != null),
+    [altRows],
+  );
+
+  const bySymbol = useMemo(() => {
+    const map = new Map<string, UnifiedHistoryRow[]>();
+    for (const row of rows) {
+      const sym = extractCoin(row.symbol);
+      map.set(sym, [...(map.get(sym) ?? []), row]);
+    }
+    return Array.from(map.entries())
+      .map(([k, grouped]) => ({ key: k, label: k, ...summarizeCohort(grouped) }))
+      .filter(x => x.count >= 1)
+      .sort((a, b) => b.totalPnl - a.totalPnl);
+  }, [rows]);
+
+  const byHour = useMemo(() => {
+    const map = new Map<number, UnifiedHistoryRow[]>();
+    for (let h = 0; h < 24; h++) map.set(h, []);
+    for (const row of rows) {
+      const kstH = (new Date(row.exitTime).getUTCHours() + 9) % 24; // KST = UTC+9
+      map.get(kstH)!.push(row);
+    }
+    return Array.from(map.entries()).map(([hour, rs]) => ({ hour, ...summarizeCohort(rs) }));
+  }, [rows]);
+
+  const closeReasonRows = useMemo(() => {
+    const grouped = new Map<string, UnifiedHistoryRow[]>();
+    for (const row of altRows) {
+      const key = row.closeReason ?? 'unknown';
+      grouped.set(key, [...(grouped.get(key) ?? []), row]);
+    }
+    return Array.from(grouped.entries())
+      .map(([reason, groupedRows]) => ({
+        key: reason,
+        label: reasonLabel(reason as UnifiedHistoryReason),
+        color: reasonColorByReason(reason as UnifiedHistoryReason),
+        ...summarizeCohort(groupedRows),
+      }))
+      .sort((a, b) => b.count - a.count);
+  }, [altRows]);
+
+  const verdict = useMemo(() => {
+    if (!cfSummary || cfSummary.samplesOff <= 0 || cfSummary.avgDeltaOff == null) return null;
+    if (cfSummary.avgDeltaOff < 0 && cfSummary.helpedOff >= cfSummary.hurtOff) {
+      return { label: '✅ 타임스탑 효과 좋음', color: '#0ecb81' };
+    }
+    if (cfSummary.avgDeltaOff > 0 && cfSummary.hurtOff > cfSummary.helpedOff) {
+      return { label: '⚠ 타임스탑 역효과', color: '#f6465d' };
+    }
+    return { label: '📊 데이터 축적 중', color: '#f0b90b' };
+  }, [cfSummary]);
+
+  const drillRows = useMemo(() => {
+    if (drillKey === 'timeframe') return byTimeframe;
+    if (drillKey === 'side') return bySide;
+    if (drillKey === 'source') return byEntrySource;
+    if (drillKey === 'leverage') return byLeverage;
+    return byCadence;
+  }, [drillKey, byTimeframe, bySide, byEntrySource, byLeverage, byCadence]);
+
+  const drillTitle = useMemo(() => {
+    if (drillKey === 'timeframe') return '봉 기준별 성과 (총손익 | 승률)';
+    if (drillKey === 'side') return 'LONG / SHORT 성과';
+    if (drillKey === 'source') return '진입 방식별 성과';
+    if (drillKey === 'leverage') return '레버리지 구간별 성과';
+    return '스캔 주기별 성과';
+  }, [drillKey]);
+
+  const helpedRatio = cfSummary && cfSummary.samplesOff > 0
+    ? (cfSummary.helpedOff / cfSummary.samplesOff) * 100
+    : null;
+  const fmtDelta = (v: number | null) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(2)} USDT`);
+  const fmtHold = (v: number | null) => (v == null ? '—' : `${v.toFixed(1)}분`);
+  const revealStyle = (index: number) => ({
+    opacity: revealed ? 1 : 0,
+    transform: revealed ? 'translateY(0) scale(1)' : 'translateY(10px) scale(0.992)',
+    transition: `opacity 420ms ease ${index * 90}ms, transform 480ms cubic-bezier(0.22,1,0.36,1) ${index * 90}ms`,
+  }) as const;
+
+  const topGainers = bySymbol.slice(0, 10);
+  const topLosers = [...bySymbol].reverse().slice(0, 10);
+  const symMaxAbs = Math.max(1, ...bySymbol.map(s => Math.abs(s.totalPnl)));
 
   return (
-    <div style={{ padding: '10px 14px 12px', color: '#d4d9e1' }}>
-      <div style={{ fontSize: '0.82rem', color: '#f0b90b', fontWeight: 700, marginBottom: 10 }}>
-        성과분석 ({mode === 'paper' ? '모의' : '실전'})
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 10, marginBottom: 10 }}>
-        <div style={{ border: '1px solid #1f2b3f', borderRadius: 10, padding: '10px 12px', background: 'rgba(255,255,255,0.02)' }}>
-          <div style={{ fontSize: '0.74rem', color: '#9aa4b5', marginBottom: 6 }}>타임스탑 ON 코호트</div>
-          <div style={{ fontSize: '0.88rem', color: '#dbe5f5', fontWeight: 700, marginBottom: 3 }}>거래 {onSummary.count}건 · 승률 {onSummary.winRate.toFixed(1)}%</div>
-          <div style={{ fontSize: '0.76rem', color: onSummary.totalPnl >= 0 ? '#0ecb81' : '#f6465d' }}>총손익 {onSummary.totalPnl >= 0 ? '+' : ''}{onSummary.totalPnl.toFixed(2)} USDT</div>
-          <div style={{ fontSize: '0.72rem', color: '#7f8aa0', marginTop: 3 }}>평균 보유 {onSummary.avgHoldMin != null ? `${onSummary.avgHoldMin.toFixed(1)}분` : '—'}</div>
-        </div>
-        <div style={{ border: '1px solid #1f2b3f', borderRadius: 10, padding: '10px 12px', background: 'rgba(255,255,255,0.02)' }}>
-          <div style={{ fontSize: '0.74rem', color: '#9aa4b5', marginBottom: 6 }}>타임스탑 OFF 코호트</div>
-          <div style={{ fontSize: '0.88rem', color: '#dbe5f5', fontWeight: 700, marginBottom: 3 }}>거래 {offSummary.count}건 · 승률 {offSummary.winRate.toFixed(1)}%</div>
-          <div style={{ fontSize: '0.76rem', color: offSummary.totalPnl >= 0 ? '#0ecb81' : '#f6465d' }}>총손익 {offSummary.totalPnl >= 0 ? '+' : ''}{offSummary.totalPnl.toFixed(2)} USDT</div>
-          <div style={{ fontSize: '0.72rem', color: '#7f8aa0', marginTop: 3 }}>평균 보유 {offSummary.avgHoldMin != null ? `${offSummary.avgHoldMin.toFixed(1)}분` : '—'}</div>
-        </div>
-      </div>
-
-      <div style={{ border: '1px solid #1f2b3f', borderRadius: 10, padding: '10px 12px', background: 'rgba(255,255,255,0.02)', marginBottom: 10 }}>
-        <div style={{ fontSize: '0.75rem', color: '#9aa4b5', marginBottom: 6 }}>타임스탑 가정/시뮬레이션 비교</div>
-        {cfLoading ? (
-          <div style={{ fontSize: '0.73rem', color: '#7f8aa0' }}>시뮬레이션 계산 중...</div>
-        ) : !cfSummary ? (
-          <div style={{ fontSize: '0.73rem', color: '#7f8aa0' }}>분석 가능한 메타데이터가 부족합니다.</div>
-        ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10 }}>
-            <div>
-              <div style={{ fontSize: '0.72rem', color: '#d4d9e1', marginBottom: 4 }}>실측(time-stop) vs OFF 가정</div>
-              <div style={{ fontSize: '0.7rem', color: '#9aa4b5' }}>표본 {cfSummary.samplesOff}건 · 도움 {cfSummary.helpedOff}건 · 손해 {cfSummary.hurtOff}건</div>
-              <div style={{ fontSize: '0.72rem', color: (cfSummary.avgDeltaOff ?? 0) <= 0 ? '#0ecb81' : '#f6465d', marginTop: 2 }}>
-                평균 델타 {cfSummary.avgDeltaOff != null ? `${cfSummary.avgDeltaOff >= 0 ? '+' : ''}${cfSummary.avgDeltaOff.toFixed(2)} USDT` : '—'}
-              </div>
-              <div style={{ fontSize: '0.69rem', color: '#7f8aa0', marginTop: 2 }}>
-                +1봉: {cfSummary.avgDeltaOffPlus1 != null ? `${cfSummary.avgDeltaOffPlus1 >= 0 ? '+' : ''}${cfSummary.avgDeltaOffPlus1.toFixed(2)} USDT` : '—'} · +3봉: {cfSummary.avgDeltaOffPlus3 != null ? `${cfSummary.avgDeltaOffPlus3 >= 0 ? '+' : ''}${cfSummary.avgDeltaOffPlus3.toFixed(2)} USDT` : '—'}
-              </div>
-            </div>
-            <div>
-              <div style={{ fontSize: '0.72rem', color: '#d4d9e1', marginBottom: 4 }}>실측(OFF) vs ON 가정</div>
-              <div style={{ fontSize: '0.7rem', color: '#9aa4b5' }}>표본 {cfSummary.samplesOn}건 · 도움 {cfSummary.helpedOn}건 · 손해 {cfSummary.hurtOn}건</div>
-              <div style={{ fontSize: '0.72rem', color: (cfSummary.avgDeltaOn ?? 0) >= 0 ? '#0ecb81' : '#f6465d', marginTop: 2 }}>
-                평균 델타 {cfSummary.avgDeltaOn != null ? `${cfSummary.avgDeltaOn >= 0 ? '+' : ''}${cfSummary.avgDeltaOn.toFixed(2)} USDT` : '—'}
-              </div>
-            </div>
-          </div>
+    <div style={{ padding: '10px 14px 14px', color: '#d4d9e1' }}>
+      {/* ── Header ─────────────────────────────────────────────── */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+        <span style={{ fontSize: '1rem' }}>📊</span>
+        <span style={{ fontSize: '0.85rem', color: '#f0b90b', fontWeight: 800, letterSpacing: '0.02em' }}>
+          성과 분석
+        </span>
+        <span style={{ fontSize: '0.72rem', color: '#f0b90b', background: 'rgba(240,185,11,0.12)', border: '1px solid rgba(240,185,11,0.3)', borderRadius: 999, padding: '1px 8px', fontWeight: 700 }}>
+          {mode === 'paper' ? '모의거래' : '실전거래'}
+        </span>
+        {rows.length === 0 && (
+          <span style={{ fontSize: '0.72rem', color: '#5d6776', marginLeft: 4 }}>거래 내역이 없어 분석할 데이터가 없습니다.</span>
         )}
       </div>
 
-      <div style={{ border: '1px solid #1f2b3f', borderRadius: 10, padding: '10px 12px', background: 'rgba(255,255,255,0.02)', marginBottom: 10 }}>
-        <div style={{ fontSize: '0.75rem', color: '#9aa4b5', marginBottom: 6 }}>이벤트 스터디 (타임스탑 이후 3봉)</div>
-        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-          <div style={{ fontSize: '0.72rem', color: '#d4d9e1' }}>
-            평균 MFE(유리한 최대변동): {cfSummary?.avgMfePct != null ? `${cfSummary.avgMfePct >= 0 ? '+' : ''}${cfSummary.avgMfePct.toFixed(2)}%` : '—'}
+      {/* ── Row 1: 거래 성과 요약 (full width) ─────────────────── */}
+      <div style={{ ...revealStyle(0) }}>
+        <PerfCard>
+          <PerfCardTitle
+            icon="🏆"
+            title="거래 성과 요약"
+            badge={verdict && (
+              <span style={{ fontSize: '0.68rem', color: verdict.color, border: `1px solid ${verdict.color}55`, background: `${verdict.color}18`, borderRadius: 999, padding: '2px 10px', fontWeight: 700, letterSpacing: '0.01em' }}>
+                {verdict.label}
+              </span>
+            )}
+          />
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(118px, 1fr))', gap: 7 }}>
+            {[
+              { label: '누적 실현손익', value: `${overallSummary.totalPnl >= 0 ? '+' : ''}${overallSummary.totalPnl.toFixed(2)}`, unit: 'USDT', color: overallSummary.totalPnl >= 0 ? '#0ecb81' : '#f6465d', glow: overallSummary.totalPnl !== 0 },
+              { label: '승률', value: `${overallSummary.winRate.toFixed(1)}%`, unit: `${rows.filter(r => (r.pnl ?? 0) > 0).length}승 / ${rows.length}건`, color: overallSummary.winRate >= 50 ? '#a3e4c4' : '#e4a3a3', glow: false },
+              { label: '거래당 평균 손익', value: `${overallSummary.avgPnl >= 0 ? '+' : ''}${overallSummary.avgPnl.toFixed(2)}`, unit: 'USDT', color: overallSummary.avgPnl >= 0 ? '#0ecb81' : '#f6465d', glow: false },
+              { label: '평균 보유 시간', value: fmtHold(overallSummary.avgHoldMin), unit: '', color: '#b8d0f0', glow: false },
+              { label: '최대 손실폭', value: `-${maxDrawdownProxy.toFixed(2)}`, unit: 'USDT', color: '#f6465d', glow: false },
+              { label: '타임스탑 효과율', value: helpedRatio != null ? `${helpedRatio.toFixed(1)}%` : '—', unit: helpedRatio != null ? '손실 방어' : '', color: helpedRatio != null ? '#f0b90b' : '#5d6776', glow: false },
+            ].map(item => (
+              <div key={item.label} style={{ border: `1px solid ${item.glow ? `${item.color}30` : 'rgba(255,255,255,0.06)'}`, borderRadius: 10, padding: '9px 11px', background: item.glow ? `${item.color}08` : 'rgba(8,13,22,0.4)', boxShadow: item.glow ? `0 0 12px ${item.color}18` : 'none' }}>
+                <div style={{ fontSize: '0.62rem', color: '#5d7085', marginBottom: 4, fontWeight: 600, letterSpacing: '0.02em', textTransform: 'uppercase' as const }}>{item.label}</div>
+                <div style={{ fontSize: '0.86rem', color: item.color, fontWeight: 800, fontFamily: '"SF Mono",Consolas,monospace', lineHeight: 1.2 }}>{item.value}</div>
+                {item.unit && <div style={{ fontSize: '0.6rem', color: '#4a5a6e', marginTop: 2 }}>{item.unit}</div>}
+              </div>
+            ))}
           </div>
-          <div style={{ fontSize: '0.72rem', color: '#d4d9e1' }}>
-            평균 MAE(불리한 최대변동): {cfSummary?.avgMaePct != null ? `${cfSummary.avgMaePct >= 0 ? '+' : ''}${cfSummary.avgMaePct.toFixed(2)}%` : '—'}
-          </div>
-        </div>
+        </PerfCard>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 10 }}>
-        <AnalyticsGroupBars title="타임프레임별 성과" rows={byTimeframe} />
-        <AnalyticsGroupBars title="LONG/SHORT 성과" rows={bySide} />
-        <AnalyticsGroupBars title="진입출처 성과" rows={byEntrySource} />
-        <AnalyticsGroupBars title="레버리지 버킷 성과" rows={byLeverage} />
-        <AnalyticsGroupBars title="스캔 주기 버킷 성과" rows={byCadence} />
+      {/* ── Row 2: 타임스탑 비교 | 심볼 순위 (2-column) ─────────── */}
+      <div style={{ ...revealStyle(1), display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+        {/* 타임스탑 효과 비교 */}
+        <PerfCard style={{ marginBottom: 0 }}>
+          <PerfCardTitle icon="⏱" title="타임스탑 효과 비교" badge={
+            <span style={{ fontSize: '0.63rem', color: '#6b7892' }}>ON·OFF</span>
+          } />
+          {onSummary.count === 0 && offSummary.count === 0 ? (
+            <div style={{ fontSize: '0.73rem', color: '#5d6776' }}>비교 데이터 없음</div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {[
+                { col: 'ON — 타임스탑 사용', summary: onSummary, helped: cfSummary?.helpedOff, hurt: cfSummary?.hurtOff, accent: '#3b8beb' },
+                { col: 'OFF — 타임스탑 미사용', summary: offSummary, helped: cfSummary?.helpedOn, hurt: cfSummary?.hurtOn, accent: '#7f8aa0' },
+              ].map(({ col, summary, helped, hurt, accent }) => (
+                <div key={col} style={{ border: `1px solid ${accent}28`, borderRadius: 10, padding: '9px 11px', background: `${accent}06` }}>
+                  <div style={{ fontSize: '0.67rem', color: accent, fontWeight: 700, marginBottom: 6, letterSpacing: '0.01em' }}>{col}</div>
+                  {[
+                    { label: '거래', value: `${summary.count}건` },
+                    { label: '승률', value: `${summary.winRate.toFixed(1)}%`, color: summary.winRate >= 50 ? '#0ecb81' : '#f6465d' },
+                    { label: '누적 손익', value: `${summary.totalPnl >= 0 ? '+' : ''}${summary.totalPnl.toFixed(2)}`, color: summary.totalPnl >= 0 ? '#0ecb81' : '#f6465d' },
+                    { label: '거래당', value: `${summary.avgPnl >= 0 ? '+' : ''}${summary.avgPnl.toFixed(2)}`, color: summary.avgPnl >= 0 ? '#0ecb81' : '#f6465d' },
+                    { label: '보유', value: fmtHold(summary.avgHoldMin) },
+                    { label: '방어/역효과', value: helped != null && hurt != null ? `${helped} / ${hurt}` : '—' },
+                  ].map((r, i) => (
+                    <div key={r.label} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.69rem', padding: '2px 0', borderTop: i > 0 ? '1px solid rgba(255,255,255,0.04)' : 'none' }}>
+                      <span style={{ color: '#6a7a8e' }}>{r.label}</span>
+                      <span style={{ color: r.color ?? '#c8d4e5', fontWeight: 600, fontFamily: '"SF Mono",Consolas,monospace' }}>{r.value}</span>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
+        </PerfCard>
+
+        {/* 심볼별 손익 순위 */}
+        <PerfCard style={{ marginBottom: 0 }}>
+          <PerfCardTitle icon="🏅" title="심볼별 손익 순위" badge={
+            <span style={{ fontSize: '0.63rem', color: '#6b7892' }}>{bySymbol.length}종목</span>
+          } />
+          {bySymbol.length === 0 ? (
+            <div style={{ fontSize: '0.72rem', color: '#5d6776' }}>거래 내역이 없습니다.</div>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              {/* Top Gainers */}
+              <div>
+                <div style={{ fontSize: '0.63rem', color: '#0ecb81', fontWeight: 700, letterSpacing: '0.03em', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#0ecb81', display: 'inline-block', boxShadow: '0 0 5px #0ecb8188' }} />
+                  수익 TOP
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                  {topGainers.map((s, i) => {
+                    const w = Math.max(4, (Math.abs(s.totalPnl) / symMaxAbs) * 88);
+                    return (
+                      <div key={s.key} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                        <span style={{ fontSize: '0.6rem', color: '#3a5070', fontWeight: 700, width: 12, textAlign: 'right', flexShrink: 0 }}>{i + 1}</span>
+                        <span style={{ fontSize: '0.7rem', color: '#c8d8f0', fontWeight: 700, width: 44, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flexShrink: 0 }}>{s.label}</span>
+                        <div style={{ flex: 1, height: 10, borderRadius: 5, background: 'rgba(255,255,255,0.04)', overflow: 'hidden', position: 'relative' }}>
+                          <div style={{ position: 'absolute', top: 0, bottom: 0, left: 0, width: `${w}%`, background: 'linear-gradient(90deg,#0ecb81,#0ecb8144)', borderRadius: 5, boxShadow: '0 0 6px #0ecb8133' }} />
+                        </div>
+                        <span style={{ fontSize: '0.64rem', color: '#0ecb81', fontWeight: 700, fontFamily: '"SF Mono",Consolas,monospace', flexShrink: 0, minWidth: 42, textAlign: 'right' }}>+{s.totalPnl.toFixed(1)}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              {/* Top Losers */}
+              <div>
+                <div style={{ fontSize: '0.63rem', color: '#f6465d', fontWeight: 700, letterSpacing: '0.03em', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#f6465d', display: 'inline-block', boxShadow: '0 0 5px #f6465d88' }} />
+                  손실 TOP
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                  {topLosers.map((s, i) => {
+                    const w = Math.max(4, (Math.abs(s.totalPnl) / symMaxAbs) * 88);
+                    return (
+                      <div key={s.key} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                        <span style={{ fontSize: '0.6rem', color: '#3a5070', fontWeight: 700, width: 12, textAlign: 'right', flexShrink: 0 }}>{i + 1}</span>
+                        <span style={{ fontSize: '0.7rem', color: '#c8d8f0', fontWeight: 700, width: 44, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flexShrink: 0 }}>{s.label}</span>
+                        <div style={{ flex: 1, height: 10, borderRadius: 5, background: 'rgba(255,255,255,0.04)', overflow: 'hidden', position: 'relative' }}>
+                          <div style={{ position: 'absolute', top: 0, bottom: 0, right: 0, width: `${w}%`, background: 'linear-gradient(270deg,#f6465d,#f6465d44)', borderRadius: 5, boxShadow: '0 0 6px #f6465d33' }} />
+                        </div>
+                        <span style={{ fontSize: '0.64rem', color: '#f6465d', fontWeight: 700, fontFamily: '"SF Mono",Consolas,monospace', flexShrink: 0, minWidth: 42, textAlign: 'right' }}>{s.totalPnl.toFixed(1)}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+          {/* Most traded + best win rate symbols */}
+          {bySymbol.length >= 2 && (() => {
+            const mostTraded = [...bySymbol].sort((a, b) => b.count - a.count)[0];
+            const bestWr = [...bySymbol].filter(s => s.count >= 2).sort((a, b) => b.winRate - a.winRate)[0];
+            return (
+              <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+                {[
+                  { icon: '🔥', label: '최다 거래', name: mostTraded.label, sub: `${mostTraded.count}건` },
+                  bestWr && { icon: '🎯', label: '최고 승률', name: bestWr.label, sub: `${bestWr.winRate.toFixed(0)}%` },
+                ].filter(Boolean).map((item) => {
+                  if (!item) return null;
+                  return (
+                    <div key={item.label} style={{ flex: 1, border: '1px solid rgba(255,255,255,0.06)', borderRadius: 8, padding: '6px 8px', background: 'rgba(255,255,255,0.02)' }}>
+                      <div style={{ fontSize: '0.6rem', color: '#5d7085', fontWeight: 600, marginBottom: 2 }}>{item.icon} {item.label}</div>
+                      <div style={{ fontSize: '0.74rem', color: '#d0dff0', fontWeight: 700 }}>{item.name}</div>
+                      <div style={{ fontSize: '0.62rem', color: '#7a8da0', fontFamily: '"SF Mono",Consolas,monospace' }}>{item.sub}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
+        </PerfCard>
       </div>
 
-      <AltAnalyticsSection rows={rows} mode={mode} />
+      {/* ── Row 3: 타임스탑 분석 (full width) ──────────────────── */}
+      <div style={{ ...revealStyle(2), marginTop: 10 }}>
+        <PerfCard>
+          <PerfCardTitle icon="🔬" title="타임스탑 분석" />
+          {!hasCounterfactualTarget ? (
+            <div style={{ fontSize: '0.73rem', color: '#5d6776' }}>분석에 필요한 데이터가 아직 부족합니다.</div>
+          ) : cfLoading ? (
+            <div style={{ fontSize: '0.73rem', color: '#7f8aa0', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#3b8beb', animation: 'pulse 1.2s infinite' }} />
+              시뮬레이션 계산 중...
+            </div>
+          ) : !cfSummary ? (
+            <div style={{ fontSize: '0.73rem', color: '#5d6776' }}>분석에 필요한 데이터가 아직 부족합니다.</div>
+          ) : (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 9 }}>
+              {/* Card 1: 타임스탑 후 실제 결과 */}
+              {(() => {
+                const total = cfSummary.helpedOff + cfSummary.hurtOff;
+                const helpedPct = total > 0 ? (cfSummary.helpedOff / total) * 100 : 50;
+                const deltaColor = (cfSummary.avgDeltaOff ?? 0) <= 0 ? '#0ecb81' : '#f6465d';
+                return (
+                  <div title={"[타임스탑 후 실제 결과] 상세 설명\n\n이 카드는 타임스탑(시간 만료)으로 강제 청산된 거래를 대상으로 역시뮬레이션 분석을 수행합니다.\n\n분석 방법: 타임스탑 시점에 청산하지 않고 계속 보유했다면 PnL이 어떻게 달라졌을지 시뮬레이션합니다.\n\n[방어] 청산 덕분에 추가 손실을 피한 횟수입니다. 타임스탑이 없었다면 더 큰 손실이 났을 거래의 건수입니다.\n[기회비용] 청산하지 않고 버텼더라면 더 좋은 결과가 나왔을 것으로 예상되는 건수입니다. 타임스탑이 잠재적 수익을 잘라낸 횟수입니다.\n\n[평균 효과] (역시뮬레이션 PnL - 실제 청산 PnL)의 평균값입니다.\n  · 음수(↓)일수록 타임스탑이 평균적으로 손실을 줄여줬다는 의미입니다.\n  · 양수(↑)이면 타임스탑이 오히려 수익 기회를 방해했다는 의미입니다.\n\n[+1봉 / +3봉] 청산 후 1봉·3봉 뒤 가격을 기준으로 재계산한 평균 효과입니다.\n0에 가까울수록 타이밍이 통계적으로 중립적이었음을 나타냅니다."} style={{ border: '1px solid rgba(59,139,235,0.2)', borderRadius: 10, padding: '10px 12px', background: 'rgba(59,139,235,0.05)', cursor: 'help' }}>
+                    <div style={{ fontSize: '0.62rem', color: '#3b8beb', fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '0.04em', marginBottom: 2 }}>타임스탑 후 실제 결과</div>
+                    <div style={{ fontSize: '0.68rem', color: '#7f8fa8', marginBottom: 8 }}>강제청산 시점 기준 역시뮬레이션</div>
+                    {/* Ratio bar */}
+                    <div style={{ marginBottom: 8 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+                        <span style={{ fontSize: '0.61rem', color: '#0ecb81' }}>방어 {cfSummary.helpedOff}</span>
+                        <span style={{ fontSize: '0.59rem', color: '#5d7080' }}>총 {cfSummary.samplesOff}건</span>
+                        <span style={{ fontSize: '0.61rem', color: '#f6465d' }}>기회비용 {cfSummary.hurtOff}</span>
+                      </div>
+                      <div style={{ height: 8, borderRadius: 4, background: 'rgba(246,70,93,0.25)', overflow: 'hidden' }}>
+                        <div style={{ height: '100%', width: `${helpedPct}%`, background: '#0ecb81', borderRadius: 4, opacity: 0.85 }} />
+                      </div>
+                    </div>
+                    {/* Stats row */}
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 5 }}>
+                      {[
+                        { label: '평균 효과', value: fmtDelta(cfSummary.avgDeltaOff), color: deltaColor },
+                        { label: '+1봉', value: fmtDelta(cfSummary.avgDeltaOffPlus1), color: '#7f8fa8' },
+                        { label: '+3봉', value: fmtDelta(cfSummary.avgDeltaOffPlus3), color: '#7f8fa8' },
+                      ].map(({ label, value, color }) => (
+                        <div key={label} style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 6, padding: '5px 6px', textAlign: 'center' as const }}>
+                          <div style={{ fontSize: '0.57rem', color: '#3d5060', marginBottom: 2 }}>{label}</div>
+                          <div style={{ fontSize: '0.73rem', color, fontWeight: 700, fontFamily: '"SF Mono",Consolas,monospace' }}>{value}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
+              {/* Card 2: 타임스탑 없이 청산 */}
+              {(() => {
+                const total = cfSummary.helpedOn + cfSummary.hurtOn;
+                const helpedPct = total > 0 ? (cfSummary.helpedOn / total) * 100 : 50;
+                const deltaColor = (cfSummary.avgDeltaOn ?? 0) >= 0 ? '#0ecb81' : '#f6465d';
+                return (
+                  <div title={"[타임스탑 없이 청산] 상세 설명\n\n이 카드는 타임스탑이 꺼진 상태(OFF)에서 TP·SL·수동으로 청산된 거래를 대상으로,\n\"만약 타임스탑이 켜져 있었다면?\"을 역시뮬레이션합니다.\n\n분석 방법: 해당 거래의 타임스탑 만료 시각에 강제 청산됐다고 가정하고 PnL을 재계산합니다.\n\n[방어] 타임스탑이 있었다면 더 일찍 빠져나와 손실을 줄였을 것으로 예상되는 건수입니다.\n[기회비용] 타임스탑 없이 TP까지 온전히 수익을 실현한 건수입니다. 타임스탑이 수익을 가로막았을 것으로 예상되는 건수입니다.\n\n[평균 효과] (타임스탑 가정 PnL - 실제 PnL)의 평균값입니다.\n  · 양수(↑)이면 타임스탑을 쓰는 것이 평균적으로 더 유리했다는 의미입니다.\n  · 음수(↓)이면 타임스탑 없이 청산하는 것이 더 유리했다는 의미입니다.\n\n카드 1과 이 카드를 함께 보면 타임스탑의 효과를 양방향으로 종합 평가할 수 있습니다."} style={{ border: '1px solid rgba(127,138,160,0.2)', borderRadius: 10, padding: '10px 12px', background: 'rgba(127,138,160,0.04)', cursor: 'help' }}>
+                    <div style={{ fontSize: '0.62rem', color: '#9aa4b5', fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '0.04em', marginBottom: 2 }}>타임스탑 없이 청산</div>
+                    <div style={{ fontSize: '0.68rem', color: '#7f8fa8', marginBottom: 8 }}>TP/SL 청산 시 타임스탑 적용 가정</div>
+                    {/* Ratio bar */}
+                    <div style={{ marginBottom: 8 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+                        <span style={{ fontSize: '0.61rem', color: '#0ecb81' }}>방어 {cfSummary.helpedOn}</span>
+                        <span style={{ fontSize: '0.59rem', color: '#5d7080' }}>총 {cfSummary.samplesOn}건</span>
+                        <span style={{ fontSize: '0.61rem', color: '#f6465d' }}>기회비용 {cfSummary.hurtOn}</span>
+                      </div>
+                      <div style={{ height: 8, borderRadius: 4, background: 'rgba(246,70,93,0.25)', overflow: 'hidden' }}>
+                        <div style={{ height: '100%', width: `${helpedPct}%`, background: '#0ecb81', borderRadius: 4, opacity: 0.85 }} />
+                      </div>
+                    </div>
+                    {/* Stats row */}
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 5 }}>
+                      <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 6, padding: '5px 8px', textAlign: 'center' as const }}>
+                        <div style={{ fontSize: '0.57rem', color: '#3d5060', marginBottom: 2 }}>평균 효과</div>
+                        <div style={{ fontSize: '0.78rem', color: deltaColor, fontWeight: 700, fontFamily: '"SF Mono",Consolas,monospace' }}>{fmtDelta(cfSummary.avgDeltaOn)}</div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+              {/* Card 3: 청산 후 3봉 흐름 */}
+              {(cfSummary.avgMfePct != null || cfSummary.avgMaePct != null) && (() => {
+                const mfe = cfSummary.avgMfePct ?? 0;
+                const mae = cfSummary.avgMaePct ?? 0;
+                const maxAbs = Math.max(Math.abs(mfe), Math.abs(mae), 0.01);
+                return (
+                  <div title={"[청산 후 3봉 흐름] 상세 설명\n\n타임스탑으로 청산한 직후 3봉(캔들) 동안 실제 시장 가격이 어떤 방향으로 얼마나 움직였는지를 분석합니다.\n\n[MFE (Maximum Favorable Excursion) — 최대 상승 여지]\n청산 후 3봉 안에서 내 포지션 방향으로 가격이 최대 얼마나 유리하게 움직였는지의 평균 비율입니다.\n  · LONG이면: 청산가 대비 3봉 내 최고 고점까지의 상승률 평균\n  · SHORT이면: 청산가 대비 3봉 내 최저 저점까지의 하락률 평균\n이 값이 클수록 \"조금만 더 버텼으면 수익이 늘었을 것\"이라는 의미입니다.\n\n[MAE (Maximum Adverse Excursion) — 최대 하락 위험]\n청산 후 3봉 안에서 내 포지션에 불리한 방향으로 가격이 최대 얼마나 움직였는지의 평균 비율입니다.\n이 값이 클수록 청산이 실제로 손실을 방어해줬다는 의미입니다.\n\n해석 기준:\n  · MFE ≈ MAE → 청산 타이밍이 통계적으로 중립적이었습니다.\n  · MFE > MAE → 평균적으로 청산 후 내 방향으로 더 움직였습니다.\n               조기청산으로 수익 기회를 놓쳤을 가능성이 있습니다.\n  · MFE < MAE → 평균적으로 청산 후 반대 방향으로 움직였습니다.\n               타임스탑이 손실을 효과적으로 방어했습니다."} style={{ border: '1px solid rgba(240,185,11,0.18)', borderRadius: 10, padding: '10px 12px', background: 'rgba(240,185,11,0.04)', cursor: 'help' }}>
+                    <div style={{ fontSize: '0.62rem', color: '#f0b90b', fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '0.04em', marginBottom: 2 }}>청산 후 3봉 흐름</div>
+                    <div style={{ fontSize: '0.68rem', color: '#7f8fa8', marginBottom: 10 }}>청산 후 3봉 동안 가격 이동 범위</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+                          <span style={{ fontSize: '0.62rem', color: '#0ecb81' }}>MFE 상승 여지</span>
+                          <span style={{ fontSize: '0.68rem', color: '#0ecb81', fontWeight: 700, fontFamily: '"SF Mono",Consolas,monospace' }}>{mfe >= 0 ? '+' : ''}{mfe.toFixed(2)}%</span>
+                        </div>
+                        <div style={{ height: 7, borderRadius: 3, background: 'rgba(255,255,255,0.06)', overflow: 'hidden' }}>
+                          <div style={{ height: '100%', width: `${(Math.abs(mfe) / maxAbs) * 100}%`, background: '#0ecb81', borderRadius: 3, opacity: 0.8 }} />
+                        </div>
+                      </div>
+                      <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+                          <span style={{ fontSize: '0.62rem', color: '#f6465d' }}>MAE 하락 위험</span>
+                          <span style={{ fontSize: '0.68rem', color: '#f6465d', fontWeight: 700, fontFamily: '"SF Mono",Consolas,monospace' }}>{mae >= 0 ? '+' : ''}{mae.toFixed(2)}%</span>
+                        </div>
+                        <div style={{ height: 7, borderRadius: 3, background: 'rgba(255,255,255,0.06)', overflow: 'hidden' }}>
+                          <div style={{ height: '100%', width: `${(Math.abs(mae) / maxAbs) * 100}%`, background: '#f6465d', borderRadius: 3, opacity: 0.8 }} />
+                        </div>
+                      </div>
+                    </div>
+                    <div style={{ fontSize: '0.59rem', color: '#4a5060', marginTop: 8, lineHeight: 1.5 }}>MFE ≈ MAE면 타이밍 적절 · MFE &gt; MAE면 조기청산 손실 가능</div>
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+        </PerfCard>
+      </div>
+
+      {/* ── Row 4: 구간별 성과 | 종료 사유 | 시간대별 성과 (3-column) ──────────── */}
+      <div style={{ ...revealStyle(3), display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, marginTop: 10 }}>
+        {/* 구간별 성과 */}
+        <PerfCard style={{ marginBottom: 0 }}>
+          <PerfCardTitle icon="📈" title="구간별 성과 보기" badge={<span style={{ fontSize: '0.63rem', color: '#6b7892' }}>{drillTitle}</span>} />
+          <div style={{ display: 'flex', flexWrap: 'wrap' as const, gap: 4, marginBottom: 9 }}>
+            {[
+              { key: 'timeframe', label: '봉' },
+              { key: 'side', label: 'L/S' },
+              { key: 'source', label: '진입' },
+              { key: 'leverage', label: '레버' },
+              { key: 'cadence', label: '주기' },
+            ].map(x => {
+              const active = drillKey === x.key;
+              return (
+                <button
+                  key={x.key}
+                  onClick={() => setDrillKey(x.key as typeof drillKey)}
+                  style={{
+                    fontSize: '0.69rem',
+                    color: active ? '#e8f0ff' : '#6f7c90',
+                    border: `1px solid ${active ? 'rgba(59,139,235,0.5)' : 'rgba(255,255,255,0.07)'}`,
+                    background: active ? 'linear-gradient(135deg, rgba(59,139,235,0.25), rgba(59,139,235,0.12))' : 'rgba(255,255,255,0.03)',
+                    borderRadius: 999,
+                    padding: '3px 10px',
+                    cursor: 'pointer',
+                    fontWeight: active ? 700 : 500,
+                    boxShadow: active ? '0 0 8px rgba(59,139,235,0.2)' : 'none',
+                    transition: 'all 180ms ease',
+                  }}
+                >
+                  {x.label}
+                </button>
+              );
+            })}
+          </div>
+          <AnalyticsGroupBars key={drillKey} rows={drillRows} />
+        </PerfCard>
+
+        {/* 종료 사유 */}
+        <PerfCard style={{ marginBottom: 0 }}>
+          <PerfCardTitle icon="🎯" title="어떻게 끝났나?" badge={
+            <span style={{ fontSize: '0.63rem', color: '#6b7892' }}>종료 사유</span>
+          } />
+          {closeReasonRows.length === 0 ? (
+            <div style={{ fontSize: '0.72rem', color: '#5d6776' }}>종료된 ALT 거래 내역이 없습니다.</div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+              {closeReasonRows.map((r, idx) => {
+                const barW = Math.max(4, (r.count / closeReasonRows[0].count) * 80);
+                return (
+                  <div key={r.key} style={{ padding: '6px 0', borderTop: idx > 0 ? '1px solid rgba(255,255,255,0.04)' : 'none' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ width: 7, height: 7, borderRadius: '50%', background: r.color ?? '#848e9c', flexShrink: 0, boxShadow: `0 0 5px ${r.color ?? '#848e9c'}99` }} />
+                        <span style={{ fontSize: '0.73rem', color: r.color ?? '#c9d0db', fontWeight: 700 }}>{r.label}</span>
+                      </div>
+                      <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                        <span style={{ fontSize: '0.67rem', color: r.winRate >= 50 ? '#0ecb81' : '#e07070', fontFamily: '"SF Mono",Consolas,monospace', fontWeight: 600 }}>{r.winRate.toFixed(0)}%</span>
+                        <span style={{ fontSize: '0.67rem', color: r.totalPnl >= 0 ? '#0ecb81' : '#f6465d', fontFamily: '"SF Mono",Consolas,monospace', fontWeight: 700 }}>{r.totalPnl >= 0 ? '+' : ''}{r.totalPnl.toFixed(1)}</span>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <div style={{ flex: 1, height: 5, borderRadius: 3, background: 'rgba(255,255,255,0.05)', overflow: 'hidden' }}>
+                        <div style={{ height: '100%', width: `${barW}%`, background: r.color ?? '#848e9c', borderRadius: 3, opacity: 0.7 }} />
+                      </div>
+                      <span style={{ fontSize: '0.64rem', color: '#6a7a90', fontFamily: '"SF Mono",Consolas,monospace', flexShrink: 0 }}>{r.count}건</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </PerfCard>
+
+        {/* 시간대별 성과 */}
+        <PerfCard style={{ marginBottom: 0 }}>
+          <PerfCardTitle icon="⏰" title="시간대별 성과" badge={<span style={{ fontSize: '0.63rem', color: '#6b7892' }}>KST 기준 청산 시각</span>} />
+          {rows.length === 0 ? (
+            <div style={{ fontSize: '0.72rem', color: '#5d6776' }}>거래 내역이 없습니다.</div>
+          ) : (
+            <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+              <HourlyRingChart data={byHour} />
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 0, minWidth: 0 }}>
+                <div style={{ fontSize: '0.59rem', color: '#3b8beb', fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase' as const, marginBottom: 4 }}>상위 수익 시간대</div>
+                {byHour.filter(h => h.count > 0).sort((a, b) => b.totalPnl - a.totalPnl).slice(0, 3).map(h => (
+                  <div key={h.hour} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '3px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                    <span style={{ fontSize: '0.63rem', color: '#7f8fa8' }}>{String(h.hour).padStart(2, '0')}:00 KST</span>
+                    <div style={{ textAlign: 'right' as const }}>
+                      <span style={{ fontSize: '0.65rem', color: '#0ecb81', fontFamily: '"SF Mono",Consolas,monospace', fontWeight: 600 }}>{h.totalPnl >= 0 ? '+' : ''}{h.totalPnl.toFixed(1)}</span>
+                      <span style={{ fontSize: '0.59rem', color: '#3d5060', marginLeft: 4 }}>{h.count}건</span>
+                    </div>
+                  </div>
+                ))}
+                <div style={{ fontSize: '0.59rem', color: '#f6465d', fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase' as const, marginTop: 8, marginBottom: 4 }}>상위 손실 시간대</div>
+                {byHour.filter(h => h.count > 0).sort((a, b) => a.totalPnl - b.totalPnl).slice(0, 3).map(h => (
+                  <div key={h.hour} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '3px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                    <span style={{ fontSize: '0.63rem', color: '#7f8fa8' }}>{String(h.hour).padStart(2, '0')}:00 KST</span>
+                    <div style={{ textAlign: 'right' as const }}>
+                      <span style={{ fontSize: '0.65rem', color: '#f6465d', fontFamily: '"SF Mono",Consolas,monospace', fontWeight: 600 }}>{h.totalPnl >= 0 ? '+' : ''}{h.totalPnl.toFixed(1)}</span>
+                      <span style={{ fontSize: '0.59rem', color: '#3d5060', marginLeft: 4 }}>{h.count}건</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </PerfCard>
+      </div>
     </div>
   );
 }
@@ -1035,7 +1229,7 @@ interface AssetLineChartProps {
 }
 
 // Fixed pixel height for the chart — keeps size predictable regardless of container width
-const CHART_H = 68;
+const CHART_H = 136;
 
 function AssetLineChart({ pts, gradId, showZeroLine, color, label, period, fmtTooltip }: AssetLineChartProps) {
   const lineRef = useRef<SVGPathElement>(null);
@@ -1846,6 +2040,55 @@ export function BottomPanel({
     if (tab === 'live-history') setLiveHistoryLimit(10);
   }, [tab]);
 
+  // ── Performance tab expand / collapse ──────────────────────────────────────
+  type ExpandState = 'collapsed' | 'expanding' | 'full' | 'collapsing';
+  const [expandState, setExpandState] = useState<ExpandState>('collapsed');
+  const expandHeightRef = useRef(height);
+  const expandFullHeightRef = useRef(typeof window !== 'undefined' ? window.innerHeight : 600);
+  const expandTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const EXPAND_MS = 380;
+
+  useEffect(() => {
+    const isPerf = tab === 'paper-performance' || tab === 'live-performance';
+    if (isPerf) {
+      if (expandState === 'collapsed') {
+        expandHeightRef.current = height;
+        expandFullHeightRef.current = window.innerHeight;
+        setExpandState('expanding');
+        const id = window.requestAnimationFrame(() =>
+          window.requestAnimationFrame(() => setExpandState('full'))
+        );
+        return () => window.cancelAnimationFrame(id);
+      }
+    } else {
+      if (expandState === 'full' || expandState === 'expanding') {
+        if (expandTimerRef.current) clearTimeout(expandTimerRef.current);
+        setExpandState('collapsing');
+        expandTimerRef.current = setTimeout(() => setExpandState('collapsed'), EXPAND_MS + 50);
+        return () => { if (expandTimerRef.current) clearTimeout(expandTimerRef.current); };
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
+
+  const isExpanded = expandState !== 'collapsed';
+  const capturedH = expandHeightRef.current;
+  const fullH = expandFullHeightRef.current;
+
+  const containerStyle: React.CSSProperties = (() => {
+    const base = s.container as React.CSSProperties;
+    switch (expandState) {
+      case 'collapsed':
+        return { ...base, height };
+      case 'expanding':
+        return { ...base, position: 'fixed', bottom: 0, left: 0, right: 0, height: capturedH, zIndex: 4999, transition: `height ${EXPAND_MS}ms cubic-bezier(0.22,1,0.36,1)` };
+      case 'full':
+        return { ...base, position: 'fixed', bottom: 0, left: 0, right: 0, height: fullH, zIndex: 4999, transition: `height ${EXPAND_MS}ms cubic-bezier(0.22,1,0.36,1)` };
+      case 'collapsing':
+        return { ...base, position: 'fixed', bottom: 0, left: 0, right: 0, height: capturedH, zIndex: 4999, transition: `height ${EXPAND_MS}ms cubic-bezier(0.22,1,0.36,1)` };
+    }
+  })();
+
   const fromTs = dateFrom ? new Date(dateFrom).getTime() : 0;
   const toTs = dateTo ? new Date(dateTo).getTime() + 86399999 : Number.POSITIVE_INFINITY;
 
@@ -2148,9 +2391,12 @@ export function BottomPanel({
   );
 
   return (
-    <div style={{ ...s.container, height }}>
-      {/* Drag handle */}
-      <div style={s.resizeHandle} onMouseDown={handleResizeMouseDown} title="드래그하여 크기 조절" />
+    <>
+      {/* Spacer keeps layout intact while panel is fixed-position */}
+      {isExpanded && <div style={{ flexShrink: 0, height: capturedH }} />}
+      <div style={containerStyle}>
+        {/* Drag handle — hidden when expanded */}
+        {!isExpanded && <div style={s.resizeHandle} onMouseDown={handleResizeMouseDown} title="드래그하여 크기 조절" />}
 
       {/* Tab bar */}
       <div style={s.tabBar}>
@@ -2223,6 +2469,12 @@ export function BottomPanel({
               성과분석
             </button>
           </>
+        )}
+        {isExpanded && (
+          <button
+            style={{ marginLeft: 'auto', marginRight: 8, background: 'rgba(246,70,93,0.15)', border: '1px solid rgba(246,70,93,0.3)', borderRadius: 5, color: '#f6465d', cursor: 'pointer', fontSize: '0.78rem', fontWeight: 700, padding: '3px 12px', fontFamily: 'inherit' }}
+            onClick={() => setTab('positions')}
+          >닫기</button>
         )}
       </div>
 
@@ -2573,7 +2825,7 @@ export function BottomPanel({
                         </td>
                         {/* 진입시간 column (live) */}
                         <td style={{ ...s.td, color: '#5d6776', fontSize: '0.74rem', whiteSpace: 'nowrap' }}>
-                          {pos.entryTime ? fmtEntryTime(pos.entryTime) : (pos.updateTime ? fmtEntryTime(pos.updateTime) : '—')}
+                          {(liveMeta?.liveEntryTime ?? pos.entryTime ?? pos.updateTime) ? fmtEntryTime((liveMeta?.liveEntryTime ?? pos.entryTime ?? pos.updateTime)!) : '—'}
                         </td>
                         <td style={s.td}>
                           <div style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'center' }}>
@@ -2798,7 +3050,8 @@ export function BottomPanel({
           }}
         />
       )}
-    </div>
+      </div>
+    </>
   );
 }
 

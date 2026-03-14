@@ -63,7 +63,10 @@ export function TimeStopDecisionModal({
   }, [req.key]);
 
   const remainMs = Math.max(0, req.deadlineAt - nowMs);
-  const canExtend = req.eval.status === 'done' && req.eval.tightenOk === true && req.eval.flipSuggested !== true && req.state === 'pending';
+  // canExtend: eval complete + no flip signal + still pending
+  // tightenOk means we can also update SL to a better value
+  const canExtend = req.eval.status === 'done' && req.eval.flipSuggested !== true && req.state === 'pending';
+  const canUpdateSl = canExtend && req.eval.tightenOk === true;
   const proposedSl = req.eval.newSl;
   const proposedTp = req.eval.newTp;
 
@@ -99,12 +102,12 @@ export function TimeStopDecisionModal({
         </div>
 
         <div style={S.section}>
-          <label style={S.checkboxLabel}>
+          <label style={{ ...S.checkboxLabel, ...(canUpdateSl ? {} : { opacity: 0.4 }) }}>
             <input
               type="checkbox"
               checked={applyTp}
               onChange={(e) => setApplyTp(e.target.checked)}
-              disabled={!canExtend}
+              disabled={!canUpdateSl}
             />
             TP도 새 값으로 업데이트
           </label>
@@ -124,6 +127,11 @@ export function TimeStopDecisionModal({
               2봉 연장
             </button>
           </div>
+          {canExtend && !canUpdateSl && (
+            <div style={{ marginTop: 6, fontSize: '0.74rem', color: '#9aa4b5' }}>
+              ※ SL 갱신 없이 마감 시간만 연장됩니다. (SL 개선 불가 상태)
+            </div>
+          )}
         </div>
 
         <div style={S.actions}>
@@ -135,7 +143,7 @@ export function TimeStopDecisionModal({
             onClick={() => onApplyTightenAndExtend(req.key, extendBars, applyTp)}
             disabled={!canExtend || req.state !== 'pending'}
           >
-            {req.state === 'closing' ? '적용 중...' : 'SL 갱신 후 연장'}
+            {req.state === 'closing' ? '적용 중...' : canUpdateSl ? 'SL 갱신 후 연장' : '연장'}
           </button>
           <button style={S.ghostBtn} onClick={onCloseModal}>닫기</button>
         </div>

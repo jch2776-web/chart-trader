@@ -24,6 +24,13 @@ function makeCacheKey(symbol: string, interval: string, limit: number): string {
   return `${symbol}|${interval}|${limit}`;
 }
 
+function parseLimitFromKey(key: string): number {
+  const idx = key.lastIndexOf('|');
+  if (idx < 0) return 0;
+  const parsed = Number(key.slice(idx + 1));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function computeFreshnessKey(interval: string): number {
   const ivMs = intervalToMs(interval);
   const now = Date.now();
@@ -55,6 +62,37 @@ export async function fetchBinanceKlinesCached(
     current.touchedAt = now;
     return current.candles;
   }
+
+  // Reuse larger fresh windows for smaller limit requests to cut duplicate calls
+  // during burst scans (e.g. 202 + 500 lookups in nearby flows).
+  const prefix = `${symbol}|${interval}|`;
+  let fallbackCandles: Candle[] | null = null;
+  let fallbackKey: string | null = null;
+  let fallbackLimit = Number.POSITIVE_INFINITY;
+  for (const [k, row] of cache.entries()) {
+    if (!k.startsWith(prefix)) continue;
+    if (row.freshnessKey !== freshnessKey || !row.candles) continue;
+    const cachedLimit = parseLimitFromKey(k);
+    if (cachedLimit < safeLimit) continue;
+    if (cachedLimit >= fallbackLimit) continue;
+    fallbackLimit = cachedLimit;
+    fallbackKey = k;
+    fallbackCandles = row.candles;
+  }
+  if (fallbackCandles) {
+    const sliced = fallbackCandles.slice(-safeLimit);
+    cache.set(key, {
+      freshnessKey,
+      candles: sliced,
+      touchedAt: now,
+    });
+    if (fallbackKey) {
+      const src = cache.get(fallbackKey);
+      if (src) src.touchedAt = now;
+    }
+    return sliced;
+  }
+
   if (current?.inFlight) {
     current.touchedAt = now;
     return current.inFlight;

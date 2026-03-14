@@ -18,4 +18,5 @@ export interface BoardComment {
   author: string;
   text: string;
   createdAt: number;        // ms epoch
+  updatedAt?: number;       // ms epoch, set on edit
 }

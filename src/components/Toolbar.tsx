@@ -29,6 +29,7 @@ interface Props {
   onOpenAutoTradeSettings?: () => void;
   isAutoTradeActive?: boolean;
   autoTradeScanning?: boolean;
+  autoScanProgress?: { interval: string; done: number; total: number };
   onToggleAutoTrade?: () => void;
   onTriggerAutoTradeNow?: () => void;
   autoTradeMode?: 'paper' | 'live';
@@ -40,6 +41,15 @@ interface Props {
   // Error notification
   errorLogs?: ActivityLog[];
   onClearErrors?: () => void;
+  // Live account stats (real-time display)
+  liveBalance?: number;
+  liveMarginBalance?: number;
+  liveUnrealizedPnl?: number;
+  // Paper account stats
+  paperBalance?: number;
+  paperUnrealizedPnl?: number;
+  // Binance API weight usage (0–2400)
+  apiWeightUsed?: number;
 }
 
 const INTERVALS: Interval[] = ['1m', '3m', '5m', '15m', '1h', '4h', '1d'];
@@ -55,8 +65,12 @@ export function Toolbar({
   onOpenBoard, onOpenUserBoard, onOpenSecurityFaq, onOpenAltScanner, onOpenSoundSettings, onOpenAutoTradeSettings,
   isAutoTradeActive, autoTradeScanning, onToggleAutoTrade, onTriggerAutoTradeNow,
   autoTradeMode = 'paper', autoTradeCadenceMinutes = 60, onChangeAutoTradeMode,
+  autoScanProgress,
   isMobile, mobilePanel, onToggleMobilePanel,
   errorLogs = [], onClearErrors,
+  liveBalance, liveMarginBalance, liveUnrealizedPnl,
+  paperBalance, paperUnrealizedPnl,
+  apiWeightUsed,
 }: Props) {
   const toggleMode = (m: DrawingMode) => {
     onDrawingModeChange(drawingMode === m ? 'none' : m);
@@ -282,7 +296,11 @@ export function Toolbar({
             transition: 'left 0.2s',
           }} />
         </span>
-        {autoTradeScanning ? '⟳ 스캔 중...' : autoTradeMode === 'live' ? '⚡ 자동매매(실전)' : '⚡ 자동매매(모의)'}
+        {autoTradeScanning
+          ? autoScanProgress
+            ? `⟳ [${autoScanProgress.interval}] ${autoScanProgress.done}/${autoScanProgress.total}`
+            : '⟳ 스캔 준비 중...'
+          : autoTradeMode === 'live' ? '⚡ 자동매매(실전)' : '⚡ 자동매매(모의)'}
       </button>
       {isAutoTradeActive && !autoTradeScanning && (
         <button
@@ -318,6 +336,91 @@ export function Toolbar({
       >
         🔒 보안FAQ
       </button>
+
+      {/* ── Realtime account stats ────────────────── */}
+      {isPaperMode ? (
+        paperBalance != null && (
+          <div style={styles.statsStrip}>
+            <div style={styles.statItem}>
+              <span style={styles.statLabel}>잔고</span>
+              <span style={styles.statValue}>${paperBalance.toFixed(2)}</span>
+            </div>
+            {paperUnrealizedPnl != null && (
+              <>
+                <div style={styles.statDivider} />
+                <div style={styles.statItem}>
+                  <span style={styles.statLabel}>미실현</span>
+                  <span style={{ ...styles.statValue, color: paperUnrealizedPnl >= 0 ? '#0ecb81' : '#f6465d' }}>
+                    {paperUnrealizedPnl >= 0 ? '+' : ''}{paperUnrealizedPnl.toFixed(2)}
+                  </span>
+                </div>
+              </>
+            )}
+          </div>
+        )
+      ) : (
+        (liveBalance != null || liveMarginBalance != null) && (
+          <div style={styles.statsStrip}>
+            {liveBalance != null && (
+              <div style={styles.statItem}>
+                <span style={styles.statLabel}>가용</span>
+                <span style={styles.statValue}>${liveBalance.toFixed(2)}</span>
+              </div>
+            )}
+            {liveUnrealizedPnl != null && (
+              <>
+                <div style={styles.statDivider} />
+                <div style={styles.statItem}>
+                  <span style={styles.statLabel}>미실현</span>
+                  <span style={{ ...styles.statValue, color: liveUnrealizedPnl >= 0 ? '#0ecb81' : '#f6465d' }}>
+                    {liveUnrealizedPnl >= 0 ? '+' : ''}{liveUnrealizedPnl.toFixed(2)}
+                  </span>
+                </div>
+              </>
+            )}
+            {liveMarginBalance != null && (
+              <>
+                <div style={styles.statDivider} />
+                <div style={styles.statItem}>
+                  <span style={styles.statLabel}>마진잔고</span>
+                  <span style={styles.statValue}>${liveMarginBalance.toFixed(2)}</span>
+                </div>
+              </>
+            )}
+          </div>
+        )
+      )}
+
+      {/* ── Binance API weight gauge ────────────────── */}
+      {(() => {
+        const w = apiWeightUsed ?? 0;
+        const HARD = 2400;
+        const pct = Math.min(100, (w / HARD) * 100);
+        const barColor = w >= 1800 ? '#f6465d' : w >= 1200 ? '#f0b90b' : '#0ecb81';
+        const bgColor = w >= 1800 ? 'rgba(246,70,93,0.12)' : w >= 1200 ? 'rgba(240,185,11,0.10)' : 'rgba(14,203,129,0.08)';
+        return (
+          <div
+            style={{
+              ...styles.weightGauge,
+              background: bgColor,
+              border: `1px solid ${barColor}44`,
+              borderRadius: 5,
+              padding: '0 7px',
+              gap: 4,
+              height: 26,
+              boxSizing: 'border-box',
+            }}
+            title={`바이낸스 API 가중치: ${w} / ${HARD}\n소프트 한도: 1800 / 분\n현재 ${pct.toFixed(0)}% 사용 중`}
+          >
+            <span style={{ fontSize: '0.62rem', color: '#5e6e82', fontWeight: 600, letterSpacing: '0.01em' }}>API</span>
+            <div style={styles.weightBarTrack}>
+              <div style={{ ...styles.weightBarFill, width: `${pct}%`, background: barColor }} />
+              <div style={styles.weightSoftMark} />
+            </div>
+            <span style={{ ...styles.weightNum, color: barColor, minWidth: 26 }}>{pct.toFixed(0)}%</span>
+          </div>
+        );
+      })()}
 
       {/* Sound settings button */}
       <button
@@ -363,11 +466,15 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
     fontSize: '0.92rem',
     fontWeight: 500,
-    padding: '4px 10px',
+    padding: '0 10px',
+    height: 26,
+    display: 'inline-flex',
+    alignItems: 'center',
     transition: 'all 0.1s',
     fontFamily: '"SF Mono", Consolas, monospace',
     whiteSpace: 'nowrap',
     flexShrink: 0,
+    boxSizing: 'border-box',
   },
   intervalActive: {
     color: '#f0b90b',
@@ -393,14 +500,16 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#848e9c',
     cursor: 'pointer',
     fontSize: '0.85rem',
-    padding: '4px 10px',
-    transition: 'all 0.1s',
-    fontFamily: 'inherit',
-    display: 'flex',
+    padding: '0 10px',
+    height: 26,
+    display: 'inline-flex',
     alignItems: 'center',
     gap: 4,
+    transition: 'all 0.1s',
+    fontFamily: 'inherit',
     whiteSpace: 'nowrap',
     flexShrink: 0,
+    boxSizing: 'border-box',
   },
   drawActive: {
     borderColor: '#444',
@@ -453,11 +562,14 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
     fontSize: '0.85rem',
     fontWeight: 600,
-    padding: '3px 7px',
+    padding: '0 7px',
+    height: 26,
+    display: 'inline-flex',
+    alignItems: 'center',
     fontFamily: '"SF Mono", Consolas, monospace',
-    lineHeight: 1,
     whiteSpace: 'nowrap',
     flexShrink: 0,
+    boxSizing: 'border-box',
   },
   fontLabel: {
     color: '#5e6673',
@@ -475,11 +587,15 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
     fontSize: '0.82rem',
     fontWeight: 600,
-    padding: '4px 10px',
+    padding: '0 10px',
+    height: 26,
+    display: 'inline-flex',
+    alignItems: 'center',
     transition: 'all 0.1s',
     fontFamily: 'inherit',
     flexShrink: 0,
     whiteSpace: 'nowrap',
+    boxSizing: 'border-box',
   },
   featureBtnYellow: {
     borderColor: 'rgba(240,185,11,0.55)',
@@ -510,11 +626,15 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
     fontSize: '0.72rem',
     fontWeight: 600,
-    padding: '2px 6px',
+    padding: '0 6px',
+    height: 26,
+    display: 'inline-flex',
+    alignItems: 'center',
     fontFamily: 'inherit',
     flexShrink: 0,
     whiteSpace: 'nowrap' as const,
     transition: 'all 0.1s',
+    boxSizing: 'border-box' as const,
   },
   modeBtnActivePaper: {
     borderColor: 'rgba(14,203,129,0.5)',
@@ -536,8 +656,9 @@ const styles: Record<string, React.CSSProperties> = {
   indicatorBtn: {
     background: 'none', border: '1px solid #2a2e39', borderRadius: 4,
     color: '#848e9c', cursor: 'pointer', fontSize: '0.82rem', fontWeight: 500,
-    padding: '3px 8px', transition: 'all 0.1s', fontFamily: 'inherit',
-    flexShrink: 0, whiteSpace: 'nowrap' as const,
+    padding: '0 8px', height: 26, display: 'inline-flex', alignItems: 'center',
+    transition: 'all 0.1s', fontFamily: 'inherit',
+    flexShrink: 0, whiteSpace: 'nowrap' as const, boxSizing: 'border-box' as const,
   },
   indicatorActive: {
     borderColor: '#f0b90b', color: '#f0b90b', background: 'rgba(240,185,11,0.1)',
@@ -563,5 +684,89 @@ const styles: Record<string, React.CSSProperties> = {
     borderColor: '#3b8beb',
     color: '#3b8beb',
     background: 'rgba(59,139,235,0.1)',
+  },
+  // ── Realtime stats strip ─────────────────────────────────────────────────
+  statsStrip: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 0,
+    background: 'rgba(255,255,255,0.03)',
+    border: '1px solid rgba(255,255,255,0.07)',
+    borderRadius: 6,
+    padding: '0 10px',
+    height: 26,
+    flexShrink: 0,
+    boxSizing: 'border-box',
+  },
+  // ── API weight gauge ──────────────────────────────────────────────────────
+  weightGauge: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 5,
+    flexShrink: 0,
+    cursor: 'default',
+  },
+  weightLabel: {
+    fontSize: '0.7rem',
+    fontWeight: 700,
+    whiteSpace: 'nowrap' as const,
+    letterSpacing: '0.02em',
+  },
+  weightBarTrack: {
+    position: 'relative' as const,
+    width: 48,
+    height: 5,
+    background: 'rgba(255,255,255,0.08)',
+    borderRadius: 3,
+    overflow: 'visible' as const,
+    flexShrink: 0,
+  },
+  weightBarFill: {
+    height: '100%',
+    borderRadius: 3,
+    transition: 'width 0.6s ease, background 0.3s',
+  },
+  weightSoftMark: {
+    position: 'absolute' as const,
+    left: '75%',
+    top: -2,
+    width: 1,
+    height: 9,
+    background: 'rgba(255,255,255,0.25)',
+  },
+  weightNum: {
+    fontSize: '0.68rem',
+    fontWeight: 700,
+    fontFamily: '"SF Mono", Consolas, monospace',
+    whiteSpace: 'nowrap' as const,
+    minWidth: 28,
+  },
+  statItem: {
+    display: 'flex',
+    flexDirection: 'column' as const,
+    alignItems: 'center',
+    gap: 0,
+    padding: '0 8px',
+  },
+  statLabel: {
+    fontSize: '0.6rem',
+    color: '#4a5a70',
+    fontWeight: 600,
+    letterSpacing: '0.03em',
+    textTransform: 'uppercase' as const,
+    lineHeight: 1.2,
+  },
+  statValue: {
+    fontSize: '0.75rem',
+    color: '#b8c8d8',
+    fontWeight: 700,
+    fontFamily: '"SF Mono", Consolas, monospace',
+    lineHeight: 1.3,
+  },
+  statDivider: {
+    width: 1,
+    height: 22,
+    background: 'rgba(255,255,255,0.08)',
+    flexShrink: 0,
   },
 };
