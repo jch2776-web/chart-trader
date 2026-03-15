@@ -285,15 +285,15 @@ export function Toolbar({
         }}
       >
         <span style={{
-          display: 'inline-block', width: 26, height: 13, borderRadius: 7, position: 'relative',
+          display: 'inline-flex', alignItems: 'center',
+          justifyContent: isAutoTradeActive ? 'flex-end' : 'flex-start',
+          width: 26, height: 13, borderRadius: 7,
           background: isAutoTradeActive ? (autoTradeMode === 'live' ? '#f6465d' : '#0ecb81') : '#3a4455',
           transition: 'background 0.2s', flexShrink: 0,
+          padding: '0 2px', boxSizing: 'border-box',
         }}>
           <span style={{
-            display: 'block', width: 9, height: 9, borderRadius: '50%', background: '#fff',
-            position: 'absolute', top: 2,
-            left: isAutoTradeActive ? 15 : 2,
-            transition: 'left 0.2s',
+            width: 9, height: 9, borderRadius: '50%', background: '#fff', flexShrink: 0,
           }} />
         </span>
         {autoTradeScanning

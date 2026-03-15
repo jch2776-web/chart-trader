@@ -2750,7 +2750,9 @@ function AppInner() {
       return;
     }
     if (req.state !== 'pending') return;
-    if (req.eval.status !== 'done' || req.eval.flipSuggested === true) {
+    // Allow extending when eval is done, OR when eval has been loading >15s (scan hang / rate-limit)
+    const evalStuck = req.eval.status === 'loading' && (Date.now() - req.requestedAt) > 15_000;
+    if ((!evalStuck && req.eval.status !== 'done') || req.eval.flipSuggested === true) {
       setTimeStopRequests(prev => {
         const cur = prev[reqKey];
         if (!cur) return prev;
@@ -2765,8 +2767,8 @@ function AppInner() {
       return;
     }
     // tightenOk=true: SL can be improved → update SL on extend
-    // tightenOk=false: just extend the deadline without touching SL
-    const doUpdateSl = req.eval.tightenOk === true && req.eval.newSl != null;
+    // tightenOk=false (or eval stuck/loading): just extend the deadline without touching SL
+    const doUpdateSl = req.eval.tightenOk === true && req.eval.newSl != null && !evalStuck;
     const tightenedSl = doUpdateSl ? req.eval.newSl! : req.currentSl;
 
     setTimeStopRequests(prev => {

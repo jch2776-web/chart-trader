@@ -21,6 +21,7 @@ interface TimeStopReqView {
   qty: number;
   currentTp?: number | null;
   currentSl: number;
+  requestedAt: number;
   deadlineAt: number;
   state: 'pending' | 'closing';
   eval: TimeStopEvalView;
@@ -64,8 +65,9 @@ export function TimeStopDecisionModal({
 
   const remainMs = Math.max(0, req.deadlineAt - nowMs);
   // canExtend: eval complete + no flip signal + still pending
-  // tightenOk means we can also update SL to a better value
-  const canExtend = req.eval.status === 'done' && req.eval.flipSuggested !== true && req.state === 'pending';
+  // Also allow extending if eval has been loading for >15s (API rate-limit / scan hang guard)
+  const evalStuck = req.eval.status === 'loading' && (nowMs - req.requestedAt) > 15_000;
+  const canExtend = (req.eval.status === 'done' || evalStuck) && req.eval.flipSuggested !== true && req.state === 'pending';
   const canUpdateSl = canExtend && req.eval.tightenOk === true;
   const proposedSl = req.eval.newSl;
   const proposedTp = req.eval.newTp;

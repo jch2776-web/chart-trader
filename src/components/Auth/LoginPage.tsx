@@ -1,19 +1,99 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { login, register } from '../../hooks/useAuth';
 
+// ── reCAPTCHA v2 ─────────────────────────────────────────────────────────────
+// Replace with your real site key from https://www.google.com/recaptcha/admin
+const RECAPTCHA_SITE_KEY = '6LfRWossAAAAAAMrPteTgRbmi53_4mvGj7xKll2l';
+
+declare global {
+  interface Window {
+    grecaptcha: {
+      render: (container: HTMLElement, params: object) => number;
+      reset: (widgetId?: number) => void;
+      getResponse: (widgetId?: number) => string;
+    };
+    _onRecaptchaLoad: () => void;
+  }
+}
+
 export function LoginPage() {
-  const [mode, setMode]       = useState<'login' | 'register'>('login');
+  const [mode, setMode]         = useState<'login' | 'register'>('login');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [showPw, setShowPw]   = useState(false);
-  const [error, setError]     = useState<string | null>(null);
+  const [showPw, setShowPw]     = useState(false);
+  const [error, setError]       = useState<string | null>(null);
+  const [captchaDone, setCaptchaDone] = useState(false);
+
+  const captchaContainerRef = useRef<HTMLDivElement>(null);
+  const widgetIdRef         = useRef<number | null>(null);
+  const scriptLoadedRef     = useRef(false);
+
+  const renderWidget = useCallback(() => {
+    if (!captchaContainerRef.current || widgetIdRef.current !== null) return;
+    if (typeof window.grecaptcha?.render !== 'function') return;
+    widgetIdRef.current = window.grecaptcha.render(captchaContainerRef.current, {
+      sitekey: RECAPTCHA_SITE_KEY,
+      theme: 'dark',
+      callback: () => setCaptchaDone(true),
+      'expired-callback': () => setCaptchaDone(false),
+      'error-callback': () => setCaptchaDone(false),
+    });
+  }, []);
+
+  useEffect(() => {
+    // If reCAPTCHA already loaded (e.g. hot-reload), render immediately
+    if (typeof window.grecaptcha?.render === 'function') {
+      renderWidget();
+      return;
+    }
+    // Otherwise load the script once
+    if (!scriptLoadedRef.current && !document.querySelector('script[data-recaptcha]')) {
+      scriptLoadedRef.current = true;
+      window._onRecaptchaLoad = renderWidget;
+      const script = document.createElement('script');
+      script.src = `https://www.google.com/recaptcha/api.js?onload=_onRecaptchaLoad&render=explicit&hl=ko`;
+      script.setAttribute('data-recaptcha', '1');
+      script.async = true;
+      script.defer = true;
+      document.head.appendChild(script);
+    } else {
+      // Script tag already exists but grecaptcha not yet ready — wait
+      const poll = setInterval(() => {
+        if (typeof window.grecaptcha?.render === 'function') {
+          clearInterval(poll);
+          renderWidget();
+        }
+      }, 200);
+      return () => clearInterval(poll);
+    }
+  }, [renderWidget]);
+
+  // Reset captcha when mode changes
+  useEffect(() => {
+    setCaptchaDone(false);
+    if (widgetIdRef.current !== null && typeof window.grecaptcha?.reset === 'function') {
+      window.grecaptcha.reset(widgetIdRef.current);
+    }
+  }, [mode]);
 
   const handleSubmit = () => {
     setError(null);
+    if (!captchaDone) {
+      setError('보안 확인을 완료해주세요.');
+      return;
+    }
     const err = mode === 'login'
       ? login(username, password)
       : register(username, password);
-    if (err) { setError(err); return; }
+    if (err) {
+      setError(err);
+      // Reset captcha on failure so user must redo it
+      setCaptchaDone(false);
+      if (widgetIdRef.current !== null && typeof window.grecaptcha?.reset === 'function') {
+        window.grecaptcha.reset(widgetIdRef.current);
+      }
+      return;
+    }
     window.location.reload();
   };
 
@@ -87,11 +167,20 @@ export function LoginPage() {
           </div>
         </div>
 
+        {/* reCAPTCHA */}
+        <div style={styles.captchaWrap}>
+          <div ref={captchaContainerRef} />
+        </div>
+
         {/* Error */}
         {error && <div style={styles.errorMsg}>{error}</div>}
 
         {/* Submit */}
-        <button style={styles.submitBtn} onClick={handleSubmit}>
+        <button
+          style={{ ...styles.submitBtn, ...(!captchaDone ? styles.submitBtnDisabled : {}) }}
+          onClick={handleSubmit}
+          disabled={!captchaDone}
+        >
           {mode === 'login' ? '로그인' : '계정 만들기'}
         </button>
 
@@ -210,6 +299,11 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '2px 4px',
     lineHeight: 1,
   },
+  captchaWrap: {
+    display: 'flex',
+    justifyContent: 'center',
+    minHeight: 78,
+  },
   errorMsg: {
     background: 'rgba(246,70,93,0.08)',
     border: '1px solid rgba(246,70,93,0.2)',
@@ -230,6 +324,10 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: 'inherit',
     transition: 'opacity 0.15s',
     marginTop: 2,
+  },
+  submitBtnDisabled: {
+    opacity: 0.45,
+    cursor: 'not-allowed',
   },
   notice: {
     background: 'rgba(240,185,11,0.06)',
