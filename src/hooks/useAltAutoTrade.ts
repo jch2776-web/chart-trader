@@ -84,6 +84,7 @@ export function useAltAutoTrade({
   enterLabel = '진입',
   scanIntervals,
   cadenceMinutes,
+  maxAutoPositionsPerScan,
 }: {
   symbols: string[];
   onEnterTrade: (candidate: ScanCandidate) => void;
@@ -92,6 +93,7 @@ export function useAltAutoTrade({
   enterLabel?: string;
   scanIntervals?: ScanInterval[];
   cadenceMinutes?: number;
+  maxAutoPositionsPerScan?: number;
 }) {
   const [isActive, setIsActiveState] = useState<boolean>(() => {
     try { return localStorage.getItem(AUTO_TRADE_KEY) === 'true'; } catch { return false; }
@@ -103,24 +105,26 @@ export function useAltAutoTrade({
   const [scanProgress, setScanProgress] = useState<{ interval: string; done: number; total: number } | null>(null);
 
   // Refs so callbacks always see fresh values without stale closures
-  const isActiveRef        = useRef(isActive);
-  const symbolsRef         = useRef(symbols);
-  const onEnterRef         = useRef(onEnterTrade);
-  const onLogRef           = useRef(onLog);
-  const onScanEventRef     = useRef(onScanEvent);
-  const enterLabelRef      = useRef(enterLabel);
-  const scanIntervalsRef   = useRef(scanIntervals ?? DEFAULT_SCAN_INTERVALS);
-  const cadenceRef         = useRef(normalizeCadenceMinutes(cadenceMinutes));
-  const scanningRef        = useRef(false);
-  const lastRunSlotRef     = useRef<number>(-1);
-  isActiveRef.current      = isActive;
-  symbolsRef.current       = symbols;
-  onEnterRef.current       = onEnterTrade;
-  onLogRef.current         = onLog;
-  onScanEventRef.current   = onScanEvent;
-  enterLabelRef.current    = enterLabel;
-  scanIntervalsRef.current = scanIntervals && scanIntervals.length > 0 ? scanIntervals : DEFAULT_SCAN_INTERVALS;
-  cadenceRef.current       = normalizeCadenceMinutes(cadenceMinutes);
+  const isActiveRef               = useRef(isActive);
+  const symbolsRef                = useRef(symbols);
+  const onEnterRef                = useRef(onEnterTrade);
+  const onLogRef                  = useRef(onLog);
+  const onScanEventRef            = useRef(onScanEvent);
+  const enterLabelRef             = useRef(enterLabel);
+  const scanIntervalsRef          = useRef(scanIntervals ?? DEFAULT_SCAN_INTERVALS);
+  const cadenceRef                = useRef(normalizeCadenceMinutes(cadenceMinutes));
+  const maxAutoPositionsRef       = useRef(maxAutoPositionsPerScan ?? 0); // 0 = unlimited
+  const scanningRef               = useRef(false);
+  const lastRunSlotRef            = useRef<number>(-1);
+  isActiveRef.current             = isActive;
+  symbolsRef.current              = symbols;
+  onEnterRef.current              = onEnterTrade;
+  onLogRef.current                = onLog;
+  onScanEventRef.current          = onScanEvent;
+  enterLabelRef.current           = enterLabel;
+  scanIntervalsRef.current        = scanIntervals && scanIntervals.length > 0 ? scanIntervals : DEFAULT_SCAN_INTERVALS;
+  cadenceRef.current              = normalizeCadenceMinutes(cadenceMinutes);
+  maxAutoPositionsRef.current     = maxAutoPositionsPerScan ?? 0;
 
   const addLog = useCallback((msg: string, type: AutoTradeLog['type'] = 'info') => {
     setLogs(prev => [{ id: ++logSeq, time: Date.now(), msg, type }, ...prev].slice(0, 200));
@@ -137,10 +141,10 @@ export function useAltAutoTrade({
       lastRunSlotRef.current = getCurrentSlot(now, cadence);
       const next = getNextBoundary(now, cadence);
       setNextRunTime(next);
-      addLog(`⏰ 자동매매 스케줄 활성화 — ${cadence}분 경계 실행 (다음: ${new Date(next).toLocaleString('ko-KR')})`);
+      addLog(`⏰ 자동매매 스케줄 활성화 — ${cadence}분 경계 실행 (다음: ${new Date(next).toLocaleString('ko-KR')})`, 'success');
     } else {
       setNextRunTime(null);
-      addLog('⏹ 자동매매 스케줄 비활성화');
+      addLog('⏹ 자동매매 스케줄 비활성화', 'success');
     }
   }, [addLog]);
 
@@ -194,9 +198,9 @@ export function useAltAutoTrade({
       addLog(`⚠ 스캔 주기(${cadence}분)가 최소 스캔 봉(${minTf}분)보다 짧습니다. 중복 스캔 가능성이 높아집니다.`, 'warn');
     }
     if (mode === 'scheduled') {
-      addLog(`🚀 정각 스캔 시작 — 경계 ${new Date(boundaryTime).toLocaleTimeString('ko-KR')} · 지연 ${boundaryLagSec}s · ${syms.length}개 심볼 × ${numTf}개(${dueIntervals.join(',')})`);
+      addLog(`🚀 정각 스캔 시작 — 경계 ${new Date(boundaryTime).toLocaleTimeString('ko-KR')} · 지연 ${boundaryLagSec}s · ${syms.length}개 심볼 × ${numTf}개(${dueIntervals.join(',')})`, 'success');
     } else {
-      addLog(`🚀 수동 스캔 시작 — ${syms.length}개 심볼 × ${numTf}개 타임프레임(${dueIntervals.join(',')}) (예상 약 ${estTotalSec}초)`);
+      addLog(`🚀 수동 스캔 시작 — ${syms.length}개 심볼 × ${numTf}개 타임프레임(${dueIntervals.join(',')}) (예상 약 ${estTotalSec}초)`, 'success');
     }
 
     let totalEntered = 0;
@@ -257,7 +261,12 @@ export function useAltAutoTrade({
       );
       onScanEventRef.current?.({ type: 'interval_done', interval, total: candidates.length, qualified: qualified.length, entered: top.length });
 
+      const maxPositions = maxAutoPositionsRef.current;
       for (const c of top) {
+        if (maxPositions > 0 && totalEntered >= maxPositions) {
+          addLog(`⛔ [${interval}] 최대 진입 수(${maxPositions}) 도달 — ${c.symbol} 건너뜀`, 'info');
+          continue;
+        }
         const key = `${c.symbol}_${c.direction}`;
         if (enteredThisRun.has(key)) {
           addLog(`⏭ [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — 이미 이번 실행에서 진입됨 (중복 건너뜀)`, 'info');
@@ -284,7 +293,7 @@ export function useAltAutoTrade({
       : '없음';
     addLog(
       `🏁 자동 스캔 완료 (${elapsed}초) — 첫 후보 ${firstReadyText} · 총 ${totalEntered}개 ${enterLabelRef.current}`,
-      totalEntered > 0 ? 'success' : 'info',
+      'success',
     );
     onScanEventRef.current?.({ type: 'scan_done', totalEntered, intervals: dueIntervals, mode });
 

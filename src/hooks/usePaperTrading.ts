@@ -55,7 +55,7 @@ function isDirectionalTPValid(side: 'LONG' | 'SHORT', entry: number, tp?: number
 
 function isDirectionalSLValid(side: 'LONG' | 'SHORT', entry: number, sl?: number): boolean {
   if (sl == null) return true;
-  return side === 'LONG' ? sl < entry : sl > entry;
+  return side === 'LONG' ? sl <= entry : sl >= entry;
 }
 
 export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' | 'sl' | 'liq') => void) {
@@ -188,11 +188,21 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
         timeStopEnabledAtEntry: pos.altMeta?.timeStopEnabledAtEntry ?? pos.altMeta?.timeStopEnabled ?? null,
         validUntilTimeAtEntry: pos.altMeta?.validUntilTimeAtEntry ?? pos.altMeta?.validUntilTime ?? null,
         scanCadenceMinutesAtEntry: pos.altMeta?.scanCadenceMinutesAtEntry ?? null,
+        tp1Hit: pos.altMeta?.tp1Hit === true ? true : (pos.altMeta?.tp1Enabled === true ? false : null),
+        movedSlToBe: pos.altMeta?.movedSlToBe ?? null,
+        maxAutoPositionsPerScanAtEntry: pos.altMeta?.maxAutoPositionsPerScanAtEntry ?? null,
       };
+      // Cancel any orphaned reduce-only orders whose parent position is now closing
+      // (e.g. manual close-limit orders placed against this position become orphans)
+      const closeSide = pos.positionSide === 'LONG' ? 'SELL' : 'BUY';
+      const cleanedOrders = prev.orders.filter(
+        o => !(o.symbol === pos.symbol && o.reduceOnly && o.side === closeSide),
+      );
       return {
         ...prev,
         balance: parseFloat((prev.balance + Math.max(0, returned)).toFixed(8)),
         positions: prev.positions.filter(p => p.id !== id),
+        orders: cleanedOrders,
         history: [entry, ...prev.history].slice(0, 500),
       };
     });
@@ -243,6 +253,9 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
         timeStopEnabledAtEntry: pos.altMeta?.timeStopEnabledAtEntry ?? pos.altMeta?.timeStopEnabled ?? null,
         validUntilTimeAtEntry: pos.altMeta?.validUntilTimeAtEntry ?? pos.altMeta?.validUntilTime ?? null,
         scanCadenceMinutesAtEntry: pos.altMeta?.scanCadenceMinutesAtEntry ?? null,
+        tp1Hit: pos.altMeta?.tp1Hit === true ? true : (pos.altMeta?.tp1Enabled === true ? false : null),
+        movedSlToBe: pos.altMeta?.movedSlToBe ?? null,
+        maxAutoPositionsPerScanAtEntry: pos.altMeta?.maxAutoPositionsPerScanAtEntry ?? null,
       };
       const isFull = qty >= totalQty;
       return {
@@ -365,6 +378,27 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
       } else if (pos.slPrice !== undefined && (isLong ? mark <= pos.slPrice : mark >= pos.slPrice)) {
         closePosition(pos.id, pos.slPrice, 'sl');
         onAutoCloseRef.current?.('sl');
+      } else if (
+        pos.altMeta?.tp1Enabled === true &&
+        !pos.altMeta.tp1Hit &&
+        pos.altMeta.tp1Price != null &&
+        (isLong ? mark >= pos.altMeta.tp1Price : mark <= pos.altMeta.tp1Price)
+      ) {
+        // TP1 partial close: close tp1ClosePct% of position, then move SL to entry
+        const tp1Price = pos.altMeta.tp1Price;
+        const tp1ClosePct = pos.altMeta.tp1ClosePct ?? 50;
+        const closeQty = parseFloat((Math.abs(pos.positionAmt) * tp1ClosePct / 100).toFixed(6));
+        const shouldMoveSl = pos.altMeta.tp1MoveSL !== false;
+        // Also move altMeta.slPrice to entryPrice so AltPositionMonitor uses the updated BE SL
+        updateAltMeta(pos.id, {
+          tp1Hit: true,
+          movedSlToBe: shouldMoveSl,
+          ...(shouldMoveSl ? { slPrice: pos.entryPrice } : {}),
+        });
+        partialClosePosition(pos.id, tp1Price, 'tp', closeQty);
+        if (shouldMoveSl) {
+          setTPSL(pos.id, pos.tpPrice, pos.entryPrice);
+        }
       } else if (pos.tpPrice !== undefined && (isLong ? mark >= pos.tpPrice : mark <= pos.tpPrice)) {
         closePosition(pos.id, pos.tpPrice, 'tp');
         onAutoCloseRef.current?.('tp');

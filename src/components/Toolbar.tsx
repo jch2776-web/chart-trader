@@ -38,7 +38,7 @@ interface Props {
   isMobile?: boolean;
   mobilePanel?: 'none' | 'tickers' | 'settings';
   onToggleMobilePanel?: (panel: 'tickers' | 'settings') => void;
-  // Error notification
+  // Notification bell
   errorLogs?: ActivityLog[];
   onClearErrors?: () => void;
   // Live account stats (real-time display)
@@ -433,7 +433,7 @@ export function Toolbar({
 
       {/* Error notification bell */}
       <ErrorNotificationBell
-        errors={errorLogs}
+        logs={errorLogs}
         onClear={onClearErrors ?? (() => {})}
       />
     </div>

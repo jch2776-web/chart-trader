@@ -30,6 +30,7 @@ interface Props {
   activeColor?: string;
   positions?: FuturesPosition[];
   orders?: FuturesOrder[];
+  tp1Lines?: Array<{ price: number; hit: boolean }>;
   orderTargetPrice?: number | null;
   highlightedDrawingPrice?: number | null;
   conditionalFormPrices?: number[];
@@ -56,6 +57,7 @@ export function CandleChart({
   activeColor = '#3b8beb',
   positions = [],
   orders = [],
+  tp1Lines = [],
   orderTargetPrice,
   highlightedDrawingPrice,
   conditionalFormPrices = [],
@@ -228,7 +230,7 @@ export function CandleChart({
   const { render } = useChartRenderer(
     candles, interval, drawings, previewDrawing,
     crosshair, hoverHandle, draggingHandle,
-    positions, orders, countdown, indicators,
+    positions, orders, countdown, indicators, tp1Lines,
   );
 
   // ── Delete key ────────────────────────────────────────────────────────

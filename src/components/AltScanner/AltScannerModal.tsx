@@ -48,6 +48,8 @@ export interface AltTradeParams {
   // Paper sizing mode
   sizeMode: 'risk' | 'margin';
   marginUsdt?: number; // only when sizeMode === 'margin'
+  // Chase-entry filter metadata (auto-trade only, optional)
+  entryDriftPct?: number | null;
 }
 
 interface Props {

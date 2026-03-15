@@ -232,6 +232,13 @@ const normalizeAutoTradeSettings = (base: AutoTradeSettings, saved: Partial<Auto
   scanCadenceMinutes: normalizeAutoTradeCadence(saved?.scanCadenceMinutes ?? base.scanCadenceMinutes),
   timeStopEnabled: normalizeAutoTradeTimeStop(saved?.timeStopEnabled ?? base.timeStopEnabled),
   voiceAlertEnabled: normalizeAutoTradeVoiceAlert(saved?.voiceAlertEnabled ?? base.voiceAlertEnabled),
+  // Chase-entry filter: preserve saved value if present; otherwise fall back to base default
+  maxSignalAgeSec: (saved && 'maxSignalAgeSec' in saved && typeof saved.maxSignalAgeSec === 'number')
+    ? saved.maxSignalAgeSec
+    : (base.maxSignalAgeSec ?? 120),
+  maxEntryDriftPct: (saved && 'maxEntryDriftPct' in saved && typeof saved.maxEntryDriftPct === 'number')
+    ? saved.maxEntryDriftPct
+    : (base.maxEntryDriftPct ?? 1.0),
 });
 
 // ── Resizable divider between panels ─────────────────────────────────────────
@@ -923,6 +930,9 @@ function AppInner() {
   const liveCloseReasonHintRef = useRef<Record<string, LiveCloseReason>>({});
   const liveEntryFillRetryRef = useRef<Record<string, LiveEntryFillRetryState>>({});
   const liveHistoryEnrichQueueRef = useRef<Record<string, LiveHistoryEnrichTask>>({});
+  // Keys whose ALT position has been detected as closed and cleanup is pending (async state update).
+  // Prevents a new manual position on the same symbol/direction from being "adopted" by a stale ALT meta.
+  const liveAltPendingCleanupRef = useRef<Set<string>>(new Set());
   const liveAltOrderTagMap = React.useMemo(() => {
     const out: Record<string, 'ALT-AUTO TP' | 'ALT-AUTO SL'> = {};
     for (const entry of Object.values(liveAltOrderRegistry)) {
@@ -1044,6 +1054,27 @@ function AppInner() {
   }, [isPaperMode]);
 
   const paperTrading = usePaperTrading(uk('paper-trading'));
+
+  // ── TP1 chart lines ───────────────────────────────────────────────────
+  const chartTp1Lines = React.useMemo<Array<{ price: number; hit: boolean }>>(() => {
+    const lines: Array<{ price: number; hit: boolean }> = [];
+    if (isPaperMode) {
+      for (const p of paperTrading.positions) {
+        if (p.symbol === ticker && p.altMeta?.tp1Enabled === true && p.altMeta.tp1Price != null) {
+          lines.push({ price: p.altMeta.tp1Price, hit: p.altMeta.tp1Hit === true });
+        }
+      }
+    } else {
+      for (const dir of ['long', 'short'] as const) {
+        const meta = liveAltMetaMap[`${ticker}_${dir}`];
+        if (meta?.tp1Enabled === true && meta.tp1Price != null) {
+          lines.push({ price: meta.tp1Price, hit: meta.tp1Hit === true });
+        }
+      }
+    }
+    return lines;
+  }, [isPaperMode, paperTrading.positions, ticker, liveAltMetaMap]);
+
   const isPaperModeRef = useRef(isPaperMode);
   isPaperModeRef.current = isPaperMode;
   const paperTradingRef = useRef(paperTrading);
@@ -1498,6 +1529,21 @@ function AppInner() {
         return;
       }
     }
+    // Task 2/4: TP1 and maxAutoPositions meta
+    const paperTp1Meta = (() => {
+      const s = paperAutoTradeSettingsRef.current;
+      const tp1Enabled = s.tp1Enabled ?? false;
+      const tp1Price = tp1Enabled
+        ? (params.tp1Price ?? (params.tpPrice != null ? params.entryPrice + (params.tpPrice - params.entryPrice) * (s.tp1R ?? 0.30) : null))
+        : null;
+      return {
+        tp1Enabled,
+        tp1Price,
+        tp1ClosePct: s.tp1ClosePct ?? 50,
+        tp1MoveSL: s.tp1MoveSL !== false,
+        maxAutoPositionsPerScanAtEntry: params.entrySource === 'auto' ? (s.maxAutoPositionsPerScan ?? 1) : null,
+      };
+    })();
     const altMeta: AltMeta = {
       source: 'altscanner',
       candidateId: params.candidateId,
@@ -1518,6 +1564,8 @@ function AppInner() {
       timeStopEnabledAtEntry: params.timeStopEnabledAtEntry ?? params.timeStopEnabled ?? true,
       validUntilTimeAtEntry: params.validUntilTimeAtEntry ?? params.validUntilTime,
       scanCadenceMinutesAtEntry: params.scanCadenceMinutesAtEntry ?? null,
+      entryDriftPct: params.entryDriftPct ?? null,
+      ...paperTp1Meta,
     };
     const side: 'BUY' | 'SELL' = params.direction === 'long' ? 'BUY' : 'SELL';
     type TriggerType = 'limit' | 'close_above' | 'close_below';
@@ -1605,6 +1653,40 @@ function AppInner() {
     }
 
     const autoSettings = (autoTradeModeRef.current === 'live' ? liveAutoTradeSettingsRef : paperAutoTradeSettingsRef).current;
+
+    // ── Chase-entry prevention filter (auto-trade only) ─────────────────────
+    // 1) Signal age: skip if too much time has elapsed since the signal candle closed
+    const signalAgeSec = (now - c.asOfCloseTime) / 1000;
+    const maxSignalAgeSec = autoSettings.maxSignalAgeSec ?? 120;
+    if (maxSignalAgeSec > 0 && signalAgeSec > maxSignalAgeSec) {
+      addLog('info',
+        `[자동매매] ${c.symbol} ${c.direction.toUpperCase()} — 추격진입 방지: 신호경과 ${signalAgeSec.toFixed(0)}s > ${maxSignalAgeSec}s (signal=${new Date(c.asOfCloseTime).toISOString()} decision=${new Date(now).toISOString()})`,
+      );
+      return;
+    }
+    // 2) Price drift: skip if current price has moved too far from plannedEntry in the chase direction
+    const maxEntryDriftPct = autoSettings.maxEntryDriftPct ?? 1.0;
+    let entryDriftPct: number | null = null;
+    if (maxEntryDriftPct > 0 && mark > 0 && c.entryPrice > 0) {
+      const rawDrift = (mark - c.entryPrice) / c.entryPrice * 100;
+      entryDriftPct = parseFloat(rawDrift.toFixed(3));
+      const isChasing = c.direction === 'long' ? rawDrift > 0 : rawDrift < 0;
+      if (isChasing && Math.abs(rawDrift) > maxEntryDriftPct) {
+        addLog('info',
+          `[자동매매] ${c.symbol} ${c.direction.toUpperCase()} — 추격진입 방지: 이탈폭 ${rawDrift.toFixed(2)}% > ${maxEntryDriftPct}% (계획진입=${c.entryPrice.toFixed(4)} 현재가=${mark.toFixed(4)})`,
+        );
+        return;
+      }
+    }
+    // ────────────────────────────────────────────────────────────────────────
+
+    // Task 1: block intervals not in autoEntryIntervals
+    const allowedEntryIntervals = (autoSettings.autoEntryIntervals as string[] | undefined) ?? ['1h'];
+    if (!allowedEntryIntervals.includes(c.interval)) {
+      addLog('info', `[자동매매] ${c.symbol} ${c.direction.toUpperCase()} [${c.interval}] — 자동진입 비허용 TF (허용: ${allowedEntryIntervals.join(',')}), 스캔만 유지`);
+      return;
+    }
+
     const drawingsSnapshot = [
       ...c.drawingGroups.breakout,
       ...c.drawingGroups.topSR,
@@ -1641,6 +1723,7 @@ function AppInner() {
       triggerPriceAtNextClose: c.triggerPriceAtNextClose,
       sizeMode:   autoSettings.sizeMode,
       marginUsdt: autoSettings.marginUsdt,
+      entryDriftPct,
     };
     if (autoTradeModeRef.current === 'live') {
       if (!binanceApiKey || !binanceApiSecret) {
@@ -1670,7 +1753,7 @@ function AppInner() {
       speakSound(`${ivLabel(event.interval)} 타임프레임 스캔 시작`, { lang: 'ko-KR', rate: 1.1, pitch: 1.0 });
     } else if (event.type === 'interval_done') {
       const voice = event.entered > 0
-        ? `${ivLabel(event.interval)} 스캔 완료, ${event.entered}개 진입`
+        ? `${ivLabel(event.interval)} 스캔 완료, 진입대상 ${event.entered}개`
         : `${ivLabel(event.interval)} 스캔 완료`;
       speakSound(voice, { lang: 'ko-KR', rate: 1.1, pitch: 1.0 });
     }
@@ -1680,6 +1763,7 @@ function AppInner() {
     symbols: tickers.map(t => t.symbol),
     onEnterTrade: handleAutoTradeScan,
     onLog: (msg, type) => {
+      if (type === 'info') return;
       const mappedType: ActivityLog['type'] = type === 'error' ? 'error' : type === 'success' ? 'order' : 'info';
       addLog(mappedType, `[자동매매] ${msg}`);
     },
@@ -1687,6 +1771,7 @@ function AppInner() {
     enterLabel: autoTradeMode === 'live' ? '실전진입' : '모의진입',
     scanIntervals: (autoTradeMode === 'live' ? liveAutoTradeSettings : paperAutoTradeSettings).scanIntervals,
     cadenceMinutes: (autoTradeMode === 'live' ? liveAutoTradeSettings : paperAutoTradeSettings).scanCadenceMinutes,
+    maxAutoPositionsPerScan: (autoTradeMode === 'live' ? liveAutoTradeSettings : paperAutoTradeSettings).maxAutoPositionsPerScan ?? 1,
   });
   altAutoTradeSetActiveRef.current = altAutoTrade.setActive;
 
@@ -1902,9 +1987,13 @@ function AppInner() {
           ? (c.tpPrice > p.entryPrice ? c.tpPrice : p.tpPrice)
           : (c.tpPrice < p.entryPrice ? c.tpPrice : p.tpPrice);
         // Only apply new SL if it remains in loss territory (i.e. correct side of entry).
-        const safeSL = isLong
-          ? (c.slPrice < p.entryPrice ? c.slPrice : p.slPrice)
-          : (c.slPrice > p.entryPrice ? c.slPrice : p.slPrice);
+        // If SL has been moved to break-even (movedSlToBe), never let re-scan pull it back
+        // below entry — that would undo TP1 BE protection.
+        const safeSL = p.altMeta?.movedSlToBe === true
+          ? p.slPrice  // preserve BE protection
+          : (isLong
+            ? (c.slPrice < p.entryPrice ? c.slPrice : p.slPrice)
+            : (c.slPrice > p.entryPrice ? c.slPrice : p.slPrice));
         if (safeTP === p.tpPrice && safeSL === p.slPrice && (c.tpPrice !== p.tpPrice || c.slPrice !== p.slPrice)) {
           addLog(
             'info',
@@ -1974,6 +2063,21 @@ function AppInner() {
       return;
     }
 
+    // Task 2/4: TP1 and maxAutoPositions meta (auto-entries only)
+    const liveTp1Meta = (() => {
+      const s = liveAutoTradeSettingsRef.current;
+      const tp1Enabled = s.tp1Enabled ?? false;
+      const tp1Price = tp1Enabled
+        ? (params.tp1Price ?? (params.tpPrice != null ? params.entryPrice + (params.tpPrice - params.entryPrice) * (s.tp1R ?? 0.30) : null))
+        : null;
+      return {
+        tp1Enabled,
+        tp1Price,
+        tp1ClosePct: s.tp1ClosePct ?? 50,
+        tp1MoveSL: s.tp1MoveSL !== false,
+        maxAutoPositionsPerScanAtEntry: params.entrySource === 'auto' ? (s.maxAutoPositionsPerScan ?? 1) : null,
+      };
+    })();
     const baseLiveMeta: AltMeta = {
       source: 'altscanner',
       candidateId: params.candidateId,
@@ -1994,6 +2098,8 @@ function AppInner() {
       timeStopEnabledAtEntry: params.timeStopEnabledAtEntry ?? params.timeStopEnabled ?? true,
       validUntilTimeAtEntry: params.validUntilTimeAtEntry ?? params.validUntilTime,
       scanCadenceMinutesAtEntry: params.scanCadenceMinutesAtEntry ?? null,
+      entryDriftPct: params.entryDriftPct ?? null,
+      ...liveTp1Meta,
     };
 
     handleTickerSelect(params.symbol);
@@ -2062,6 +2168,7 @@ function AppInner() {
         liveEntryOrderId: ackOrderId,
         liveEntrySubmittedAt: submittedAt,
       };
+      liveAltPendingCleanupRef.current.delete(liveKey);
       setLiveAltMetaMap(prev => ({ ...prev, [liveKey]: liveMeta }));
       if (ackOrderId) {
         upsertLiveAltEntryOrderRegistry(
@@ -2379,10 +2486,33 @@ function AppInner() {
       });
     };
 
+    // Safety timeout: if runBreakoutScan hangs due to API rate limiting right after a
+    // scheduled scan, unblock the extend button so the user can still act within the
+    // 5-minute deadline.
+    const safetyTimer = window.setTimeout(() => {
+      finalize({
+        summaryText: '재평가 시간 초과 (API 속도제한 추정) — 현재 SL/TP 조건으로 연장 가능',
+        flipSuggested: false,
+        tightenOk: false,
+      });
+    }, 20_000);
+
     try {
       const iv: ScanInterval = (req.scanInterval === '15m' || req.scanInterval === '1h' || req.scanInterval === '4h' || req.scanInterval === '1d')
         ? req.scanInterval
         : '1h';
+
+      // If another scan is running, skip re-evaluation so the user can still act on the modal
+      const govSnap = getBinanceGovernorSnapshot();
+      if (govSnap.activeScanTag != null) {
+        finalize({
+          summaryText: '다른 스캔 진행 중으로 재평가 생략 — 현재 SL/TP 조건으로 연장 가능',
+          flipSuggested: false,
+          tightenOk: false,
+        });
+        return;
+      }
+
       const candidates: ScanCandidate[] = [];
       await runBreakoutScan(
         [req.symbol],
@@ -2395,7 +2525,7 @@ function AppInner() {
           concurrency: 1,
           delayMs: 0,
           scanTag: `timestop-eval:${req.symbol}:${iv}`,
-          busyPolicy: 'queue',
+          busyPolicy: 'skip',
           onStatus: (message, level) => {
             if (level === 'warn') addLog('info', `[타임스탑 재평가] ${message}`);
           },
@@ -2451,6 +2581,8 @@ function AppInner() {
         flipSuggested: false,
         tightenOk: false,
       });
+    } finally {
+      window.clearTimeout(safetyTimer);
     }
   }, []);
 
@@ -3065,6 +3197,22 @@ function AppInner() {
         (meta.direction === 'long' ? p.positionAmt > 0 : p.positionAmt < 0),
       );
       if (pos) {
+        // Skip if this key is pending cleanup (ALT position closed, stale meta not yet removed from state).
+        // Prevents a new manual position on the same symbol/direction from being adopted by the stale meta.
+        if (liveAltPendingCleanupRef.current.has(key)) continue;
+
+        // First-time adoption guard: if this key has never been tracked before, only adopt the position
+        // if it was opened AFTER the ALT signal was submitted. This prevents a pre-existing manual
+        // position (opened before the scan ran) from being hijacked by a newly created ALT meta.
+        if (!nextTracked[key]) {
+          const metaSignalTs = meta.liveEntrySubmittedAt ?? meta.liveEntryTime ?? meta.monitorStartTime ?? meta.signalCloseTime;
+          const posOpenTs = pos.entryTime;
+          if (metaSignalTs != null && posOpenTs != null && posOpenTs < metaSignalTs - 30_000) {
+            // Position opened >30s before this ALT signal — it's a pre-existing manual position. Don't adopt.
+            continue;
+          }
+        }
+
         const expectedMonitorStart =
           pos.entryTime
           ?? meta.monitorStartTime
@@ -3103,22 +3251,59 @@ function AppInner() {
       } : undefined);
       if (!tracked?.seenOpen) continue;
 
+      // False-close guard: futuresAllPositions (render-time snapshot) may briefly miss a position during
+      // a rapid API refresh coinciding with an auto-scan. Re-check with the latest ref before committing
+      // a close. If the position is still there in the latest data, skip this cycle.
+      const posFromRef = futuresAllPositionsRef.current.find(p =>
+        p.symbol === meta.symbol &&
+        Math.abs(p.positionAmt) > 0 &&
+        (meta.direction === 'long' ? p.positionAmt > 0 : p.positionAmt < 0),
+      );
+      if (posFromRef) continue;
+
       const rowId = uid();
       const exitTime = Date.now();
-      const exitPrice = tracked.markPrice > 0
-        ? tracked.markPrice
-        : (markPricesMapRef.current[meta.symbol] ?? null);
+      // Prefer fresh mark price over stale tracked.markPrice (captured last poll cycle before position closed)
+      const rawExitPrice: number | null = (markPricesMapRef.current[meta.symbol] ?? 0) > 0
+        ? (markPricesMapRef.current[meta.symbol] as number)
+        : (tracked.markPrice > 0 ? tracked.markPrice : null);
       const explicitReason = liveCloseReasonHintRef.current[key] ?? liveCloseReasonHintRef.current[`${meta.symbol}_${meta.direction}`];
       const orderEvidenceReason = explicitReason ? null : inferLiveCloseReasonFromOrderEvidence(key);
       const clientSlEvidenceReason = explicitReason || orderEvidenceReason
         ? null
         : inferLiveCloseReasonFromClientSlEvidence(meta.symbol, tracked);
-      const closeReason = explicitReason ?? orderEvidenceReason ?? clientSlEvidenceReason ?? inferLiveCloseReason(meta, exitPrice);
+      const closeReason = explicitReason ?? orderEvidenceReason ?? clientSlEvidenceReason ?? inferLiveCloseReason(meta, rawExitPrice);
       const reasonSource: 'explicit' | 'order' | 'fallback' = explicitReason
         ? 'explicit'
         : ((orderEvidenceReason || clientSlEvidenceReason) ? 'order' : 'fallback');
+      // For SL/TP closes use the known stop price — mark price at detection time can be stale
+      // (e.g. price recovers before next poll cycle, masking the actual fill loss).
+      const tp2ExitPrice: number | null =
+        (closeReason === 'sl' || closeReason === 'invalid') && (meta.slPrice ?? 0) > 0
+          ? meta.slPrice
+          : closeReason === 'tp' && (meta.plannedTP ?? 0) > 0
+            ? (meta.plannedTP as number)
+            : rawExitPrice;
+      // Blend TP1 partial close + TP2 final close into a single combined history entry.
+      const tp1OrigQty = meta.tp1OriginalQty ?? 0;
+      const tp1ClosedQty = meta.tp1ClosedQty ?? 0;
+      const tp1ClosedPrice = meta.tp1ClosedPrice ?? 0;
+      const hasBlend = meta.tp1Hit === true && tp1OrigQty > 0 && tp1ClosedQty > 0 && tp1ClosedPrice > 0 && tp2ExitPrice != null;
+      const tp2Qty = hasBlend ? Math.max(0, tp1OrigQty - tp1ClosedQty) : 0;
+      const exitPrice: number | null = hasBlend && tp1OrigQty > 0
+        ? parseFloat(((tp1ClosedQty * tp1ClosedPrice + tp2Qty * tp2ExitPrice!) / tp1OrigQty).toFixed(8))
+        : tp2ExitPrice;
+      const historyQty = hasBlend ? tp1OrigQty : tracked.qty;
       const pnl = exitPrice != null
-        ? parseFloat((((tracked.direction === 'long' ? exitPrice - tracked.entryPrice : tracked.entryPrice - exitPrice) * tracked.qty)).toFixed(8))
+        ? parseFloat((
+            tracked.direction === 'long'
+              ? hasBlend
+                ? (tp1ClosedQty * (tp1ClosedPrice - tracked.entryPrice)) + (tp2Qty * (tp2ExitPrice! - tracked.entryPrice))
+                : (exitPrice - tracked.entryPrice) * historyQty
+              : hasBlend
+                ? (tp1ClosedQty * (tracked.entryPrice - tp1ClosedPrice)) + (tp2Qty * (tracked.entryPrice - tp2ExitPrice!))
+                : (tracked.entryPrice - exitPrice) * historyQty
+          ).toFixed(8))
         : null;
       appendAltLifecycleDebug({
         event: 'live-close-detected',
@@ -3130,7 +3315,7 @@ function AppInner() {
         reasonSource,
         exitPrice,
         entryPrice: tracked.entryPrice,
-        qty: tracked.qty,
+        qty: historyQty,
         entryTime: tracked.entryTime ?? meta.liveEntryTime ?? null,
         signalCloseTime: meta.signalCloseTime ?? null,
         monitorStartTime: meta.monitorStartTime ?? null,
@@ -3139,7 +3324,7 @@ function AppInner() {
         id: rowId,
         symbol: meta.symbol,
         positionSide: meta.direction === 'long' ? 'LONG' : 'SHORT',
-        qty: tracked.qty,
+        qty: historyQty,
         leverage: tracked.leverage,
         entryPrice: tracked.entryPrice,
         exitPrice,
@@ -3159,9 +3344,12 @@ function AppInner() {
         timeStopEnabledAtEntry: meta.timeStopEnabledAtEntry ?? meta.timeStopEnabled ?? null,
         validUntilTimeAtEntry: meta.validUntilTimeAtEntry ?? meta.validUntilTime ?? null,
         scanCadenceMinutesAtEntry: meta.scanCadenceMinutesAtEntry ?? null,
+        tp1Hit: meta.tp1Hit === true ? true : (meta.tp1Enabled === true ? false : null),
+        movedSlToBe: meta.movedSlToBe ?? null,
       });
       removeAltManagedDrawingsForCandidate(meta.symbol, meta.candidateId);
       cleanupKeys.push(key);
+      liveAltPendingCleanupRef.current.add(key);
       const orphan = liveAltOrderRegistryRef.current[key];
       if (orphan) orphanCleanupEntries.push(orphan);
       enrichTargets.push({ rowId, meta, tracked, exitTime, reasonSource });
@@ -3463,6 +3651,8 @@ function AppInner() {
           />
         )),
     ...(!isPaperMode ? Object.entries(liveAltMetaMap).flatMap(([key, meta]) => {
+        // Don't mount monitor for keys pending cleanup — position already closed, state update not yet committed.
+        if (liveAltPendingCleanupRef.current.has(key)) return [];
         const pos = futuresAllPositions.find(p =>
           p.symbol === meta.symbol &&
           Math.abs(p.positionAmt) > 0 &&
@@ -3483,7 +3673,15 @@ function AppInner() {
               liveCloseReasonHintRef.current[key] = 'invalid';
               liveCloseReasonHintRef.current[aliasKey] = 'invalid';
               addLog('info', `[ALT실전] ${symbol} 자동청산 (구조적 무효화) — MARKET ${closeSide} ${qty}`);
-              futuresCloseMarket(symbol, closeSide, qty, positionSide)
+              // Cancel any registered TP/SL orders (orphan cleanup) concurrently with market close
+              const orphanRefs = liveAltOrderRegistryRef.current[key]?.orders ?? [];
+              if (orphanRefs.length > 0) {
+                addLog('info', `[ALT실전] ${symbol} 고아 주문 취소 (${orphanRefs.length}건)`);
+              }
+              Promise.all([
+                ...orphanRefs.map(ref => futuresCancelOrder(ref.orderId, symbol).catch(() => {})),
+                futuresCloseMarket(symbol, closeSide, qty, positionSide),
+              ])
                 .then(() => {
                   addLog('info', `[ALT실전] ${symbol} 청산 주문 완료`);
                 })
@@ -3496,15 +3694,86 @@ function AppInner() {
                 });
             }}
             onTimeStopRequest={requestTimeStop}
+            onTp1Hit={(triggerMeta) => {
+              if (triggerMeta.tp1Hit) return;
+              // Race-condition guard: verify position still exists in latest live state
+              const livePos = futuresAllPositionsRef.current.find(p =>
+                p.symbol === triggerMeta.symbol &&
+                Math.abs(p.positionAmt) > 0 &&
+                (triggerMeta.direction === 'long' ? p.positionAmt > 0 : p.positionAmt < 0),
+              );
+              if (!livePos) {
+                addLog('info', `[ALT실전] ${triggerMeta.symbol} TP1 건너뜀 — 포지션이 이미 청산됨`);
+                return;
+              }
+              const currentQty = Math.abs(livePos.positionAmt);
+              const tp1ClosePct = triggerMeta.tp1ClosePct ?? 50;
+              const closeQty = parseFloat((currentQty * tp1ClosePct / 100).toFixed(6));
+              const remainQty = parseFloat((currentQty - closeQty).toFixed(6));
+              const closeSideLocal: 'BUY' | 'SELL' = triggerMeta.direction === 'long' ? 'SELL' : 'BUY';
+              const bePrice = livePos.entryPrice;
+              const tp1ExecPrice = (markPricesMapRef.current[triggerMeta.symbol] ?? 0) > 0
+                ? (markPricesMapRef.current[triggerMeta.symbol] as number)
+                : (triggerMeta.tp1Price ?? 0);
+              // Optimistically update meta to prevent re-fire from stale WS ticks.
+              // Also store partial-close data so the final close entry can blend TP1+TP2.
+              setLiveAltMetaMap(prev => {
+                const cur = prev[key];
+                if (!cur) return prev;
+                return {
+                  ...prev,
+                  [key]: {
+                    ...cur,
+                    tp1Hit: true,
+                    movedSlToBe: triggerMeta.tp1MoveSL !== false,
+                    slPrice: bePrice,
+                    tp1OriginalQty: currentQty,
+                    tp1ClosedQty: closeQty,
+                    tp1ClosedPrice: tp1ExecPrice,
+                  },
+                };
+              });
+              addLog('info', `[ALT실전] ${triggerMeta.symbol} TP1 도달(${triggerMeta.tp1Price}) — ${closeQty}(${tp1ClosePct}%) 부분익절 처리`);
+              const staleRefs = liveAltOrderRegistryRef.current[key]?.orders ?? [];
+              const slRefs = staleRefs.filter(ref => ref.kind !== 'TP');
+              Promise.all(slRefs.map(ref => futuresCancelOrder(ref.orderId, triggerMeta.symbol).catch(() => {})))
+                .then(() => futuresCloseMarket(triggerMeta.symbol, closeSideLocal, closeQty, livePos.positionSide))
+                .then(() => {
+                  if (triggerMeta.tp1MoveSL !== false && remainQty > 0) {
+                    return futuresPlaceTPSL(
+                      triggerMeta.symbol,
+                      closeSideLocal,
+                      remainQty,
+                      undefined,
+                      bePrice,
+                      livePos.positionSide,
+                      {
+                        onPlacedOrders: (refs) => {
+                          upsertLiveAltOrderRegistry(key, triggerMeta.symbol, triggerMeta.direction, closeSideLocal, livePos.positionSide, refs);
+                        },
+                      },
+                    );
+                  }
+                })
+                .catch((e: unknown) => {
+                  const msg = e instanceof Error ? e.message : String(e);
+                  // -2022: ReduceOnly rejected — position likely already closed by TP/SL order racing with TP1
+                  if (msg.includes('-2022') || msg.toLowerCase().includes('reduceonly')) {
+                    addLog('info', `[ALT실전] ${triggerMeta.symbol} TP1 부분익절 건너뜀 — 포지션이 TP/SL로 이미 청산됨`);
+                  } else {
+                    addLog('error', `[ALT실전] ${triggerMeta.symbol} TP1 처리 실패: ${msg}`);
+                  }
+                });
+            }}
           />
         )];
       }) : []),
   ];
 
-  // ── Error notification ───────────────────────────────────────────────────
-  const errorLogs = logs.filter(l => l.type === 'error');
+  // ── Notification bell ────────────────────────────────────────────────────
+  const errorLogs = logs;
   const clearErrors = useCallback(() => {
-    setLogs(prev => prev.filter(l => l.type !== 'error'));
+    setLogs([]);
   }, []);
 
   return (
@@ -3797,6 +4066,7 @@ function AppInner() {
                 initialDrawings={currentDrawings}
                 positions={futuresPositions}
                 orders={futuresOrders}
+                tp1Lines={chartTp1Lines}
                 orderTargetPrice={orderTargetPrice}
                 highlightedDrawingPrice={highlightedDrawingPrice}
                 conditionalFormPrices={conditionalFormPrices}
@@ -3886,6 +4156,10 @@ function AppInner() {
           }}
           onPaperResetBalance={paperTrading.resetBalance}
           onPaperClearHistory={paperTrading.clearHistory}
+          onLiveClearHistory={() => {
+            setLiveHistory([]);
+            try { localStorage.removeItem(uk('live-trade-history')); } catch {}
+          }}
           onOpenAltPosition={handleOpenAltPosition}
           onOpenAltInMain={openAltInMain}
           liveAltMetaMap={liveAltMetaMap}

@@ -10,10 +10,19 @@ export interface AutoTradeSettings {
   leverage: number;
   marginType: 'ISOLATED' | 'CROSSED';
   scanIntervals: ScanTF[];
+  autoEntryIntervals?: ScanTF[];  // subset of scanIntervals that allow auto-entry (default ['1h'])
   scanCadenceMinutes?: number;
   timeStopEnabled?: boolean;
   voiceAlertEnabled?: boolean;
   liveEntryOrderType?: 'MARKET' | 'LIMIT_IOC';
+  tp1Enabled?: boolean;          // TP1 partial close (default false)
+  tp1R?: number;                 // TP1 location as ratio of TP distance (default 0.30)
+  tp1ClosePct?: number;          // % of position to close at TP1 (default 50)
+  tp1MoveSL?: boolean;           // move SL to entry after TP1 (default true)
+  maxAutoPositionsPerScan?: number; // max entries per scan cycle (default 1)
+  // Chase-entry prevention filter (auto-entry only)
+  maxSignalAgeSec?: number;   // max age of signal since asOfCloseTime (default 120s, 0 = disable)
+  maxEntryDriftPct?: number;  // max allowed drift from plannedEntry before skipping (default 1.0%, 0 = disable)
 }
 
 const CADENCE_PRESETS = [15, 30, 60, 120, 240] as const;
@@ -46,9 +55,17 @@ export const DEFAULT_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
   leverage: 3,
   marginType: 'ISOLATED',
   scanIntervals: ['1h', '4h', '1d'],
+  autoEntryIntervals: ['1h'],
   scanCadenceMinutes: DEFAULT_SCAN_CADENCE_MINUTES,
   timeStopEnabled: true,
   voiceAlertEnabled: true,
+  tp1Enabled: false,
+  tp1R: 0.30,
+  tp1ClosePct: 50,
+  tp1MoveSL: true,
+  maxAutoPositionsPerScan: 1,
+  maxSignalAgeSec: 120,
+  maxEntryDriftPct: 1.0,
 };
 
 export const DEFAULT_LIVE_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
@@ -58,10 +75,18 @@ export const DEFAULT_LIVE_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
   leverage: 3,
   marginType: 'ISOLATED',
   scanIntervals: ['1h', '4h', '1d'],
+  autoEntryIntervals: ['1h'],
   scanCadenceMinutes: DEFAULT_SCAN_CADENCE_MINUTES,
   timeStopEnabled: true,
   voiceAlertEnabled: true,
   liveEntryOrderType: 'MARKET',
+  tp1Enabled: false,
+  tp1R: 0.30,
+  tp1ClosePct: 50,
+  tp1MoveSL: true,
+  maxAutoPositionsPerScan: 1,
+  maxSignalAgeSec: 120,
+  maxEntryDriftPct: 1.0,
 };
 
 interface Props {
@@ -189,6 +214,9 @@ function SettingsEditor({
                   if (active) {
                     if (draft.scanIntervals.length === 1) return; // at least one must be selected
                     set('scanIntervals', draft.scanIntervals.filter(t => t !== tf));
+                    // Also remove from autoEntryIntervals if present
+                    const curEntry = draft.autoEntryIntervals ?? ['1h'];
+                    set('autoEntryIntervals', curEntry.filter(t => t !== tf));
                   } else {
                     const order: ScanTF[] = ['15m', '1h', '4h', '1d'];
                     const next = [...draft.scanIntervals, tf].sort((a, b) => order.indexOf(a) - order.indexOf(b));
@@ -202,6 +230,85 @@ function SettingsEditor({
           })}
         </div>
         <span style={s.hint}>선택한 타임프레임만 스캔합니다 (최소 1개 필수)</span>
+      </div>
+
+      {/* Auto-entry intervals */}
+      <div style={s.fieldRow}>
+        <label style={s.label}>자동진입 허용 TF</label>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {draft.scanIntervals.map(tf => {
+            const entryAllowed = (draft.autoEntryIntervals ?? ['1h']).includes(tf);
+            return (
+              <button
+                key={tf}
+                style={{ ...s.toggleChip, ...(entryAllowed ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
+                onClick={() => {
+                  const cur = draft.autoEntryIntervals ?? ['1h'];
+                  if (entryAllowed) {
+                    if (cur.length === 1) return; // at least one must be allowed
+                    set('autoEntryIntervals', cur.filter(t => t !== tf));
+                  } else {
+                    const order: ScanTF[] = ['15m', '1h', '4h', '1d'];
+                    set('autoEntryIntervals', [...cur, tf].sort((a, b) => order.indexOf(a) - order.indexOf(b)));
+                  }
+                }}
+              >
+                {tf}
+              </button>
+            );
+          })}
+        </div>
+        <span style={s.hint}>체크된 TF만 자동 진입합니다. 비체크 TF는 스캔 결과만 기록됩니다. (최소 1개 필수)</span>
+      </div>
+
+      {/* Max auto positions per scan */}
+      <div style={s.fieldRow}>
+        <label style={s.label}>최대 스캔 진입 수</label>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input
+            type="number"
+            min={1} max={10} step={1}
+            value={draft.maxAutoPositionsPerScan ?? 1}
+            onChange={e => set('maxAutoPositionsPerScan', Math.max(1, Math.min(10, parseInt(e.target.value) || 1)))}
+            style={s.numberInput}
+          />
+          <span style={s.unit}>개</span>
+        </div>
+        <span style={s.hint}>한 번의 스캔 사이클에서 자동 진입 허용 수 (전체 TF 합산, 기본 1)</span>
+      </div>
+
+      {/* Chase-entry prevention */}
+      <div style={s.fieldRow}>
+        <label style={s.label}>추격 진입 방지</label>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          <div>
+            <div style={{ fontSize: '0.72rem', color: '#9aa4b5', marginBottom: 3 }}>신호 유효 시간(초)</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input
+                type="number"
+                min={0} max={600} step={10}
+                value={draft.maxSignalAgeSec ?? 120}
+                onChange={e => set('maxSignalAgeSec', Math.max(0, Math.min(600, parseInt(e.target.value) || 0)))}
+                style={s.numberInput}
+              />
+              <span style={s.unit}>초</span>
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: '0.72rem', color: '#9aa4b5', marginBottom: 3 }}>최대 진입 이탈폭(%)</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input
+                type="number"
+                min={0} max={10} step={0.1}
+                value={draft.maxEntryDriftPct ?? 1.0}
+                onChange={e => set('maxEntryDriftPct', Math.max(0, Math.min(10, parseFloat(e.target.value) || 0)))}
+                style={s.numberInput}
+              />
+              <span style={s.unit}>%</span>
+            </div>
+          </div>
+        </div>
+        <span style={s.hint}>정각 스캔 후 현재가가 너무 멀리 이탈한 경우 추격 진입을 방지합니다. 0 = 비활성화</span>
       </div>
 
       {/* Unattended cadence */}
@@ -322,6 +429,70 @@ function SettingsEditor({
         <span style={s.hint}>
           OFF면 자동매매(auto) 진입 시 음성 멘트는 재생하지 않고, 기본 진입음만 재생합니다.
         </span>
+      </div>
+
+      {/* TP1 partial close */}
+      <div style={s.fieldRow}>
+        <label style={s.label}>TP1 부분익절</label>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button
+            style={{ ...s.toggleChip, ...((draft.tp1Enabled ?? false) ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
+            onClick={() => set('tp1Enabled', true)}
+          >
+            ON
+          </button>
+          <button
+            style={{ ...s.toggleChip, ...(!(draft.tp1Enabled ?? false) ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
+            onClick={() => set('tp1Enabled', false)}
+          >
+            OFF
+          </button>
+        </div>
+        <span style={s.hint}>ALT 자동매매 전용. TP 목표의 일부 구간 도달 시 일부 익절 후 SL을 진입가로 이동.</span>
+        {(draft.tp1Enabled ?? false) && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 6, paddingLeft: 8, borderLeft: '2px solid rgba(255,255,255,0.08)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ ...s.label, width: 100 }}>TP1 위치 (R)</span>
+              <input
+                type="number"
+                min={0.1} max={0.9} step={0.05}
+                value={draft.tp1R ?? 0.30}
+                onChange={e => set('tp1R', Math.max(0.1, Math.min(0.9, parseFloat(e.target.value) || 0.30)))}
+                style={{ ...s.numberInput, width: 70 }}
+              />
+              <span style={s.unit}>× R</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ ...s.label, width: 100 }}>익절 비율</span>
+              <input
+                type="number"
+                min={10} max={90} step={10}
+                value={draft.tp1ClosePct ?? 50}
+                onChange={e => set('tp1ClosePct', Math.max(10, Math.min(90, parseInt(e.target.value) || 50)))}
+                style={{ ...s.numberInput, width: 70 }}
+              />
+              <span style={s.unit}>%</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ ...s.label, width: 100 }}>진입가 SL이동</span>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  style={{ ...s.toggleChip, ...((draft.tp1MoveSL !== false) ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
+                  onClick={() => set('tp1MoveSL', true)}
+                >
+                  ON
+                </button>
+                <button
+                  style={{ ...s.toggleChip, ...((draft.tp1MoveSL === false) ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
+                  onClick={() => set('tp1MoveSL', false)}
+                >
+                  OFF
+                </button>
+              </div>
+            </div>
+            <span style={s.hint}>TP1 = 진입가 + (TP−진입가)×{(draft.tp1R ?? 0.30).toFixed(2)} 지점에서 {draft.tp1ClosePct ?? 50}% 익절{(draft.tp1MoveSL !== false) ? ' + SL → 진입가' : ''}</span>
+          </div>
+        )}
       </div>
 
       {/* Info */}
@@ -476,7 +647,7 @@ const s: Record<string, React.CSSProperties> = {
   tabBtnActiveLive: {
     color: '#f6465d', borderBottom: '2px solid #f6465d', background: 'rgba(246,70,93,0.05)',
   },
-  body: { padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 14 },
+  body: { padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 14, overflowY: 'auto', maxHeight: '70vh' },
   fieldRow: { display: 'flex', flexDirection: 'column', gap: 6 },
   label: { color: '#848e9c', fontSize: '0.8rem', fontWeight: 600 },
   numberInput: {

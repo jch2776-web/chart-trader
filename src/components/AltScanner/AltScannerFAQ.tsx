@@ -103,8 +103,8 @@ function Table({ headers, rows }: { headers: string[]; rows: (string | React.Rea
   );
 }
 
-function P({ children }: { children: React.ReactNode }) {
-  return <p style={{ color: '#848e9c', fontSize: '0.8rem', lineHeight: 1.7, marginBottom: 10 }}>{children}</p>;
+function P({ children, style }: { children: React.ReactNode; style?: React.CSSProperties }) {
+  return <p style={{ color: '#848e9c', fontSize: '0.8rem', lineHeight: 1.7, marginBottom: 10, ...style }}>{children}</p>;
 }
 
 function H2({ children }: { children: React.ReactNode }) {
@@ -116,6 +116,102 @@ function Ul({ items }: { items: React.ReactNode[] }) {
     <ul style={{ paddingLeft: 18, margin: '6px 0 10px', color: '#848e9c', fontSize: '0.79rem', lineHeight: 1.75 }}>
       {items.map((item, i) => <li key={i}>{item}</li>)}
     </ul>
+  );
+}
+
+function SettingGroup({ title, children, accent = '#3b4455' }: { title: string; children: React.ReactNode; accent?: string }) {
+  return (
+    <div style={{ marginTop: 14 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+        <div style={{ height: 1, width: 18, background: `${accent}80`, flexShrink: 0 }} />
+        <span style={{ fontSize: '0.72rem', fontWeight: 700, color: accent, whiteSpace: 'nowrap' as const }}>{title}</span>
+        <div style={{ height: 1, flex: 1, background: `${accent}40` }} />
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function ScanSchedule() {
+  const [now, setNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 500);
+    return () => clearInterval(id);
+  }, []);
+
+  const DELAY_MS = 3000;
+
+  function getNextScan(cadenceMs: number) {
+    const elapsed = now % cadenceMs;
+    const boundary = now - elapsed + cadenceMs;
+    const scanAt = boundary + DELAY_MS;
+    const remainMs = Math.max(0, scanAt - now);
+    const progressPct = Math.min(100, (elapsed / cadenceMs) * 100);
+    return { scanAt, remainMs, progressPct };
+  }
+
+  function fmtLocal(ms: number): string {
+    const d = new Date(ms);
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+  }
+
+  function fmtCountdown(ms: number): string {
+    const safe = Math.max(0, ms);
+    const h = Math.floor(safe / 3600000);
+    const m = Math.floor((safe % 3600000) / 60000);
+    const s = Math.floor((safe % 60000) / 1000);
+    if (h > 0) return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  }
+
+  const items = [
+    { label: '15m', cadenceMs: 15 * 60 * 1000, color: '#3b8beb', desc: ':00 · :15 · :30 · :45' },
+    { label: '1h',  cadenceMs: 60 * 60 * 1000,      color: '#0ecb81', desc: '매 시각 정각' },
+    { label: '4h',  cadenceMs: 4 * 60 * 60 * 1000,  color: '#f0b90b', desc: '0·4·8·12·16·20시' },
+    { label: '1d',  cadenceMs: 24 * 60 * 60 * 1000, color: '#9b59b6', desc: 'UTC 00:00 (KST 09:00)' },
+  ].map(item => ({ ...item, ...getNextScan(item.cadenceMs) }));
+
+  return (
+    <div style={{
+      background: 'rgba(255,255,255,0.025)', border: '1px solid #2a2e39',
+      borderRadius: 8, padding: '12px 14px', marginBottom: 12,
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+        <span style={{ fontSize: '0.76rem', fontWeight: 700, color: '#d1d4dc' }}>다음 자동 스캔 예상 시각</span>
+        <span style={{ fontSize: '0.72rem', color: '#5e6673', fontFamily: 'monospace' }}>현재 {fmtLocal(now)}</span>
+      </div>
+      {items.map(item => (
+        <div key={item.label} style={{ marginBottom: 10 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{
+                color: item.color, fontSize: '0.74rem', fontWeight: 700,
+                background: `${item.color}18`, border: `1px solid ${item.color}40`,
+                borderRadius: 3, padding: '1px 7px',
+              }}>{item.label}</span>
+              <span style={{ color: '#5e6673', fontSize: '0.71rem' }}>{item.desc}</span>
+            </div>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+              <span style={{ color: '#848e9c', fontSize: '0.72rem' }}>{fmtLocal(item.scanAt)}</span>
+              <span style={{
+                color: item.color, fontSize: '0.8rem', fontWeight: 700,
+                fontFamily: 'monospace', minWidth: 52, textAlign: 'right' as const,
+              }}>{fmtCountdown(item.remainMs)}</span>
+            </div>
+          </div>
+          <div style={{ height: 3, background: '#1a1e2a', borderRadius: 2 }}>
+            <div style={{
+              height: '100%', width: `${item.progressPct}%`,
+              background: item.color, borderRadius: 2, opacity: 0.65,
+              transition: 'width 0.5s linear',
+            }} />
+          </div>
+        </div>
+      ))}
+      <div style={{ fontSize: '0.7rem', color: '#4a5568', marginTop: 6 }}>
+        ※ 봉 마감 UTC 기준 +3초에 스캔 시작 · 로컬 시간 표시 · ALT추천 모달이 열려있을 때만 자동 실행
+      </div>
+    </div>
   );
 }
 
@@ -497,12 +593,15 @@ SHORT 청산가 = entryPrice × (1 + 1/leverage - 0.005)
           툴바의 무인 자동매매 스케줄러(주기 설정)와는 완전히 별개로 동작합니다.
         </P>
 
+        <H2>스캔 예상 일정</H2>
+        <ScanSchedule />
+
         <Card title="자동 스캔 타이밍" accent="#0ecb81">
           <Ul items={[
             '15m 스캔: 매 시각 :00, :15, :30, :45 + 3초 후',
             '1h 스캔: 매 시각 :00 + 3초 후',
-            '4h 스캔: 매 4시간 정각 + 3초 후',
-            '1d 스캔: 매일 UTC 00:00 + 3초 후',
+            '4h 스캔: 매 4시간 정각 (UTC 0·4·8·12·16·20시) + 3초 후',
+            '1d 스캔: 매일 UTC 00:00 (KST 09:00) + 3초 후',
             '3초 지연: 거래소 데이터 확정 대기',
           ]} />
         </Card>
@@ -519,9 +618,6 @@ SHORT 청산가 = entryPrice × (1 + 1/leverage - 0.005)
         ]} />
 
         <H2>API 속도 제한</H2>
-        <P>
-          스캔 요청이 과도하면 바이낸스 API 일시 차단이 발생할 수 있습니다. 아래 기준을 지킵니다.
-        </P>
         <Table
           headers={['모드', '동시 요청', '요청 간격', '예상 Weight/분']}
           rows={[
@@ -547,50 +643,158 @@ SHORT 청산가 = entryPrice × (1 + 1/leverage - 0.005)
     content: (
       <>
         <P>
-          자동매매는 ALT추천 모달 없이도 설정한 <strong style={{ color: '#f0b90b' }}>주기 경계(기본 60분)</strong>마다
-          백그라운드 스캔을 실행합니다. 툴바의 <Badge color="#f0b90b">자동매매</Badge> 토글로 활성화합니다.
+          자동매매는 ALT추천 모달 없이도 설정한 <strong style={{ color: '#f0b90b' }}>스캔 주기 경계</strong>마다
+          백그라운드 스캔을 실행하고 조건 충족 시 자동으로 진입합니다.
+          툴바의 <Badge color="#f0b90b">자동매매</Badge> 토글로 활성화합니다.
         </P>
 
-        <Card title="자동매매 동작 방식" accent="#f0b90b">
+        <Card title="기본 동작" accent="#f0b90b">
           <Ul items={[
-            '설정한 주기 경계(15/30/60/120/240분)마다 자동 실행 (기본 60분)',
-            '1H 스캔 → 2초 대기 → 4H 스캔 → 2초 대기 → 1D 스캔',
-            '스코어 90점 이상 심볼만 대상',
-            '타임프레임별 상위 2개 심볼에 진입 (자동매매 모드에 따라 모의 또는 실전)',
-            '동일 심볼+방향은 한 번의 실행에서 중복 진입하지 않음',
-            'localStorage에 활성 상태 저장 (새로고침 후에도 유지)',
-            '주기는 자동설정(⚙)에서 모의/실전 각각 독립 변경',
+            '스코어 90점 이상 심볼만 자동 진입 대상',
+            '동일 심볼+방향은 한 스캔 내 중복 진입 없음',
+            'localStorage에 활성 상태 저장 → 새로고침 후에도 유지',
+            '자동설정(⚙)은 모의/실전 각각 독립 설정',
           ]} />
         </Card>
 
-        <Card title="자동매매 스캔 속도 제한" accent="#848e9c">
-          <P>심볼당 7 weight 소비 (klines limit=202 → 2wt, limit=502 → 5wt). 최대 안전 처리량에 맞춰 설정합니다.</P>
-          <Formula>{`동시 요청: 4개
-요청 간격: 450ms (+ 평균 HTTP 250ms = 실효 700ms/배치)
-예상 처리: ~5.7 sym/초 × 7wt = ~40 weight/초 = ~2,400 weight/분
-바이낸스 한도: 2,400 weight/분 (한도 상한에 맞춤)`}</Formula>
-        </Card>
+        {/* ── 스캔 주기 ── */}
+        <SettingGroup title="스캔 주기" accent="#3b8beb">
+          <Card title="scanCadenceMinutes — 스캔 실행 주기" accent="#3b8beb">
+            <P>
+              자동매매가 스캔을 실행하는 주기 경계입니다. <strong style={{ color: '#f0b90b' }}>기본 60분</strong>.
+              선택 가능: 15 · 30 · 60 · 120 · 240분.
+            </P>
+            <Ul items={[
+              '60분 선택 시 → 매 시각 정각(:00)에 스캔 실행',
+              '15분 선택 시 → :00, :15, :30, :45마다 스캔',
+              '주기가 짧을수록 최신 신호를 빠르게 포착하지만 API 부하 증가',
+              '▶ 즉시실행 버튼으로 다음 주기를 기다리지 않고 즉시 스캔 가능',
+            ]} />
+          </Card>
+        </SettingGroup>
 
-        <H2>즉시 실행</H2>
-        <P>
-          자동매매가 활성화된 상태에서 <strong style={{ color: '#f0b90b' }}>▶ 즉시실행</strong> 버튼을 누르면
-          다음 스케줄 경계(설정 주기)를 기다리지 않고 즉시 스캔을 시작합니다.
-          즉시 실행은 다음 스케줄 경계 실행에는 영향을 주지 않습니다.
-        </P>
+        {/* ── 진입 필터 ── */}
+        <SettingGroup title="진입 필터" accent="#0ecb81">
+          <Card title="autoEntryIntervals — 자동진입 허용 타임프레임" accent="#0ecb81">
+            <P>
+              실제 자동 진입을 허용할 타임프레임을 선택합니다. <strong style={{ color: '#f0b90b' }}>기본: 1H</strong>.
+            </P>
+            <Ul items={[
+              '스캔은 선택한 모든 TF에 실행되지만, 허용 TF에 해당하는 신호에만 진입',
+              '예) 1H만 허용: 4H·1D 신호는 스캔·알림은 되지만 자동 진입 제외',
+              '1H + 4H 허용 시 두 TF 신호 모두 자동 진입 대상',
+            ]} />
+          </Card>
+          <Card title="maxAutoPositionsPerScan — 최대 스캔 진입 수" accent="#0ecb81">
+            <P>
+              한 번의 스캔 실행에서 진입할 최대 포지션 수입니다. <strong style={{ color: '#f0b90b' }}>기본: 1</strong>.
+            </P>
+            <Ul items={[
+              '모든 허용 TF에 걸친 총 진입 수 기준',
+              '1로 설정 시 스캔마다 최고 점수 후보 1건만 진입',
+              '2 이상 설정 시 여러 심볼/TF에 동시 진입 가능 (리스크 주의)',
+            ]} />
+          </Card>
+        </SettingGroup>
+
+        {/* ── 추격 진입 방지 ── */}
+        <SettingGroup title="추격 진입 방지" accent="#f6465d">
+          <P style={{ color: '#848e9c', fontSize: '0.79rem', lineHeight: 1.65, margin: '0 0 8px' }}>
+            봉 마감 신호 이후 스캔 처리 시간이 지나면서 현재가가 계획 진입가에서 멀어질 수 있습니다.
+            아래 두 필터는 <strong style={{ color: '#f0b90b' }}>자동 진입 경로에만</strong> 적용되며 수동 진입에는 영향 없습니다.
+          </P>
+          <Card title="maxSignalAgeSec — 신호 유효 시간 (초)" accent="#f6465d">
+            <P>
+              신호가 생성된 봉 마감 시각(asOfCloseTime)으로부터 진입 결정 시점까지 허용 최대 경과 시간.
+              <strong style={{ color: '#f0b90b' }}> 기본: 120초. 0 = 비활성화</strong>.
+            </P>
+            <Formula>{`예: 1H 봉이 08:00에 마감 → asOfCloseTime = 08:00:00
+스캔 완료 후 진입 결정 시각 = 08:02:10 (130초 경과)
+maxSignalAgeSec=120 → 130s > 120s → 진입 건너뜀`}</Formula>
+          </Card>
+          <Card title="maxEntryDriftPct — 최대 진입 이탈폭 (%)" accent="#f6465d">
+            <P>
+              계획 진입가 대비 현재 마크가의 이탈폭이 이 값을 초과하면 진입 건너뜁니다.
+              <strong style={{ color: '#f0b90b' }}> 기본: 1.0%. 0 = 비활성화</strong>.
+            </P>
+            <Formula>{`롱 신호, 계획 진입가 = $100.00
+현재 마크가 = $101.20 (이미 +1.2% 위)
+maxEntryDriftPct=1.0 → 1.2% > 1.0% → 추격 진입 방지`}</Formula>
+            <Ul items={[
+              '롱: 현재가가 진입가보다 위로 이탈 시 체이싱으로 판단',
+              '숏: 현재가가 진입가보다 아래로 이탈 시 체이싱으로 판단',
+              '이탈 방향이 유리한 경우(롱인데 현재가가 아래)는 통과',
+              '진입 결정 시 entryDriftPct(%)가 포지션 메타에 기록됨',
+            ]} />
+          </Card>
+        </SettingGroup>
+
+        {/* ── TP1 부분익절 ── */}
+        <SettingGroup title="TP1 부분익절" accent="#9b59b6">
+          <Card title="tp1Enabled — TP1 부분익절 ON/OFF" accent="#9b59b6">
+            <P>
+              활성화 시 자동 진입 포지션에 한해 TP1 도달 시 일부 익절 후 SL을 본절(진입가)로 이동합니다.
+              <strong style={{ color: '#f0b90b' }}> 기본: OFF. 수동 진입 포지션에는 적용 안 됨</strong>.
+            </P>
+          </Card>
+          <Card title="TP1 세부 설정" accent="#9b59b6">
+            <Table
+              headers={['항목', '기본값', '설명']}
+              rows={[
+                ['tp1R', '0.30 (30%)', '진입가~TP2 거리의 몇 % 지점에 TP1 설정'],
+                ['tp1ClosePct', '50%', 'TP1 도달 시 청산할 포지션 비율'],
+                ['tp1MoveSL', 'ON', 'TP1 후 SL을 진입가(본절)로 이동'],
+              ]}
+            />
+            <Formula>{`예: 진입가 $100, TP2 = $110 (거리 $10), tp1R=0.30
+→ TP1 = $100 + $10 × 0.30 = $103
+
+TP1 도달 시: 포지션 50% 청산 (이익 실현)
+           + SL을 $100 (진입가)로 이동 → 이후 손실 없음`}</Formula>
+          </Card>
+        </SettingGroup>
+
+        {/* ── 타임스탑 ── */}
+        <SettingGroup title="타임스탑" accent="#848e9c">
+          <Card title="timeStopEnabled — 시간 만료 청산" accent="#848e9c">
+            <P>
+              ALT 신호의 유효 시간(validUntilTime) 초과 시 처리 방식입니다.
+              <strong style={{ color: '#f0b90b' }}> 기본: ON</strong>.
+            </P>
+            <Ul items={[
+              'ON: 봉 마감마다 validUntilTime 초과 여부 확인 → 5분 확인 모달 표시 → 미응답 시 자동 청산',
+              'OFF로 설정 후 자동 진입한 포지션은 시간 만료 청산/프롬프트 없음',
+              '수동 진입 포지션은 이 설정과 무관하게 타임스탑 모달이 표시됨',
+              '실전 포지션은 앱이 실행 중일 때만 감시 가능',
+            ]} />
+          </Card>
+        </SettingGroup>
+
+        {/* ── API 속도 ── */}
+        <SettingGroup title="API 속도 제한" accent="#5e6673">
+          <Card title="자동매매 스캔 속도" accent="#5e6673">
+            <Formula>{`동시 요청: 4개
+요청 간격: 450ms (+ 평균 HTTP 250ms = 실효 700ms/배치)
+예상 처리: ~5.7 심볼/초 × 7wt = ~40 weight/초 = ~2,400 weight/분
+바이낸스 한도: 2,400 weight/분 (상한에 맞춤)`}</Formula>
+            <P style={{ color: '#f0b90b', fontSize: '0.78rem' }}>
+              ※ 자동매매 활성 중 대용량 수동 스캔을 동시 실행하면 합산 부하가 한도를 초과할 수 있습니다.
+            </P>
+          </Card>
+        </SettingGroup>
 
         <H2>로그 확인</H2>
         <Ul items={[
           '모든 자동매매 활동은 앱 하단 활동 로그에 기록됨',
-          '스캔 시작/완료, 진입 심볼, 오류 등이 [자동매매] 태그로 표시',
+          '스캔 시작/완료, 진입 심볼, 추격 진입 방지 사유 등이 [자동매매] 태그로 표시',
           '종료 내역은 모의/실전 모드에 따라 해당 히스토리 탭에서 확인 가능',
         ]} />
 
         <Card title="주의 사항" accent="#f6465d">
           <Ul items={[
             '스캔 중 앱을 새로고침하면 진행 중인 스캔이 중단됨',
-            '장시간 실행 시 다수의 포지션이 누적될 수 있음 (거래 히스토리 확인 권장)',
-            '3x 레버리지 기준 청산가는 약 ±30% — ATR 기반 SL이 청산가보다 충분히 안쪽에 위치함',
-            '수동 스캔과 동시 실행 중이면 합산 weight가 한도를 초과할 수 있음 — 자동매매 활성 중 대용량 수동 스캔을 피해주세요',
+            '장시간 실행 시 다수의 포지션이 누적될 수 있음 (최대 진입 수 설정 필수)',
+            '3x 레버리지 기준 청산가 ≈ ±30% — ATR 기반 SL이 충분히 안쪽에 위치함',
           ]} />
         </Card>
       </>
@@ -914,7 +1118,7 @@ SHORT 청산가 = entryPrice × (1 + 1/leverage - 0.005)
             ['distanceNowPct', '현재가와 트리거 레벨 간 거리 (%)'],
             ['MMR', 'Maintenance Margin Rate — 유지증거금율 (Binance Futures: 0.5%)'],
             ['청산가 (Liq.Price)', '격리 마진에서 증거금이 소진되는 가격. 레버리지가 높을수록 진입가에 근접'],
-            ['자동매매', '설정한 주기 경계(기본 60분)마다 백그라운드 스캔 후 90점+ 상위 2개 심볼에 자동 진입하는 기능. 포지션은 모의/실전 중 하나로만 처리됨'],
+            ['자동매매', '설정한 주기 경계(기본 60분)마다 백그라운드 스캔 후 90점+ 상위 심볼에 자동 진입하는 기능. 허용 TF·최대 진입 수·TP1 부분익절 등 자동설정(⚙)으로 세부 조정. 포지션은 모의/실전 중 하나로만 처리됨'],
             ['Weight', 'Binance API 요청 비용 단위. 분당 2400 초과 시 일시 차단'],
           ]}
         />

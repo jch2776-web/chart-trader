@@ -104,6 +104,7 @@ interface LiveProps {
     reason: 'sl',
   ) => void;
   onTimeStopRequest: (payload: TimeStopRequestPayload) => void;
+  onTp1Hit?: (meta: AltMeta) => void;
   metaKey: string;
 }
 
@@ -113,14 +114,36 @@ interface LiveProps {
  *   1. now > validUntilTime  (time-stop)
  *   2. close crosses slPrice in loss direction  (structural invalidation)
  */
-export function LiveAltPositionMonitor({ meta, positionSide, qty, onCloseMarket, onTimeStopRequest, metaKey }: LiveProps) {
+export function LiveAltPositionMonitor({ meta, positionSide, qty, onCloseMarket, onTimeStopRequest, onTp1Hit, metaKey }: LiveProps) {
   const closeSide: 'BUY' | 'SELL' = meta.direction === 'long' ? 'SELL' : 'BUY';
   // Prevent double-firing for immediate SL close if WS duplicates closed candles.
   const firedRef = useRef(false);
   // Time-stop request must be deduplicated separately from SL auto-close.
   const timeStopRequestedRef = useRef(false);
+  // TP1 must fire at most once per position lifecycle.
+  const tp1FiredRef = useRef(false);
 
   const handleCandle = useCallback((candle: Candle, isClosed: boolean) => {
+    // TP1 check on every tick (intrabar) — fires once when close reaches tp1Price
+    if (
+      !tp1FiredRef.current &&
+      meta.tp1Enabled === true &&
+      !meta.tp1Hit &&
+      meta.tp1Price != null
+    ) {
+      const ivMs = intervalToMs(meta.scanInterval as Interval);
+      const candleCloseTime = candle.time + ivMs;
+      const monitorAfterTp1 = Math.max(meta.signalCloseTime ?? 0, meta.monitorStartTime ?? 0, meta.liveEntryTime ?? 0, meta.liveEntrySubmittedAt ?? 0);
+      const monitorReady = monitorAfterTp1 === 0 || candleCloseTime > monitorAfterTp1 + 1000;
+      if (monitorReady) {
+        const isLongTp1 = meta.direction === 'long';
+        if ((isLongTp1 && candle.close >= meta.tp1Price) || (!isLongTp1 && candle.close <= meta.tp1Price)) {
+          tp1FiredRef.current = true;
+          onTp1Hit?.(meta);
+        }
+      }
+    }
+
     if (!isClosed) return;
     const ivMs = intervalToMs(meta.scanInterval as Interval);
     const candleCloseTime = candle.time + ivMs;
@@ -155,7 +178,7 @@ export function LiveAltPositionMonitor({ meta, positionSide, qty, onCloseMarket,
         requestedAt: Date.now(),
       });
     }
-  }, [meta, closeSide, qty, positionSide, onCloseMarket, onTimeStopRequest, metaKey]);
+  }, [meta, closeSide, qty, positionSide, onCloseMarket, onTimeStopRequest, onTp1Hit, metaKey]);
 
   useBinanceWS(meta.symbol, meta.scanInterval as Interval, handleCandle);
 

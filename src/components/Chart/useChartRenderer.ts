@@ -155,6 +155,7 @@ export function useChartRenderer(
   orders: FuturesOrder[] = [],
   countdown: number = 0,
   indicators: IndicatorConfig = { coinDuckMABB: false, dwCloud: false },
+  tp1Lines: Array<{ price: number; hit: boolean }> = [],
 ) {
   // Pre-compute MA arrays whenever candles change
   const maArrays = useMemo(() => ({
@@ -475,8 +476,8 @@ export function useChartRenderer(
 
     // ── Futures positions & orders overlay ───────────────────────────────
     // Drawn AFTER Y-axis background so axis-zone tags are visible
-    if (positions.length > 0 || orders.length > 0) {
-      renderPositionOverlay(ctx, positions, orders, vp, priceArea, axisX);
+    if (positions.length > 0 || orders.length > 0 || tp1Lines.length > 0) {
+      renderPositionOverlay(ctx, positions, orders, vp, priceArea, axisX, tp1Lines);
     }
 
     // ── X-Axis (bottom) ───────────────────────────────────────────────────
@@ -688,7 +689,7 @@ export function useChartRenderer(
         });
       }
     }
-  }, [candles, interval, drawings, previewDrawing, crosshair, hoverHandle, draggingHandle, maArrays, indicatorArrays, indicators, positions, orders, countdown]);
+  }, [candles, interval, drawings, previewDrawing, crosshair, hoverHandle, draggingHandle, maArrays, indicatorArrays, indicators, positions, orders, countdown, tp1Lines]);
 
   return { render };
 }
@@ -936,6 +937,7 @@ function renderPositionOverlay(
   vp: ChartViewport,
   area: ChartArea,
   axisX: number,
+  tp1Lines: Array<{ price: number; hit: boolean }> = [],
 ) {
   const mono = '"SF Mono","Cascadia Code",Consolas,monospace';
 
@@ -1067,6 +1069,33 @@ function renderPositionOverlay(
     ctx.fillStyle = baseCol;
     ctx.textAlign = 'right';
     ctx.fillText(`${o.side} ${orderTypeShort(o.type)}  ${o.origQty}`, axisX - 6, oy - 3);
+    ctx.restore();
+  });
+
+  // ── TP1 target lines ───────────────────────────────────────────────────
+  tp1Lines.forEach(({ price, hit }) => {
+    const y = priceToY(price, vp, area);
+    if (y < area.y || y > area.y + area.h) return;
+    const color = hit ? '#0ecb81' : '#3b8beb';
+    ctx.save();
+    ctx.globalAlpha = hit ? 0.40 : 0.65;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    ctx.moveTo(area.x, y);
+    ctx.lineTo(axisX, y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.font = `bold 10px ${mono}`;
+    const label = hit ? `TP1 ✓  ${formatPrice(price)}` : `TP1  ${formatPrice(price)}`;
+    const tagW = ctx.measureText(label).width + 10;
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = hexToRgba(color, hit ? 0.55 : 0.75);
+    ctx.fillRect(axisX, y - 9, tagW, 18);
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'left';
+    ctx.fillText(label, axisX + 5, y + 4);
     ctx.restore();
   });
 }

@@ -6,6 +6,20 @@ import { downloadExcel } from '../../utils/exportExcel';
 import type { ExcelCell } from '../../utils/exportExcel';
 import { fetchBinanceKlinesCached } from '../../lib/binanceKlineCache';
 
+const TAKER_FEE = 0.0004; // Binance Futures taker 0.04%
+
+/** Net PnL at a given exit price (entry + exit taker fees included) */
+function calcNetPnl(side: 'LONG' | 'SHORT', entryPx: number, exitPx: number, qty: number): number {
+  const raw = (side === 'LONG' ? exitPx - entryPx : entryPx - exitPx) * qty;
+  const fee = (entryPx + exitPx) * qty * TAKER_FEE;
+  return raw - fee;
+}
+
+function fmtNetPnl(pnl: number): string {
+  const sign = pnl >= 0 ? '+' : '';
+  return `${sign}${pnl.toFixed(2)}`;
+}
+
 interface Props {
   allPositions: FuturesPosition[];
   allOrders: FuturesOrder[];
@@ -28,6 +42,7 @@ interface Props {
   onPaperResetBalance?: (amount: number) => void;
   onPaperCancelOrder?: (id: string) => void;
   onPaperClearHistory?: () => void;
+  onLiveClearHistory?: () => void;
   paperInitialBalance?: number;
   onOpenAltPosition?: (meta: AltMeta) => void;
   onOpenAltInMain?: (meta: AltMeta) => void;
@@ -133,6 +148,8 @@ interface UnifiedHistoryRow {
   timeStopEnabledAtEntry?: boolean | null;
   validUntilTimeAtEntry?: number | null;
   scanCadenceMinutesAtEntry?: number | null;
+  tp1Hit?: boolean | null;
+  movedSlToBe?: boolean | null;
 }
 
 function reasonLabel(reason: UnifiedHistoryReason): string {
@@ -433,6 +450,13 @@ function PerformanceAnalysisSection({
   const offRows = useMemo(() => altRows.filter(r => r.timeStopEnabledAtEntry === false), [altRows]);
   const onSummary = useMemo(() => summarizeCohort(onRows), [onRows]);
   const offSummary = useMemo(() => summarizeCohort(offRows), [offRows]);
+  // TP1 analysis
+  const tp1AppliedRows = useMemo(() => altRows.filter(r => r.tp1Hit !== null && r.tp1Hit !== undefined), [altRows]);
+  const tp1HitRows = useMemo(() => tp1AppliedRows.filter(r => r.tp1Hit === true), [tp1AppliedRows]);
+  const tp1MissRows = useMemo(() => tp1AppliedRows.filter(r => r.tp1Hit === false), [tp1AppliedRows]);
+  const tp1HitSummary = useMemo(() => summarizeCohort(tp1HitRows), [tp1HitRows]);
+  const tp1MissSummary = useMemo(() => summarizeCohort(tp1MissRows), [tp1MissRows]);
+  const beMovedCount = useMemo(() => tp1HitRows.filter(r => r.movedSlToBe === true).length, [tp1HitRows]);
   const maxDrawdownProxy = useMemo(() => {
     const sorted = [...rows].sort((a, b) => a.exitTime - b.exitTime);
     let cum = 0;
@@ -1111,6 +1135,83 @@ function PerformanceAnalysisSection({
           )}
         </PerfCard>
       </div>
+
+      {/* ── Row 5: TP1 효과 분석 ─────────────────────────────── */}
+      {tp1AppliedRows.length > 0 && (
+        <div style={{ ...revealStyle(4), marginTop: 10 }}>
+          <PerfCard>
+            <PerfCardTitle icon="🎯" title="TP1 부분익절 효과 분석" badge={
+              <span style={{ fontSize: '0.63rem', color: '#6b7892' }}>{tp1AppliedRows.length}건 적용</span>
+            } />
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 9 }}>
+
+              {/* TP1 달성률 */}
+              <div style={{ border: '1px solid rgba(59,139,235,0.2)', borderRadius: 10, padding: '10px 12px', background: 'rgba(59,139,235,0.04)' }}>
+                <div style={{ fontSize: '0.62rem', color: '#3b8beb', fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '0.04em', marginBottom: 6 }}>TP1 달성률</div>
+                <div style={{ marginBottom: 8 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+                    <span style={{ fontSize: '0.61rem', color: '#0ecb81' }}>달성 {tp1HitRows.length}</span>
+                    <span style={{ fontSize: '0.59rem', color: '#5d7080' }}>총 {tp1AppliedRows.length}건</span>
+                    <span style={{ fontSize: '0.61rem', color: '#f6465d' }}>미달성 {tp1MissRows.length}</span>
+                  </div>
+                  <div style={{ height: 8, borderRadius: 4, background: 'rgba(246,70,93,0.25)', overflow: 'hidden' }}>
+                    <div style={{ height: '100%', width: `${tp1AppliedRows.length > 0 ? (tp1HitRows.length / tp1AppliedRows.length) * 100 : 0}%`, background: '#3b8beb', borderRadius: 4, opacity: 0.85 }} />
+                  </div>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5 }}>
+                  {[
+                    { label: 'TP1 달성률', value: tp1AppliedRows.length > 0 ? `${((tp1HitRows.length / tp1AppliedRows.length) * 100).toFixed(1)}%` : '—', color: '#3b8beb' },
+                    { label: 'BE 이동 실행', value: tp1HitRows.length > 0 ? `${beMovedCount}/${tp1HitRows.length}` : '—', color: '#f0b90b' },
+                  ].map(({ label, value, color }) => (
+                    <div key={label} style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 6, padding: '5px 6px', textAlign: 'center' as const }}>
+                      <div style={{ fontSize: '0.57rem', color: '#3d5060', marginBottom: 2 }}>{label}</div>
+                      <div style={{ fontSize: '0.73rem', color, fontWeight: 700, fontFamily: '"SF Mono",Consolas,monospace' }}>{value}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* TP1 달성 시 성과 */}
+              {tp1HitRows.length > 0 && (
+                <div style={{ border: '1px solid rgba(14,203,129,0.2)', borderRadius: 10, padding: '10px 12px', background: 'rgba(14,203,129,0.04)' }}>
+                  <div style={{ fontSize: '0.62rem', color: '#0ecb81', fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '0.04em', marginBottom: 6 }}>TP1 달성 후 성과</div>
+                  {[
+                    { label: '거래 수', value: `${tp1HitSummary.count}건` },
+                    { label: '승률', value: `${tp1HitSummary.winRate.toFixed(1)}%`, color: tp1HitSummary.winRate >= 50 ? '#0ecb81' : '#f6465d' },
+                    { label: '누적 손익', value: `${tp1HitSummary.totalPnl >= 0 ? '+' : ''}${tp1HitSummary.totalPnl.toFixed(2)}`, color: tp1HitSummary.totalPnl >= 0 ? '#0ecb81' : '#f6465d' },
+                    { label: '거래당', value: `${tp1HitSummary.avgPnl >= 0 ? '+' : ''}${tp1HitSummary.avgPnl.toFixed(2)}`, color: tp1HitSummary.avgPnl >= 0 ? '#0ecb81' : '#f6465d' },
+                    { label: '평균 보유', value: tp1HitSummary.avgHoldMin != null ? `${tp1HitSummary.avgHoldMin.toFixed(1)}분` : '—' },
+                  ].map((r, i) => (
+                    <div key={r.label} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.69rem', padding: '2px 0', borderTop: i > 0 ? '1px solid rgba(255,255,255,0.04)' : 'none' }}>
+                      <span style={{ color: '#6a7a8e' }}>{r.label}</span>
+                      <span style={{ color: r.color ?? '#c8d4e5', fontWeight: 600, fontFamily: '"SF Mono",Consolas,monospace' }}>{r.value}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* TP1 미달성 시 성과 */}
+              {tp1MissRows.length > 0 && (
+                <div style={{ border: '1px solid rgba(246,70,93,0.2)', borderRadius: 10, padding: '10px 12px', background: 'rgba(246,70,93,0.04)' }}>
+                  <div style={{ fontSize: '0.62rem', color: '#f6465d', fontWeight: 700, textTransform: 'uppercase' as const, letterSpacing: '0.04em', marginBottom: 6 }}>TP1 미달성 성과</div>
+                  {[
+                    { label: '거래 수', value: `${tp1MissSummary.count}건` },
+                    { label: '승률', value: `${tp1MissSummary.winRate.toFixed(1)}%`, color: tp1MissSummary.winRate >= 50 ? '#0ecb81' : '#f6465d' },
+                    { label: '누적 손익', value: `${tp1MissSummary.totalPnl >= 0 ? '+' : ''}${tp1MissSummary.totalPnl.toFixed(2)}`, color: tp1MissSummary.totalPnl >= 0 ? '#0ecb81' : '#f6465d' },
+                    { label: '거래당', value: `${tp1MissSummary.avgPnl >= 0 ? '+' : ''}${tp1MissSummary.avgPnl.toFixed(2)}`, color: tp1MissSummary.avgPnl >= 0 ? '#0ecb81' : '#f6465d' },
+                    { label: '평균 보유', value: tp1MissSummary.avgHoldMin != null ? `${tp1MissSummary.avgHoldMin.toFixed(1)}분` : '—' },
+                  ].map((r, i) => (
+                    <div key={r.label} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.69rem', padding: '2px 0', borderTop: i > 0 ? '1px solid rgba(255,255,255,0.04)' : 'none' }}>
+                      <span style={{ color: '#6a7a8e' }}>{r.label}</span>
+                      <span style={{ color: r.color ?? '#c8d4e5', fontWeight: 600, fontFamily: '"SF Mono",Consolas,monospace' }}>{r.value}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </PerfCard>
+        </div>
+      )}
     </div>
   );
 }
@@ -2002,7 +2103,7 @@ export function BottomPanel({
   isPaperMode, paperPositions, paperRawPositions, paperBalance,
   paperOrders, paperHistory, paperInitialBalance,
   onPaperClosePosition, onPaperSetTPSL, onPaperResetBalance,
-  onPaperCancelOrder, onPaperClearHistory, onOpenAltPosition, onOpenAltInMain, liveAltMetaMap,
+  onPaperCancelOrder, onPaperClearHistory, onLiveClearHistory, onOpenAltPosition, onOpenAltInMain, liveAltMetaMap,
   liveAltOrderTagMap, liveAltEntryOrderTagMap, liveHistory, liveBalanceHistory, onLiveCloseMarket, onLiveCloseCurrentPrice,
 }: Props) {
   const [tab, setTab] = useState<Tab>('positions');
@@ -2117,6 +2218,8 @@ export function BottomPanel({
       timeStopEnabledAtEntry: h.timeStopEnabledAtEntry ?? null,
       validUntilTimeAtEntry: h.validUntilTimeAtEntry ?? null,
       scanCadenceMinutesAtEntry: h.scanCadenceMinutesAtEntry ?? null,
+      tp1Hit: h.tp1Hit ?? null,
+      movedSlToBe: h.movedSlToBe ?? null,
     })),
     [paperHistory],
   );
@@ -2146,6 +2249,8 @@ export function BottomPanel({
       timeStopEnabledAtEntry: h.timeStopEnabledAtEntry ?? null,
       validUntilTimeAtEntry: h.validUntilTimeAtEntry ?? null,
       scanCadenceMinutesAtEntry: h.scanCadenceMinutesAtEntry ?? null,
+      tp1Hit: h.tp1Hit ?? null,
+      movedSlToBe: h.movedSlToBe ?? null,
     })),
     [liveHistory],
   );
@@ -2261,6 +2366,9 @@ export function BottomPanel({
                 { value: h.plannedSL != null ? h.plannedSL : '-', align: 'right' },
                 { value: h.entryTime ? fmtEntryTime(h.entryTime) : '-' },
                 { value: fmtEntryTime(h.exitTime) },
+                { value: h.tp1Hit === true ? '달성' : h.tp1Hit === false ? '미달성' : '—', color: h.tp1Hit === true ? 'green' : h.tp1Hit === false ? 'red' : 'gray', align: 'center' },
+                { value: h.movedSlToBe === true ? 'BE이동' : '—', color: h.movedSlToBe === true ? 'green' : 'gray', align: 'center' },
+                { value: h.isAltTrade ? (h.closeReason === 'tp' ? '달성' : '미달성') : '—', color: h.isAltTrade ? (h.closeReason === 'tp' ? 'green' : 'red') : 'gray', align: 'center' },
               ] as ExcelCell[];
             });
             downloadExcel(`${mode === 'paper' ? '모의거래' : '실전거래'}_히스토리_${dateFrom || '전체'}_${dateTo || '전체'}.xls`, [
@@ -2272,6 +2380,7 @@ export function BottomPanel({
               { label: '타임프레임', width: 10 },
               { label: 'Score', width: 8 }, { label: '계획TP', width: 12 }, { label: '계획SL', width: 12 },
               { label: '진입시간', width: 20 }, { label: '종료시간', width: 20 },
+              { label: '1차TP 도달', width: 10 }, { label: 'BE이동', width: 8 }, { label: '2차TP 도달', width: 10 },
             ], dataRows);
           }}
         >
@@ -2308,6 +2417,18 @@ export function BottomPanel({
             전체 삭제
           </button>
         )}
+        {mode === 'live' && (liveHistory?.length ?? 0) > 0 && (
+          <button
+            style={{ ...s.cancelBtn, color: '#f6465d', borderColor: 'rgba(246,70,93,0.3)' }}
+            onClick={() => {
+              if (window.confirm('실전 거래 히스토리를 전체 삭제하면 성과분석도 초기화됩니다. 삭제하시겠습니까?')) {
+                onLiveClearHistory?.();
+              }
+            }}
+          >
+            전체 삭제
+          </button>
+        )}
       </div>
       <table style={s.table}>
         <thead>
@@ -2328,11 +2449,13 @@ export function BottomPanel({
             <th style={s.th}>계획 SL</th>
             <th style={s.th}>진입시간</th>
             <th style={s.th}>종료시간</th>
+            <th style={s.th}>1차TP</th>
+            <th style={s.th}>2차TP</th>
           </tr>
         </thead>
         <tbody>
           {visibleRows.length === 0 ? (
-            <tr><td colSpan={16} style={s.empty}>거래 히스토리 없음</td></tr>
+            <tr><td colSpan={18} style={s.empty}>거래 히스토리 없음</td></tr>
           ) : visibleRows.map(h => {
             const margin = h.entryPrice != null && h.leverage != null && h.leverage > 0
               ? (h.entryPrice * h.qty / h.leverage)
@@ -2382,6 +2505,26 @@ export function BottomPanel({
                 <td style={s.td}>{h.plannedSL != null ? fmtPrice(h.plannedSL) : '—'}</td>
                 <td style={{ ...s.td, color: '#5d6776', fontSize: '0.74rem', whiteSpace: 'nowrap' }}>{h.entryTime ? fmtEntryTime(h.entryTime) : '—'}</td>
                 <td style={{ ...s.td, color: '#5d6776', fontSize: '0.74rem', whiteSpace: 'nowrap' }}>{fmtEntryTime(h.exitTime)}</td>
+                <td style={{ ...s.td, textAlign: 'center' }}>
+                  {h.tp1Hit === true ? (
+                    <span style={{ color: '#0ecb81', fontWeight: 700, fontSize: '0.75rem' }}>✓{h.movedSlToBe ? <span style={{ color: '#f0b90b', fontSize: '0.68rem', marginLeft: 2 }}>BE↑</span> : null}</span>
+                  ) : h.tp1Hit === false ? (
+                    <span style={{ color: '#f6465d', fontSize: '0.75rem' }}>✗</span>
+                  ) : (
+                    <span style={{ color: '#3a4558', fontSize: '0.75rem' }}>—</span>
+                  )}
+                </td>
+                <td style={{ ...s.td, textAlign: 'center' }}>
+                  {h.isAltTrade ? (
+                    h.closeReason === 'tp' ? (
+                      <span style={{ color: '#0ecb81', fontWeight: 700, fontSize: '0.75rem' }}>✓</span>
+                    ) : (
+                      <span style={{ color: '#f6465d', fontSize: '0.75rem' }}>✗</span>
+                    )
+                  ) : (
+                    <span style={{ color: '#3a4558', fontSize: '0.75rem' }}>—</span>
+                  )}
+                </td>
               </tr>
             );
           })}
@@ -2676,8 +2819,27 @@ export function BottomPanel({
                               <div style={s.tpslCell}>
                                 {(raw?.tpPrice || raw?.slPrice) && (
                                   <div style={s.tpslPrices}>
-                                    <span style={{ color: '#0ecb81', fontSize: '0.74rem' }}>TP: {raw.tpPrice ? fmtPrice(raw.tpPrice) : '—'}</span>
-                                    <span style={{ color: '#f6465d', fontSize: '0.74rem' }}>SL: {raw.slPrice ? fmtPrice(raw.slPrice) : '—'}</span>
+                                    <span style={{ color: '#0ecb81', fontSize: '0.74rem' }}>
+                                      TP: {raw.tpPrice ? fmtPrice(raw.tpPrice) : '—'}
+                                      {raw.tpPrice && pos.entryPrice > 0 && (
+                                        <span style={{ color: '#0ecb81', fontSize: '0.68rem', opacity: 0.8, marginLeft: 3 }}>
+                                          ({fmtNetPnl(calcNetPnl(side, pos.entryPrice, raw.tpPrice, absAmt))})
+                                        </span>
+                                      )}
+                                    </span>
+                                    <span style={{ color: '#f6465d', fontSize: '0.74rem' }}>
+                                      SL: {raw.slPrice ? fmtPrice(raw.slPrice) : '—'}
+                                      {raw.slPrice && pos.entryPrice > 0 && (
+                                        <span style={{ color: '#f6465d', fontSize: '0.68rem', opacity: 0.8, marginLeft: 3 }}>
+                                          ({fmtNetPnl(calcNetPnl(side, pos.entryPrice, raw.slPrice, absAmt))})
+                                        </span>
+                                      )}
+                                    </span>
+                                    {altMeta?.tp1Enabled && altMeta.tp1Price != null && (
+                                      <span style={{ color: altMeta.tp1Hit ? '#0ecb81' : '#3b8beb', fontSize: '0.72rem' }}>
+                                        TP1: {fmtPrice(altMeta.tp1Price)}{altMeta.tp1Hit ? ' ✓' : ''}
+                                      </span>
+                                    )}
                                   </div>
                                 )}
                                 <button style={s.tpslBtn} onClick={() => openTPSL(pos, true)}>
@@ -2791,9 +2953,21 @@ export function BottomPanel({
                         <td style={s.td}>
                           <div style={s.tpslCell}>
                             <div style={s.tpslPrices}>
-                              <span style={{ color: '#0ecb81', fontSize: '0.74rem' }}>TP: {tpPrice > 0 ? fmtPrice(tpPrice) : '—'}</span>
+                              <span style={{ color: '#0ecb81', fontSize: '0.74rem' }}>
+                                TP: {tpPrice > 0 ? fmtPrice(tpPrice) : '—'}
+                                {tpPrice > 0 && pos.entryPrice > 0 && (
+                                  <span style={{ color: '#0ecb81', fontSize: '0.68rem', opacity: 0.8, marginLeft: 3 }}>
+                                    ({fmtNetPnl(calcNetPnl(side, pos.entryPrice, tpPrice, absAmt))})
+                                  </span>
+                                )}
+                              </span>
                               <span style={{ color: '#f6465d', fontSize: '0.74rem', display: 'flex', alignItems: 'center', gap: 3 }}>
                                 SL: {slDisplayPrice > 0 ? fmtPrice(slDisplayPrice) : '—'}
+                                {slDisplayPrice > 0 && pos.entryPrice > 0 && (
+                                  <span style={{ color: '#f6465d', fontSize: '0.68rem', opacity: 0.8, marginLeft: 3 }}>
+                                    ({fmtNetPnl(calcNetPnl(side, pos.entryPrice, slDisplayPrice, absAmt))})
+                                  </span>
+                                )}
                                 {isClientSl && (
                                   <>
                                     <span style={{ fontSize: '0.58rem', background: 'rgba(240,185,11,0.18)', color: '#f0b90b', borderRadius: 3, padding: '1px 4px', fontWeight: 700 }}>앱</span>
@@ -2805,6 +2979,11 @@ export function BottomPanel({
                                   </>
                                 )}
                               </span>
+                              {liveMeta?.tp1Enabled && liveMeta.tp1Price != null && (
+                                <span style={{ color: liveMeta.tp1Hit ? '#0ecb81' : '#3b8beb', fontSize: '0.72rem' }}>
+                                  TP1: {fmtPrice(liveMeta.tp1Price)}{liveMeta.tp1Hit ? ' ✓' : ''}
+                                </span>
+                              )}
                             </div>
                             <button style={s.tpslBtn} onClick={() => openTPSL(pos)}>설정</button>
                           </div>

@@ -26,6 +26,19 @@ export interface AltMeta {
   liveEntrySubmittedAt?: number;
   liveEntryTime?: number;
   liveEntryFee?: number | null;
+  // TP1 partial close config (ALT auto-trade only, optional for backward compatibility)
+  tp1Enabled?: boolean;
+  tp1Price?: number | null;
+  tp1ClosePct?: number;        // 0-100, e.g. 50
+  tp1MoveSL?: boolean;
+  tp1Hit?: boolean;
+  tp1OriginalQty?: number;   // full position qty at moment TP1 fired
+  tp1ClosedQty?: number;     // qty actually closed at TP1 partial exit
+  tp1ClosedPrice?: number;   // approximate fill price at TP1 (mark price at trigger)
+  movedSlToBe?: boolean;
+  maxAutoPositionsPerScanAtEntry?: number | null;
+  // Chase-entry filter metadata (auto-trade only)
+  entryDriftPct?: number | null;   // (markPrice - entryPrice) / entryPrice * 100 at decision time
 }
 
 export interface PaperPosition {
@@ -87,6 +100,9 @@ export interface PaperHistoryEntry {
   timeStopEnabledAtEntry?: boolean | null;
   validUntilTimeAtEntry?: number | null;
   scanCadenceMinutesAtEntry?: number | null;
+  tp1Hit?: boolean | null;
+  movedSlToBe?: boolean | null;
+  maxAutoPositionsPerScanAtEntry?: number | null;
 }
 
 export interface PaperState {

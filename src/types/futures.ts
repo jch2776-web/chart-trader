@@ -50,6 +50,9 @@ export interface LiveTradeHistoryEntry {
   timeStopEnabledAtEntry?: boolean | null;
   validUntilTimeAtEntry?: number | null;
   scanCadenceMinutesAtEntry?: number | null;
+  tp1Hit?: boolean | null;
+  movedSlToBe?: boolean | null;
+  maxAutoPositionsPerScanAtEntry?: number | null;
 }
 
 export interface FuturesUserTrade {
