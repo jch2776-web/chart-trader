@@ -42,7 +42,7 @@ import type { AltTradeParams } from './components/AltScanner/AltScannerModal';
 import { runBreakoutScan } from './components/AltScanner/breakoutScanner';
 import type { ScanCandidate, ScanInterval } from './components/AltScanner/breakoutScanner';
 import type { FuturesUserTrade, LiveCloseReason, LiveTradeHistoryEntry } from './types/futures';
-import { intervalToMs } from './components/AltScanner/timeUtils';
+import { intervalToMs, triggerPrice } from './components/AltScanner/timeUtils';
 import { AltPositionMonitor, LiveAltPositionMonitor } from './components/AltScanner/AltPositionMonitor';
 import type { TimeStopRequestPayload } from './components/AltScanner/AltPositionMonitor';
 import { TimeStopDecisionModal } from './components/AltScanner/TimeStopDecisionModal';
@@ -239,6 +239,9 @@ const normalizeAutoTradeSettings = (base: AutoTradeSettings, saved: Partial<Auto
   maxEntryDriftPct: (saved && 'maxEntryDriftPct' in saved && typeof saved.maxEntryDriftPct === 'number')
     ? saved.maxEntryDriftPct
     : (base.maxEntryDriftPct ?? 1.0),
+  maxBreakoutExtensionPct: (saved && 'maxBreakoutExtensionPct' in saved && typeof saved.maxBreakoutExtensionPct === 'number')
+    ? saved.maxBreakoutExtensionPct
+    : (base.maxBreakoutExtensionPct ?? 0.6),
 });
 
 // ── Resizable divider between panels ─────────────────────────────────────────
@@ -1664,7 +1667,23 @@ function AppInner() {
       );
       return;
     }
-    // 2) Price drift: skip if current price has moved too far from plannedEntry in the chase direction
+    // 2) Breakout extension: skip if confirmed candle close is too far beyond the trigger line
+    const maxBreakoutExtensionPct = autoSettings.maxBreakoutExtensionPct ?? 0.6;
+    if (maxBreakoutExtensionPct > 0 && c.triggerSpec && c.entryPrice > 0) {
+      const tPrice = triggerPrice(c.triggerSpec, c.asOfCloseTime);
+      if (tPrice > 0) {
+        const ext = c.direction === 'long'
+          ? (c.entryPrice - tPrice) / tPrice * 100
+          : (tPrice - c.entryPrice) / tPrice * 100;
+        if (ext > maxBreakoutExtensionPct) {
+          addLog('info',
+            `[자동매매] ${c.symbol} ${c.direction.toUpperCase()} — 추격진입 방지: 확정봉 이탈폭 ${ext.toFixed(2)}% > ${maxBreakoutExtensionPct}% (종가=${c.entryPrice.toFixed(4)} 돌파선=${tPrice.toFixed(4)})`,
+          );
+          return;
+        }
+      }
+    }
+    // 3) Price drift: skip if current price has moved too far from plannedEntry in the chase direction
     const maxEntryDriftPct = autoSettings.maxEntryDriftPct ?? 1.0;
     let entryDriftPct: number | null = null;
     if (maxEntryDriftPct > 0 && mark > 0 && c.entryPrice > 0) {

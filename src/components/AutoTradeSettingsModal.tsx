@@ -21,8 +21,9 @@ export interface AutoTradeSettings {
   tp1MoveSL?: boolean;           // move SL to entry after TP1 (default true)
   maxAutoPositionsPerScan?: number; // max entries per scan cycle (default 1)
   // Chase-entry prevention filter (auto-entry only)
-  maxSignalAgeSec?: number;   // max age of signal since asOfCloseTime (default 120s, 0 = disable)
-  maxEntryDriftPct?: number;  // max allowed drift from plannedEntry before skipping (default 1.0%, 0 = disable)
+  maxSignalAgeSec?: number;          // max age of signal since asOfCloseTime (default 120s, 0 = disable)
+  maxEntryDriftPct?: number;         // max allowed drift from plannedEntry before skipping (default 1.0%, 0 = disable)
+  maxBreakoutExtensionPct?: number;  // max allowed extension of confirmed candle close beyond trigger line (default 0.6%, 0 = disable)
 }
 
 const CADENCE_PRESETS = [15, 30, 60, 120, 240] as const;
@@ -66,6 +67,7 @@ export const DEFAULT_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
   maxAutoPositionsPerScan: 1,
   maxSignalAgeSec: 120,
   maxEntryDriftPct: 1.0,
+  maxBreakoutExtensionPct: 0.6,
 };
 
 export const DEFAULT_LIVE_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
@@ -87,6 +89,7 @@ export const DEFAULT_LIVE_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
   maxAutoPositionsPerScan: 1,
   maxSignalAgeSec: 120,
   maxEntryDriftPct: 1.0,
+  maxBreakoutExtensionPct: 0.6,
 };
 
 interface Props {
@@ -308,7 +311,21 @@ function SettingsEditor({
             </div>
           </div>
         </div>
+        <div style={{ marginTop: 8 }}>
+          <div style={{ fontSize: '0.72rem', color: '#9aa4b5', marginBottom: 3 }}>돌파선 대비 최대 확정봉 이탈폭(%)</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input
+              type="number"
+              min={0} max={10} step={0.1}
+              value={draft.maxBreakoutExtensionPct ?? 0.6}
+              onChange={e => set('maxBreakoutExtensionPct', Math.max(0, Math.min(10, parseFloat(e.target.value) || 0)))}
+              style={s.numberInput}
+            />
+            <span style={s.unit}>%</span>
+          </div>
+        </div>
         <span style={s.hint}>정각 스캔 후 현재가가 너무 멀리 이탈한 경우 추격 진입을 방지합니다. 0 = 비활성화</span>
+        <span style={s.hint}>돌파선 이탈폭: 확정봉 종가가 트리거(돌파선) 기준을 너무 멀리 벗어난 경우 자동진입을 차단합니다. 0 = 비활성화</span>
       </div>
 
       {/* Unattended cadence */}
