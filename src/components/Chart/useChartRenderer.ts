@@ -1,6 +1,10 @@
 import { useCallback, useMemo } from 'react';
 import type { Candle, Interval } from '../../types/candle';
-import type { Drawing, TrendlineDrawing, BoxDrawing, HlineDrawing, PixelPoint } from '../../types/drawing';
+import type {
+  Drawing, TrendlineDrawing, BoxDrawing, HlineDrawing, PixelPoint,
+  FibRetracementDrawing, PriceRangeDrawing, DateRangeDrawing,
+} from '../../types/drawing';
+import { FIB_LEVELS, FIB_LEVEL_COLORS } from '../../types/drawing';
 import type { FuturesPosition, FuturesOrder } from '../../types/futures';
 import type { ChartViewport, ChartLayout, ChartArea } from './chartMath';
 import {
@@ -442,6 +446,12 @@ export function useChartRenderer(
         renderBox(ctx, d, candles, vp, priceArea, isPreview, hoverHandle, draggingHandle, isInactive);
       } else if (d.type === 'hline') {
         renderHline(ctx, d, vp, priceArea, isPreview, hoverHandle, draggingHandle, isInactive);
+      } else if (d.type === 'fib') {
+        renderFib(ctx, d, candles, vp, priceArea, isPreview, hoverHandle, draggingHandle, isInactive);
+      } else if (d.type === 'pricerange') {
+        renderPriceRange(ctx, d, candles, vp, priceArea, isPreview, hoverHandle, draggingHandle, isInactive);
+      } else if (d.type === 'daterange') {
+        renderDateRange(ctx, d, candles, vp, priceArea, isPreview, hoverHandle, draggingHandle, isInactive);
       }
       if (isInactive) ctx.restore();
     });
@@ -914,6 +924,315 @@ function renderHline(
       ctx.restore();
     }
   }
+}
+
+// ── Fibonacci Retracement renderer ───────────────────────────────────────────
+function renderFib(
+  ctx: CanvasRenderingContext2D,
+  d: FibRetracementDrawing,
+  candles: Candle[],
+  vp: ChartViewport,
+  area: ChartArea,
+  isPreview: boolean,
+  hoverHandle: HoverHandle | null,
+  draggingHandle: HoverHandle | null,
+  isInactive = false,
+) {
+  const handleColor = d.color ?? '#e8b73a';
+  const p1px = pointToPixel(d.p1, candles, vp, area);
+  const p2px = pointToPixel(d.p2, candles, vp, area);
+  const leftX = Math.min(p1px.x, p2px.x);
+  const rightX = area.x + area.w;
+  const range = d.p2.price - d.p1.price;
+
+  ctx.save();
+  if (isPreview) ctx.globalAlpha = 0.55;
+
+  // Zone fills between consecutive levels
+  for (let i = 0; i < FIB_LEVELS.length - 1; i++) {
+    const price1 = d.p1.price + FIB_LEVELS[i] * range;
+    const price2 = d.p1.price + FIB_LEVELS[i + 1] * range;
+    const y1 = priceToY(price1, vp, area);
+    const y2 = priceToY(price2, vp, area);
+    const topY = Math.max(Math.min(y1, y2), area.y);
+    const botY = Math.min(Math.max(y1, y2), area.y + area.h);
+    if (botY <= topY) continue;
+    ctx.fillStyle = hexToRgba(FIB_LEVEL_COLORS[i], 0.06);
+    ctx.fillRect(leftX, topY, rightX - leftX, botY - topY);
+  }
+
+  // Horizontal lines at each fib level
+  FIB_LEVELS.forEach((lvl, i) => {
+    const price = d.p1.price + lvl * range;
+    const y = priceToY(price, vp, area);
+    if (y < area.y - 4 || y > area.y + area.h + 4) return;
+
+    ctx.strokeStyle = hexToRgba(FIB_LEVEL_COLORS[i], isPreview || isInactive ? 0.55 : 0.85);
+    ctx.lineWidth = (lvl === 0 || lvl === 1) ? 1.5 : 1;
+    if (isPreview || isInactive) ctx.setLineDash([5, 3]);
+    ctx.beginPath();
+    ctx.moveTo(leftX, y);
+    ctx.lineTo(rightX, y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    if (!isPreview) {
+      ctx.font = '10px "SF Mono","Cascadia Code",Consolas,monospace';
+      ctx.textAlign = 'right';
+      ctx.fillStyle = hexToRgba(FIB_LEVEL_COLORS[i], 0.9);
+      const pctLabel = lvl === 0 ? '0%' : lvl === 1 ? '100%' : `${(lvl * 100).toFixed(1)}%`;
+      ctx.fillText(`${pctLabel} ${formatPrice(price)}`, rightX - 6, y - 3);
+    }
+  });
+
+  if (!isPreview) {
+    // Dashed connector between endpoints
+    ctx.strokeStyle = hexToRgba(handleColor, 0.45);
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.moveTo(p1px.x, p1px.y);
+    ctx.lineTo(p2px.x, p2px.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    drawHandle(ctx, p1px, d.id, 0, hoverHandle, draggingHandle, handleColor);
+    drawHandle(ctx, p2px, d.id, 1, hoverHandle, draggingHandle, handleColor);
+  }
+
+  ctx.restore();
+}
+
+// ── Price Range renderer ──────────────────────────────────────────────────────
+function renderPriceRange(
+  ctx: CanvasRenderingContext2D,
+  d: PriceRangeDrawing,
+  candles: Candle[],
+  vp: ChartViewport,
+  area: ChartArea,
+  isPreview: boolean,
+  hoverHandle: HoverHandle | null,
+  draggingHandle: HoverHandle | null,
+  isInactive = false,
+) {
+  const baseColor = d.color ?? '#22d3ee';
+  const p1px = pointToPixel(d.p1, candles, vp, area);
+  const p2px = pointToPixel(d.p2, candles, vp, area);
+
+  const left  = Math.min(p1px.x, p2px.x);
+  const right = Math.max(p1px.x, p2px.x);
+  const top   = Math.min(p1px.y, p2px.y);
+  const bot   = Math.max(p1px.y, p2px.y);
+  const midX  = (left + right) / 2;
+  const midY  = (top + bot) / 2;
+  const bh = bot - top;
+
+  // Directional: p1 = first click, p2 = second click
+  const priceDiff = d.p2.price - d.p1.price;  // negative = down, positive = up
+  const pctDiff   = d.p1.price > 0 ? (priceDiff / d.p1.price * 100) : 0;
+  const highPrice = Math.max(d.p1.price, d.p2.price);
+  const lowPrice  = Math.min(d.p1.price, d.p2.price);
+
+  // Direction-aware color: green for up (p2 > p1), red for down (p2 < p1)
+  const dirColor = priceDiff >= 0 ? '#0ecb81' : '#f6465d';
+  const fillColor = isPreview ? baseColor : dirColor;
+
+  ctx.save();
+  if (isPreview) ctx.globalAlpha = 0.55;
+
+  // Filled rectangle
+  ctx.fillStyle = hexToRgba(fillColor, 0.08);
+  ctx.fillRect(left, top, right - left, bh);
+
+  // Border
+  ctx.strokeStyle = hexToRgba(fillColor, isPreview || isInactive ? 0.5 : 0.8);
+  ctx.lineWidth = 1.5;
+  if (isPreview || isInactive) ctx.setLineDash([5, 3]);
+  ctx.strokeRect(left, top, right - left, bh);
+  ctx.setLineDash([]);
+
+  if (!isPreview) {
+    // Body-hover highlight
+    const isBodyHovered  = hoverHandle?.drawingId  === d.id && hoverHandle?.handleIdx  === -1;
+    const isBodyDragging = draggingHandle?.drawingId === d.id && draggingHandle?.handleIdx === -1;
+    if (isBodyHovered || isBodyDragging) {
+      ctx.fillStyle = hexToRgba(fillColor, 0.1);
+      ctx.fillRect(left, top, right - left, bh);
+    }
+
+    // Directional arrow on the left side: from p1 toward p2
+    const bx = left + 12;
+    const arrowH = Math.min(6, bh * 0.2);
+    ctx.fillStyle = hexToRgba(fillColor, 0.7);
+    const arrowAtTip = p2px.y;  // arrowhead points toward p2
+    const arrowFrom  = p1px.y;
+    const tipY  = arrowAtTip < arrowFrom ? top + 2      : bot - 2;       // p2 side
+    const tailY = arrowAtTip < arrowFrom ? top + 2 + arrowH : bot - 2 - arrowH;
+    // Arrowhead at p2 side
+    ctx.beginPath();
+    if (priceDiff > 0) {
+      // up: arrowhead at top
+      ctx.moveTo(bx, top + 2);
+      ctx.lineTo(bx - 4, top + 2 + arrowH);
+      ctx.lineTo(bx + 4, top + 2 + arrowH);
+    } else {
+      // down: arrowhead at bottom
+      ctx.moveTo(bx, bot - 2);
+      ctx.lineTo(bx - 4, bot - 2 - arrowH);
+      ctx.lineTo(bx + 4, bot - 2 - arrowH);
+    }
+    ctx.closePath();
+    ctx.fill();
+    // Vertical connector
+    if (bh > arrowH + 8) {
+      ctx.strokeStyle = hexToRgba(fillColor, 0.4);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(bx, priceDiff > 0 ? top + 2 + arrowH : top + 2);
+      ctx.lineTo(bx, priceDiff > 0 ? bot - 2          : bot - 2 - arrowH);
+      ctx.stroke();
+    }
+    // Tick at the tail (p1 side)
+    ctx.strokeStyle = hexToRgba(fillColor, 0.5);
+    ctx.lineWidth = 1.5;
+    const tickY = priceDiff > 0 ? bot : top;
+    ctx.beginPath();
+    ctx.moveTo(bx - 4, tickY);
+    ctx.lineTo(bx + 4, tickY);
+    ctx.stroke();
+
+    // Center label: ΔPrice and % with sign
+    if (bh > 24) {
+      const sign = priceDiff >= 0 ? '+' : '';
+      const diffLabel = `${sign}${formatPrice(priceDiff)}  ${sign}${pctDiff.toFixed(2)}%`;
+      ctx.font = 'bold 10px "SF Mono","Cascadia Code",Consolas,monospace';
+      ctx.textAlign = 'center';
+      const tw = ctx.measureText(diffLabel).width;
+      ctx.fillStyle = 'rgba(13,17,28,0.8)';
+      ctx.fillRect(midX - tw / 2 - 3, midY - 8, tw + 6, 13);
+      ctx.fillStyle = hexToRgba(fillColor, 0.95);
+      ctx.fillText(diffLabel, midX, midY + 3);
+    }
+
+    // Price labels on right edge: p1 at p1px.y, p2 at p2px.y
+    ctx.font = '11px "SF Mono","Cascadia Code",Consolas,monospace';
+    ctx.textAlign = 'right';
+    ctx.fillStyle = hexToRgba(fillColor, 0.85);
+    // p1 label
+    const p1LabelY = Math.max(p1px.y + 12, top + 12);
+    ctx.fillText(formatPrice(d.p1.price), right - 4, p1LabelY);
+    // p2 label (avoid overlap with p1)
+    const p2LabelY = priceDiff >= 0 ? Math.min(p2px.y + 12, bot - 4) : Math.max(p2px.y - 4, top + 12);
+    if (Math.abs(p2LabelY - p1LabelY) > 14) {
+      ctx.fillText(formatPrice(d.p2.price), right - 4, priceDiff >= 0 ? top + 12 : bot - 4);
+    }
+
+    drawHandle(ctx, p1px, d.id, 0, hoverHandle, draggingHandle, fillColor);
+    drawHandle(ctx, p2px, d.id, 1, hoverHandle, draggingHandle, fillColor);
+  }
+
+  ctx.restore();
+}
+
+// ── Date Range renderer ───────────────────────────────────────────────────────
+function formatDuration(ms: number): string {
+  const totalSec = Math.floor(Math.abs(ms) / 1000);
+  const d = Math.floor(totalSec / 86400);
+  const h = Math.floor((totalSec % 86400) / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  if (d > 0) return h > 0 ? `${d}d ${h}h` : `${d}d`;
+  if (h > 0) return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  return `${m}m`;
+}
+
+function renderDateRange(
+  ctx: CanvasRenderingContext2D,
+  d: DateRangeDrawing,
+  candles: Candle[],
+  vp: ChartViewport,
+  area: ChartArea,
+  isPreview: boolean,
+  hoverHandle: HoverHandle | null,
+  draggingHandle: HoverHandle | null,
+  isInactive = false,
+) {
+  const baseColor = d.color ?? '#a855f7';
+  const p1px = pointToPixel(d.p1, candles, vp, area);
+  const p2px = pointToPixel(d.p2, candles, vp, area);
+
+  const leftX  = Math.min(p1px.x, p2px.x);
+  const rightX = Math.max(p1px.x, p2px.x);
+  const topY   = area.y;
+  const botY   = area.y + area.h;
+  const midY   = (topY + botY) / 2;
+  const midX   = (leftX + rightX) / 2;
+  const bandW  = rightX - leftX;
+
+  // Handle indices: 0 = whichever handle is at p1 (could be left or right)
+  const p1IsLeft = d.p1.time <= d.p2.time;
+  const leftHandleIdx  = p1IsLeft ? 0 : 1;
+  const rightHandleIdx = p1IsLeft ? 1 : 0;
+
+  ctx.save();
+  if (isPreview) ctx.globalAlpha = 0.55;
+
+  // Shaded band
+  ctx.fillStyle = hexToRgba(baseColor, 0.07);
+  ctx.fillRect(leftX, topY, bandW, botY - topY);
+
+  // Left vertical boundary
+  ctx.strokeStyle = hexToRgba(baseColor, isPreview || isInactive ? 0.5 : 0.8);
+  ctx.lineWidth = 1.5;
+  if (isPreview || isInactive) ctx.setLineDash([5, 3]);
+  ctx.beginPath();
+  ctx.moveTo(leftX, topY);
+  ctx.lineTo(leftX, botY);
+  ctx.stroke();
+
+  // Right vertical boundary
+  ctx.beginPath();
+  ctx.moveTo(rightX, topY);
+  ctx.lineTo(rightX, botY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Dashed horizontal arrow at mid-height
+  ctx.strokeStyle = hexToRgba(baseColor, 0.35);
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  ctx.moveTo(leftX, midY);
+  ctx.lineTo(rightX, midY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  if (!isPreview) {
+    // Body-hover highlight
+    const isBodyHovered  = hoverHandle?.drawingId  === d.id && hoverHandle?.handleIdx  === -1;
+    const isBodyDragging = draggingHandle?.drawingId === d.id && draggingHandle?.handleIdx === -1;
+    if (isBodyHovered || isBodyDragging) {
+      ctx.fillStyle = hexToRgba(baseColor, 0.08);
+      ctx.fillRect(leftX, topY, bandW, botY - topY);
+    }
+
+    // Duration label
+    const durationLabel = formatDuration(d.p2.time - d.p1.time);
+    ctx.font = 'bold 11px "SF Mono","Cascadia Code",Consolas,monospace';
+    ctx.textAlign = 'center';
+    const tw = ctx.measureText(durationLabel).width;
+    if (bandW > tw + 16) {
+      ctx.fillStyle = 'rgba(13,17,28,0.8)';
+      ctx.fillRect(midX - tw / 2 - 3, midY - 8, tw + 6, 13);
+      ctx.fillStyle = hexToRgba(baseColor, 0.95);
+      ctx.fillText(durationLabel, midX, midY + 3);
+    }
+
+    // Handles at mid-height of boundary lines
+    drawHandle(ctx, { x: leftX,  y: midY }, d.id, leftHandleIdx,  hoverHandle, draggingHandle, baseColor);
+    drawHandle(ctx, { x: rightX, y: midY }, d.id, rightHandleIdx, hoverHandle, draggingHandle, baseColor);
+  }
+
+  ctx.restore();
 }
 
 // ── Futures position & order overlay ─────────────────────────────────────────────

@@ -2,6 +2,7 @@ import { useState, useCallback, useRef } from 'react';
 import type { Candle } from '../../types/candle';
 import type {
   Drawing, DrawingMode, TrendlineDrawing, BoxDrawing, HlineDrawing, Point,
+  FibRetracementDrawing, PriceRangeDrawing, DateRangeDrawing,
 } from '../../types/drawing';
 import type { ChartViewport, ChartLayout } from './chartMath';
 import {
@@ -51,6 +52,18 @@ function buildHline(ticker: string, price: number, color?: string): HlineDrawing
   return { id: uid(), type: 'hline', ticker, price, color };
 }
 
+function buildFib(ticker: string, p1: Point, p2: Point, color?: string): FibRetracementDrawing {
+  return { id: uid(), type: 'fib', ticker, p1, p2, color };
+}
+
+function buildPriceRange(ticker: string, p1: Point, p2: Point, color?: string): PriceRangeDrawing {
+  return { id: uid(), type: 'pricerange', ticker, p1, p2, color };
+}
+
+function buildDateRange(ticker: string, p1: Point, p2: Point, color?: string): DateRangeDrawing {
+  return { id: uid(), type: 'daterange', ticker, p1, p2, color };
+}
+
 function rebuildHline(existing: HlineDrawing, price: number): HlineDrawing {
   return { ...existing, price };
 }
@@ -62,6 +75,18 @@ function rebuildTrendline(existing: TrendlineDrawing, p1: Point, p2: Point): Tre
 
 function rebuildBox(existing: BoxDrawing, p1: Point, p2: Point): BoxDrawing {
   return { ...buildBox(existing.ticker, p1, p2, existing.color), id: existing.id, memo: existing.memo };
+}
+
+function rebuildFib(existing: FibRetracementDrawing, p1: Point, p2: Point): FibRetracementDrawing {
+  return { ...buildFib(existing.ticker, p1, p2, existing.color), id: existing.id, memo: existing.memo };
+}
+
+function rebuildPriceRange(existing: PriceRangeDrawing, p1: Point, p2: Point): PriceRangeDrawing {
+  return { ...buildPriceRange(existing.ticker, p1, p2, existing.color), id: existing.id, memo: existing.memo };
+}
+
+function rebuildDateRange(existing: DateRangeDrawing, p1: Point, p2: Point): DateRangeDrawing {
+  return { ...buildDateRange(existing.ticker, p1, p2, existing.color), id: existing.id, memo: existing.memo };
 }
 
 /** Point-to-segment distance (pixels) */
@@ -161,6 +186,35 @@ export function useDrawingTool(
         // Body: horizontal proximity within chart x bounds
         if (mouseX >= area.x && mouseX <= area.x + area.w && Math.abs(mouseY - py) <= BODY_RADIUS)
           return { drawingId: d.id, handleIdx: -1 };
+
+      } else if (d.type === 'fib' || d.type === 'pricerange') {
+        const p1px = pointToPixel(d.p1, candles, viewport, area);
+        const p2px = pointToPixel(d.p2, candles, viewport, area);
+        if (Math.hypot(mouseX - p1px.x, mouseY - p1px.y) <= HIT_RADIUS)
+          return { drawingId: d.id, handleIdx: 0 };
+        if (Math.hypot(mouseX - p2px.x, mouseY - p2px.y) <= HIT_RADIUS)
+          return { drawingId: d.id, handleIdx: 1 };
+        // Body: inside bounding box
+        const minX = Math.min(p1px.x, p2px.x) - 4;
+        const maxX = Math.max(p1px.x, p2px.x) + 4;
+        const minY = Math.min(p1px.y, p2px.y) - 4;
+        const maxY = Math.max(p1px.y, p2px.y) + 4;
+        if (mouseX > minX && mouseX < maxX && mouseY > minY && mouseY < maxY)
+          return { drawingId: d.id, handleIdx: -1 };
+
+      } else if (d.type === 'daterange') {
+        const p1px = pointToPixel(d.p1, candles, viewport, area);
+        const p2px = pointToPixel(d.p2, candles, viewport, area);
+        const midY = area.y + area.h / 2;
+        if (Math.hypot(mouseX - p1px.x, mouseY - midY) <= HIT_RADIUS)
+          return { drawingId: d.id, handleIdx: 0 };
+        if (Math.hypot(mouseX - p2px.x, mouseY - midY) <= HIT_RADIUS)
+          return { drawingId: d.id, handleIdx: 1 };
+        // Body: inside the time band
+        const leftX = Math.min(p1px.x, p2px.x);
+        const rightX = Math.max(p1px.x, p2px.x);
+        if (mouseX > leftX && mouseX < rightX && mouseY > area.y && mouseY < area.y + area.h)
+          return { drawingId: d.id, handleIdx: -1 };
       }
     }
     return null;
@@ -197,6 +251,16 @@ export function useDrawingTool(
               return rebuildBox(d, newTL, newBR);
             } else if (d.type === 'hline') {
               return rebuildHline(d, d.price + dPrice);
+            } else if (d.type === 'fib' || d.type === 'pricerange') {
+              const newP1: Point = { time: d.p1.time + dTime, price: d.p1.price + dPrice };
+              const newP2: Point = { time: d.p2.time + dTime, price: d.p2.price + dPrice };
+              if (d.type === 'fib') return rebuildFib(d, newP1, newP2);
+              return rebuildPriceRange(d, newP1, newP2);
+            } else if (d.type === 'daterange') {
+              // DateRange: time translation only (price not meaningful)
+              const newP1: Point = { time: d.p1.time + dTime, price: d.p1.price };
+              const newP2: Point = { time: d.p2.time + dTime, price: d.p2.price };
+              return rebuildDateRange(d, newP1, newP2);
             }
             return d;
           }));
@@ -223,6 +287,19 @@ export function useDrawingTool(
           } else if (d.type === 'hline') {
             // Center handle drag: move price to mouse Y
             return rebuildHline(d, pt.price);
+          } else if (d.type === 'fib' || d.type === 'pricerange') {
+            const newP1 = activeDrag.handleIdx === 0 ? pt : d.p1;
+            const newP2 = activeDrag.handleIdx === 1 ? pt : d.p2;
+            if (d.type === 'fib') return rebuildFib(d, newP1, newP2);
+            return rebuildPriceRange(d, newP1, newP2);
+          } else if (d.type === 'daterange') {
+            // DateRange handle drag: time only
+            const newTime = pt.time;
+            if (activeDrag.handleIdx === 0) {
+              return rebuildDateRange(d, { time: newTime, price: d.p1.price }, d.p2);
+            } else {
+              return rebuildDateRange(d, d.p1, { time: newTime, price: d.p2.price });
+            }
           }
           return d;
         }));
@@ -244,6 +321,12 @@ export function useDrawingTool(
           setPreviewDrawing({ ...buildTrendline(ticker, p1, pt, drawingColor), id: '__preview__' });
         } else if (mode === 'box') {
           setPreviewDrawing({ ...buildBox(ticker, p1, pt, drawingColor), id: '__preview__' });
+        } else if (mode === 'fib') {
+          setPreviewDrawing({ ...buildFib(ticker, p1, pt, drawingColor), id: '__preview__' });
+        } else if (mode === 'pricerange') {
+          setPreviewDrawing({ ...buildPriceRange(ticker, p1, pt, drawingColor), id: '__preview__' });
+        } else if (mode === 'daterange') {
+          setPreviewDrawing({ ...buildDateRange(ticker, p1, pt, drawingColor), id: '__preview__' });
         }
       }
     }
@@ -295,6 +378,12 @@ export function useDrawingTool(
       let newDrawing: Drawing;
       if (mode === 'trendline') {
         newDrawing = buildTrendline(ticker, p1, p2, drawingColor);
+      } else if (mode === 'fib') {
+        newDrawing = buildFib(ticker, p1, p2, drawingColor);
+      } else if (mode === 'pricerange') {
+        newDrawing = buildPriceRange(ticker, p1, p2, drawingColor);
+      } else if (mode === 'daterange') {
+        newDrawing = buildDateRange(ticker, p1, p2, drawingColor);
       } else {
         newDrawing = buildBox(ticker, p1, p2, drawingColor);
       }
@@ -313,15 +402,25 @@ export function useDrawingTool(
     setDraggingHandle(null);
   }, []);
 
-  // ── Right Click: cancel drawing ───────────────────────────────────────────
+  // ── Right Click: cancel drawing OR delete hovered drawing ────────────────
   const onContextMenu = useCallback((e: React.MouseEvent) => {
     if (mode !== 'none') {
       e.preventDefault();
       firstPointRef.current = null;
       setPreviewDrawing(null);
       setMode('none');
+      return;
     }
-  }, [mode, setMode]);
+    // In pointer mode: right-click on a hovered drawing to delete it
+    const rect = e.currentTarget.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+    const hit = hitTestHandle(mouseX, mouseY);
+    if (hit) {
+      e.preventDefault();
+      setDrawings(prev => prev.filter(d => d.id !== hit.drawingId));
+    }
+  }, [mode, setMode, hitTestHandle]);
 
   // ── Delete drawing ────────────────────────────────────────────────────────
   const deleteDrawing = useCallback((id: string) => {

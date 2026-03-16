@@ -21,6 +21,6 @@ export interface TelegramSettings {
 export interface ActivityLog {
   id: string;
   timestamp: number;
-  type: 'info' | 'signal' | 'order' | 'error';
+  type: 'info' | 'signal' | 'order' | 'error' | 'warn';
   message: string;
 }

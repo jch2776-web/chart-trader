@@ -289,8 +289,8 @@ export function CandleChart({
         if (mode !== 'none') {
           const t = e.touches[0];
           drawMouseDownRef.current(makeSynth(t.clientX, t.clientY));
-          // hline creates instantly on mouseDown; trendline/box needs a second point on touchend
-          touchDrawingActiveRef.current = mode === 'trendline' || mode === 'box';
+          // hline creates instantly on mouseDown; 2-point tools need a second point on touchend
+          touchDrawingActiveRef.current = mode === 'trendline' || mode === 'box' || mode === 'fib' || mode === 'pricerange' || mode === 'daterange';
           return;
         }
       }

@@ -13,12 +13,14 @@ const TYPE_ICON: Record<ActivityLog['type'], string> = {
   error:  '✕',
   signal: '⚡',
   order:  '✓',
+  warn:   '⚠',
   info:   '·',
 };
 const TYPE_COLOR: Record<ActivityLog['type'], string> = {
   error:  '#ef5350',
   signal: '#e8b73a',
   order:  '#22d991',
+  warn:   '#f59e42',
   info:   '#848e9c',
 };
 

@@ -1612,11 +1612,13 @@ function AppInner() {
   const handleAltLiveTradeRef    = useRef<((params: AltTradeParams) => void) | null>(null);
   const altAutoTradeSetActiveRef = useRef<((v: boolean) => void) | null>(null);
   const recentAltAutoCandidateRef = useRef<Record<string, number>>({});
+  // Accumulates confirmed entries during a scan run — read and cleared on scan_done
+  const scanConfirmedEntriesRef = useRef<Array<{ symbol: string; direction: 'long' | 'short'; leverage: number | null; marginUsdt: number | null; riskPct: number | null; sizeMode: string | null }>>([]);
 
   // ── AltScanner auto-trade: convert ScanCandidate → AltTradeParams and route by mode ──
   const handleAutoTradeScan = useCallback((c: ScanCandidate) => {
     if (c.status === 'INVALID' || c.status === 'EXPIRED') {
-      addLog('info', `[자동매매] ${c.symbol} ${c.direction.toUpperCase()} — 시그널 상태(${c.status})로 진입 건너뜀`);
+      addLog('warn', `[자동매매] ⛔ ${c.symbol} ${c.direction.toUpperCase()} — 시그널 상태(${c.status})로 진입 건너뜀`);
       return;
     }
     const now = Date.now();
@@ -1624,21 +1626,21 @@ function AppInner() {
     const remainingTtl = c.validUntilTime - now;
     const minTtl = Math.max(90_000, Math.floor(intervalMs * 0.25));
     if (remainingTtl <= minTtl) {
-      addLog('info', `[자동매매] ${c.symbol} ${c.direction.toUpperCase()} — TTL 부족(${Math.max(0, Math.floor(remainingTtl / 1000))}s), 진입 건너뜀`);
+      addLog('warn', `[자동매매] ⛔ ${c.symbol} ${c.direction.toUpperCase()} — TTL 부족(${Math.max(0, Math.floor(remainingTtl / 1000))}s), 진입 건너뜀`);
       return;
     }
     if (now - c.asOfCloseTime > Math.max(intervalMs, 4 * 60_000)) {
-      addLog('info', `[자동매매] ${c.symbol} ${c.direction.toUpperCase()} — 후보 시각이 오래되어 진입 건너뜀`);
+      addLog('warn', `[자동매매] ⛔ ${c.symbol} ${c.direction.toUpperCase()} — 후보 시각이 오래되어 진입 건너뜀`);
       return;
     }
     const mark = markPricesMapRef.current[c.symbol] ?? 0;
     if (mark > 0) {
       if (c.direction === 'long' && mark <= c.slPrice) {
-        addLog('info', `[자동매매] ${c.symbol} LONG — 현재가(${mark.toFixed(4)})가 SL(${c.slPrice.toFixed(4)}) 이하, 진입 건너뜀`);
+        addLog('warn', `[자동매매] ⛔ ${c.symbol} LONG — 현재가(${mark.toFixed(4)})가 SL(${c.slPrice.toFixed(4)}) 이하, 진입 건너뜀`);
         return;
       }
       if (c.direction === 'short' && mark >= c.slPrice) {
-        addLog('info', `[자동매매] ${c.symbol} SHORT — 현재가(${mark.toFixed(4)})가 SL(${c.slPrice.toFixed(4)}) 이상, 진입 건너뜀`);
+        addLog('warn', `[자동매매] ⛔ ${c.symbol} SHORT — 현재가(${mark.toFixed(4)})가 SL(${c.slPrice.toFixed(4)}) 이상, 진입 건너뜀`);
         return;
       }
     }
@@ -1646,7 +1648,7 @@ function AppInner() {
     const dedupeKey = `${c.symbol}_${c.direction}_${c.asOfCloseTime}`;
     const prevSeen = recentAltAutoCandidateRef.current[dedupeKey] ?? 0;
     if (now - prevSeen < Math.max(120_000, intervalMs)) {
-      addLog('info', `[자동매매] ${c.symbol} ${c.direction.toUpperCase()} — 동일 슬롯 후보 재진입 방지로 건너뜀`);
+      addLog('info', `[자동매매] ⏭ ${c.symbol} ${c.direction.toUpperCase()} — 동일 슬롯 후보 재진입 방지로 건너뜀`);
       return;
     }
     recentAltAutoCandidateRef.current[dedupeKey] = now;
@@ -1662,8 +1664,8 @@ function AppInner() {
     const signalAgeSec = (now - c.asOfCloseTime) / 1000;
     const maxSignalAgeSec = autoSettings.maxSignalAgeSec ?? 120;
     if (maxSignalAgeSec > 0 && signalAgeSec > maxSignalAgeSec) {
-      addLog('info',
-        `[자동매매] ${c.symbol} ${c.direction.toUpperCase()} — 추격진입 방지: 신호경과 ${signalAgeSec.toFixed(0)}s > ${maxSignalAgeSec}s (signal=${new Date(c.asOfCloseTime).toISOString()} decision=${new Date(now).toISOString()})`,
+      addLog('warn',
+        `[자동매매] ⛔ ${c.symbol} ${c.direction.toUpperCase()} — 추격진입 방지: 신호경과 ${signalAgeSec.toFixed(0)}s > ${maxSignalAgeSec}s`,
       );
       return;
     }
@@ -1676,8 +1678,8 @@ function AppInner() {
           ? (c.entryPrice - tPrice) / tPrice * 100
           : (tPrice - c.entryPrice) / tPrice * 100;
         if (ext > maxBreakoutExtensionPct) {
-          addLog('info',
-            `[자동매매] ${c.symbol} ${c.direction.toUpperCase()} — 추격진입 방지: 확정봉 이탈폭 ${ext.toFixed(2)}% > ${maxBreakoutExtensionPct}% (종가=${c.entryPrice.toFixed(4)} 돌파선=${tPrice.toFixed(4)})`,
+          addLog('warn',
+            `[자동매매] ⛔ ${c.symbol} ${c.direction.toUpperCase()} — 추격진입 방지: 확정봉 이탈폭 ${ext.toFixed(2)}% > ${maxBreakoutExtensionPct}% (종가=${c.entryPrice.toFixed(4)} 돌파선=${tPrice.toFixed(4)})`,
           );
           return;
         }
@@ -1691,8 +1693,8 @@ function AppInner() {
       entryDriftPct = parseFloat(rawDrift.toFixed(3));
       const isChasing = c.direction === 'long' ? rawDrift > 0 : rawDrift < 0;
       if (isChasing && Math.abs(rawDrift) > maxEntryDriftPct) {
-        addLog('info',
-          `[자동매매] ${c.symbol} ${c.direction.toUpperCase()} — 추격진입 방지: 이탈폭 ${rawDrift.toFixed(2)}% > ${maxEntryDriftPct}% (계획진입=${c.entryPrice.toFixed(4)} 현재가=${mark.toFixed(4)})`,
+        addLog('warn',
+          `[자동매매] ⛔ ${c.symbol} ${c.direction.toUpperCase()} — 추격진입 방지: 이탈폭 ${rawDrift.toFixed(2)}% > ${maxEntryDriftPct}% (계획진입=${c.entryPrice.toFixed(4)} 현재가=${mark.toFixed(4)})`,
         );
         return;
       }
@@ -1702,7 +1704,7 @@ function AppInner() {
     // Task 1: block intervals not in autoEntryIntervals
     const allowedEntryIntervals = (autoSettings.autoEntryIntervals as string[] | undefined) ?? ['1h'];
     if (!allowedEntryIntervals.includes(c.interval)) {
-      addLog('info', `[자동매매] ${c.symbol} ${c.direction.toUpperCase()} [${c.interval}] — 자동진입 비허용 TF (허용: ${allowedEntryIntervals.join(',')}), 스캔만 유지`);
+      addLog('warn', `[자동매매] ⛔ ${c.symbol} ${c.direction.toUpperCase()} [${c.interval}] — 자동진입 비허용 TF (허용: ${allowedEntryIntervals.join(',')}), 스캔만 유지`);
       return;
     }
 
@@ -1744,9 +1746,22 @@ function AppInner() {
       marginUsdt: autoSettings.marginUsdt,
       entryDriftPct,
     };
+    // All filters passed — log confirmed entry attempt and record for scan-done voice
+    addLog('order',
+      `[자동매매] ✅ ${autoTradeModeRef.current === 'live' ? '실전' : '모의'}진입 확정: ${c.symbol} ${c.direction.toUpperCase()} [${c.interval}] 점수${c.score} 진입${c.entryPrice.toFixed(4)} SL${c.slPrice.toFixed(4)} TP${c.tpPrice.toFixed(4)}`,
+    );
+    scanConfirmedEntriesRef.current.push({
+      symbol:    c.symbol,
+      direction: c.direction,
+      leverage:  autoSettings.leverage ?? null,
+      marginUsdt: autoSettings.sizeMode === 'margin' ? (autoSettings.marginUsdt ?? null) : null,
+      riskPct:   autoSettings.sizeMode === 'risk'   ? (autoSettings.riskPct   ?? null) : null,
+      sizeMode:  autoSettings.sizeMode ?? null,
+    });
+
     if (autoTradeModeRef.current === 'live') {
       if (!binanceApiKey || !binanceApiSecret) {
-        addLog('info', '[자동매매] 실전 모드이지만 API 키 미설정 — 건너뜀');
+        addLog('warn', '[자동매매] ⛔ 실전 모드이지만 API 키 미설정 — 건너뜀');
         return;
       }
       getPositionMode(binanceApiKey, binanceApiSecret).then(isDual => {
@@ -1770,11 +1785,25 @@ function AppInner() {
       iv === '15m' ? '15분' : iv === '1h' ? '1시간' : iv === '4h' ? '4시간' : '일봉';
     if (event.type === 'interval_start') {
       speakSound(`${ivLabel(event.interval)} 타임프레임 스캔 시작`, { lang: 'ko-KR', rate: 1.1, pitch: 1.0 });
-    } else if (event.type === 'interval_done') {
-      const voice = event.entered > 0
-        ? `${ivLabel(event.interval)} 스캔 완료, 진입대상 ${event.entered}개`
-        : `${ivLabel(event.interval)} 스캔 완료`;
-      speakSound(voice, { lang: 'ko-KR', rate: 1.1, pitch: 1.0 });
+    } else if (event.type === 'scan_done') {
+      const entries = scanConfirmedEntriesRef.current;
+      scanConfirmedEntriesRef.current = [];  // reset for next scan
+      if (entries.length === 0) {
+        speakSound('스캔 후 진입 조건을 만족하는 코인이 없습니다', { lang: 'ko-KR', rate: 1.0, pitch: 1.0 });
+      } else {
+        const parts = entries.map(e => {
+          const coin = e.symbol.replace(/USDT$/i, '');
+          const side = e.direction === 'long' ? '롱' : '숏';
+          const lev  = e.leverage != null ? `${e.leverage}배 레버리지` : '';
+          const margin = e.sizeMode === 'margin' && e.marginUsdt != null
+            ? `${e.marginUsdt}달러 마진`
+            : e.sizeMode === 'risk' && e.riskPct != null
+              ? `자산의 ${e.riskPct}퍼센트 마진`
+              : '';
+          return [coin, side, lev, margin, '진입'].filter(Boolean).join(' ');
+        });
+        speakSound(parts.join(', '), { lang: 'ko-KR', rate: 1.0, pitch: 1.0 });
+      }
     }
   }, [speakSound]);
 
@@ -1783,7 +1812,10 @@ function AppInner() {
     onEnterTrade: handleAutoTradeScan,
     onLog: (msg, type) => {
       if (type === 'info') return;
-      const mappedType: ActivityLog['type'] = type === 'error' ? 'error' : type === 'success' ? 'order' : 'info';
+      const mappedType: ActivityLog['type'] =
+        type === 'error'   ? 'error'  :
+        type === 'success' ? 'order'  :
+        type === 'warn'    ? 'warn'   : 'info';
       addLog(mappedType, `[자동매매] ${msg}`);
     },
     onScanEvent: handleScanEvent,
@@ -3159,24 +3191,62 @@ function AppInner() {
 
       let fees: number | null = null;
       let tradeCloseReason: LiveCloseReason | null = null;
+      let enrichedPnl: number | null = null;
+      let enrichedExitPrice: number | null = null;
+      let enrichedQty: number | null = null;
+      let enrichedEntryPrice: number | null = null;
+
       if (entryTime != null) {
         let openRows = relevant.filter(t => t.side === openSide && t.time >= entryTime && t.time <= exitTime + 120000);
         if (openRowsByEntryOrder.length > 0) openRows = openRowsByEntryOrder;
         const closeRows = relevant.filter(t => t.side === closeSide && t.time >= entryTime && t.time <= exitTime + 120000);
-        const openFee = consumeFee(openRows, tracked.qty, false);
-        const closeFee = consumeFee(closeRows, tracked.qty, true);
-        const closeFill = consumeFill(closeRows, tracked.qty, true);
-        const enoughCoverage = openFee.coveredQty > tracked.qty * 0.7 && closeFee.coveredQty > tracked.qty * 0.7;
+
+        // ── TP1 blend detection: total close fills may exceed tracked.qty when TP1 partially
+        // closed the position before the final close. Use tp1OriginalQty from meta if available,
+        // otherwise infer from the sum of all close-side fills.
+        const totalCloseQtyFills = closeRows.reduce((s, r) => s + Math.abs(r.qty), 0);
+        const tp1OrigQtyFromMeta = (meta.tp1Hit === true && (meta.tp1OriginalQty ?? 0) > 0)
+          ? (meta.tp1OriginalQty as number)
+          : 0;
+        // Detect blend: meta says tp1 happened, OR close fills are significantly more than tracked.qty
+        const blendTotalQty = tp1OrigQtyFromMeta > 0
+          ? tp1OrigQtyFromMeta
+          : totalCloseQtyFills > tracked.qty * 1.15
+            ? totalCloseQtyFills
+            : 0;
+        const hasBlendFills = blendTotalQty > tracked.qty + 1e-8;
+        // Use full original qty for blended scenario, remaining qty otherwise
+        const effectiveQty = hasBlendFills ? blendTotalQty : tracked.qty;
+
+        const openFee  = consumeFee(openRows,  effectiveQty, false);
+        const closeFee = consumeFee(closeRows, effectiveQty, false);  // forward order covers all close fills
+        const closeFeeReverse = consumeFee(closeRows, tracked.qty, true);  // fallback: latest fills only
+        const closeFill = consumeFill(closeRows, effectiveQty, false);  // all close fills for avg price
+        const openFill  = consumeFill(openRows,  effectiveQty, false);
+
+        const enoughCoverage = openFee.coveredQty > effectiveQty * 0.7 && closeFee.coveredQty > effectiveQty * 0.7;
         if (enoughCoverage && !openFee.nonUsdt && !closeFee.nonUsdt) {
           fees = parseFloat((openFee.fee + closeFee.fee).toFixed(8));
-        } else if (meta.liveEntryFee != null && closeFee.coveredQty > tracked.qty * 0.7 && !closeFee.nonUsdt) {
-          fees = parseFloat((meta.liveEntryFee + closeFee.fee).toFixed(8));
+        } else if (meta.liveEntryFee != null && closeFeeReverse.coveredQty > tracked.qty * 0.7 && !closeFeeReverse.nonUsdt) {
+          // Fallback: use captured entry fee + close fee for remaining qty only
+          fees = parseFloat((meta.liveEntryFee + closeFeeReverse.fee).toFixed(8));
         }
-        const hasCloseFillEvidence = closeFill.coveredQty > tracked.qty * 0.4;
+
+        // ── Recalculate P&L from actual fill prices when coverage is sufficient ─────────────
+        const hasGoodFills = openFill.coveredQty > effectiveQty * 0.6 && closeFill.coveredQty > effectiveQty * 0.6;
+        if (hasGoodFills && openFill.avgPrice != null && closeFill.avgPrice != null) {
+          const rawPnl = tracked.direction === 'long'
+            ? (closeFill.avgPrice - openFill.avgPrice) * effectiveQty
+            : (openFill.avgPrice - closeFill.avgPrice) * effectiveQty;
+          enrichedPnl  = parseFloat(rawPnl.toFixed(8));
+          enrichedExitPrice  = parseFloat(closeFill.avgPrice.toFixed(8));
+          enrichedEntryPrice = parseFloat(openFill.avgPrice.toFixed(8));
+          if (hasBlendFills) enrichedQty = effectiveQty;
+        }
+
+        const hasCloseFillEvidence = closeFill.coveredQty > effectiveQty * 0.4;
         if (closeFill.avgPrice != null && hasCloseFillEvidence) {
           tradeCloseReason = inferByCloseFillPrice(closeFill.avgPrice);
-          // External manual close (app/PC) often has no TP/SL evidence.
-          // If fallback path has real close-fill evidence but TP/SL 매칭이 안 되면 수동으로 분류.
           if (!tradeCloseReason && reasonSource === 'fallback') {
             tradeCloseReason = 'manual';
           }
@@ -3185,8 +3255,13 @@ function AppInner() {
 
       setLiveHistory(prev => prev.map(h => h.id === rowId ? {
         ...h,
-        entryTime: entryTime ?? h.entryTime,
-        fees: fees ?? h.fees,
+        entryTime:   entryTime ?? h.entryTime,
+        fees:        fees ?? h.fees,
+        // Override pnl/exitPrice/qty/entryPrice when we have reliable fill data from Binance
+        ...(enrichedPnl       != null ? { pnl:        enrichedPnl }       : {}),
+        ...(enrichedExitPrice != null ? { exitPrice:  enrichedExitPrice }  : {}),
+        ...(enrichedEntryPrice != null ? { entryPrice: enrichedEntryPrice } : {}),
+        ...(enrichedQty       != null ? { qty:        enrichedQty }        : {}),
         closeReason: tradeCloseReason && (reasonSource === 'fallback' || h.closeReason === 'unknown')
           ? tradeCloseReason
           : h.closeReason,

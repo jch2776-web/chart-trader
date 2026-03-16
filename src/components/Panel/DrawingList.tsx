@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import type { Drawing, TrendlineDrawing, BoxDrawing, HlineDrawing } from '../../types/drawing';
+import type { Drawing, TrendlineDrawing, BoxDrawing, HlineDrawing, FibRetracementDrawing, PriceRangeDrawing, DateRangeDrawing } from '../../types/drawing';
 import { DRAWING_COLORS } from '../../types/drawing';
 import { formatPrice } from '../../utils/priceFormat';
 
@@ -255,6 +255,114 @@ function HlineCard({ d, selected, onSelect, onDelete, onUpdateMemo, onUpdateColo
   );
 }
 
+function formatDur(ms: number): string {
+  const s = Math.floor(Math.abs(ms) / 1000);
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d > 0) return h > 0 ? `${d}d ${h}h` : `${d}d`;
+  if (h > 0) return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  return `${m}m`;
+}
+
+function FibCard({ d, selected, onSelect, onDelete, onUpdateMemo, onUpdateColor }: {
+  d: FibRetracementDrawing; selected: boolean;
+  onSelect: () => void; onDelete: () => void;
+  onUpdateMemo: (memo: string) => void;
+  onUpdateColor: (color: string) => void;
+}) {
+  const activeColor = d.color ?? '#e8b73a';
+  const range = Math.abs(d.p2.price - d.p1.price);
+  const pct = d.p1.price > 0 ? (range / d.p1.price * 100).toFixed(2) : '—';
+  return (
+    <div style={{ ...styles.card, ...(selected ? { ...styles.cardSelected, borderColor: activeColor } : {}) }} onClick={onSelect}>
+      <div style={styles.cardHeader}>
+        <span style={{ ...styles.badge, background: `${activeColor}22`, color: activeColor }}>⟨⟩ 피보나치</span>
+        <button style={styles.delBtn} onClick={e => { e.stopPropagation(); onDelete(); }}>✕</button>
+      </div>
+      <ColorSwatches current={d.color} onChange={onUpdateColor} />
+      <CoordTable rows={[
+        { label: 'P1', time: d.p1.time, price: d.p1.price },
+        { label: 'P2', time: d.p2.time, price: d.p2.price },
+      ]} />
+      <div style={styles.metaRow}>
+        <span style={styles.metaLabel}>범위</span>
+        <span style={styles.metaValue}>{formatPrice(range)} ({pct}%)</span>
+      </div>
+      <div style={styles.memoWrap} onClick={e => e.stopPropagation()}>
+        <MemoTextarea memo={d.memo} onUpdateMemo={onUpdateMemo} />
+      </div>
+    </div>
+  );
+}
+
+function PriceRangeCard({ d, selected, onSelect, onDelete, onUpdateMemo, onUpdateColor }: {
+  d: PriceRangeDrawing; selected: boolean;
+  onSelect: () => void; onDelete: () => void;
+  onUpdateMemo: (memo: string) => void;
+  onUpdateColor: (color: string) => void;
+}) {
+  const activeColor = d.color ?? '#22d3ee';
+  const diff = d.p2.price - d.p1.price;  // signed: negative = down, positive = up
+  const pct  = d.p1.price > 0 ? (diff / d.p1.price * 100) : 0;
+  const sign = diff >= 0 ? '+' : '';
+  const diffColor = diff >= 0 ? '#0ecb81' : '#f6465d';
+  return (
+    <div style={{ ...styles.card, ...(selected ? { ...styles.cardSelected, borderColor: activeColor } : {}) }} onClick={onSelect}>
+      <div style={styles.cardHeader}>
+        <span style={{ ...styles.badge, background: `${activeColor}22`, color: activeColor }}>↕ 가격범위</span>
+        <button style={styles.delBtn} onClick={e => { e.stopPropagation(); onDelete(); }}>✕</button>
+      </div>
+      <ColorSwatches current={d.color} onChange={onUpdateColor} />
+      <CoordTable rows={[
+        { label: 'P1', time: d.p1.time, price: d.p1.price },
+        { label: 'P2', time: d.p2.time, price: d.p2.price },
+      ]} />
+      <div style={styles.metaRow}>
+        <span style={styles.metaLabel}>범위</span>
+        <span style={{ ...styles.metaValue, color: diffColor }}>{sign}{formatPrice(diff)} ({sign}{pct.toFixed(2)}%)</span>
+      </div>
+      <div style={styles.memoWrap} onClick={e => e.stopPropagation()}>
+        <MemoTextarea memo={d.memo} onUpdateMemo={onUpdateMemo} />
+      </div>
+    </div>
+  );
+}
+
+function DateRangeCard({ d, selected, onSelect, onDelete, onUpdateMemo, onUpdateColor }: {
+  d: DateRangeDrawing; selected: boolean;
+  onSelect: () => void; onDelete: () => void;
+  onUpdateMemo: (memo: string) => void;
+  onUpdateColor: (color: string) => void;
+}) {
+  const activeColor = d.color ?? '#a855f7';
+  const durationMs = Math.abs(d.p2.time - d.p1.time);
+  return (
+    <div style={{ ...styles.card, ...(selected ? { ...styles.cardSelected, borderColor: activeColor } : {}) }} onClick={onSelect}>
+      <div style={styles.cardHeader}>
+        <span style={{ ...styles.badge, background: `${activeColor}22`, color: activeColor }}>↔ 기간범위</span>
+        <button style={styles.delBtn} onClick={e => { e.stopPropagation(); onDelete(); }}>✕</button>
+      </div>
+      <ColorSwatches current={d.color} onChange={onUpdateColor} />
+      <div style={styles.metaRow}>
+        <span style={styles.metaLabel}>시작</span>
+        <span style={styles.metaValue}>{formatTs(Math.min(d.p1.time, d.p2.time))}</span>
+      </div>
+      <div style={styles.metaRow}>
+        <span style={styles.metaLabel}>종료</span>
+        <span style={styles.metaValue}>{formatTs(Math.max(d.p1.time, d.p2.time))}</span>
+      </div>
+      <div style={styles.metaRow}>
+        <span style={styles.metaLabel}>기간</span>
+        <span style={{ ...styles.metaValue, color: activeColor }}>{formatDur(durationMs)}</span>
+      </div>
+      <div style={styles.memoWrap} onClick={e => e.stopPropagation()}>
+        <MemoTextarea memo={d.memo} onUpdateMemo={onUpdateMemo} />
+      </div>
+    </div>
+  );
+}
+
 export function DrawingList({ drawings, selectedId, onSelect, onDelete, onUpdateMemo, onUpdateColor, onUpdateActive }: Props) {
   return (
     <div style={styles.container}>
@@ -276,9 +384,12 @@ export function DrawingList({ drawings, selectedId, onSelect, onDelete, onUpdate
           onUpdateColor: (color: string) => onUpdateColor(d.id, color),
           onUpdateActive: (active: boolean) => onUpdateActive(d.id, active),
         };
-        if (d.type === 'trendline') return <TrendlineCard {...commonProps} d={d} />;
-        if (d.type === 'box')       return <BoxCard       {...commonProps} d={d as BoxDrawing} />;
-        if (d.type === 'hline')     return <HlineCard     {...commonProps} d={d as HlineDrawing} />;
+        if (d.type === 'trendline')  return <TrendlineCard  {...commonProps} d={d} />;
+        if (d.type === 'box')        return <BoxCard        {...commonProps} d={d as BoxDrawing} />;
+        if (d.type === 'hline')      return <HlineCard      {...commonProps} d={d as HlineDrawing} />;
+        if (d.type === 'fib')        return <FibCard        {...{ ...commonProps, onUpdateActive: undefined }} d={d as FibRetracementDrawing} />;
+        if (d.type === 'pricerange') return <PriceRangeCard {...{ ...commonProps, onUpdateActive: undefined }} d={d as PriceRangeDrawing} />;
+        if (d.type === 'daterange')  return <DateRangeCard  {...{ ...commonProps, onUpdateActive: undefined }} d={d as DateRangeDrawing} />;
         return null;
       })}
     </div>

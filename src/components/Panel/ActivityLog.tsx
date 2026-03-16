@@ -10,6 +10,7 @@ const LOG_COLORS: Record<ActivityLog['type'], string> = {
   signal: '#e8b73a',
   order:  '#22d991',
   error:  '#f0425c',
+  warn:   '#f59e42',
 };
 
 const ARCH_DIAGRAM = `
@@ -56,7 +57,7 @@ export function ActivityLogPanel({ logs }: Props) {
               {new Date(log.timestamp).toLocaleTimeString()}
             </span>
             <span style={{ color: LOG_COLORS[log.type], fontSize: '0.85rem' }}>
-              {log.type === 'signal' ? '⚡ ' : log.type === 'order' ? '✓ ' : log.type === 'error' ? '✕ ' : '· '}
+              {log.type === 'signal' ? '⚡ ' : log.type === 'order' ? '✓ ' : log.type === 'error' ? '✕ ' : log.type === 'warn' ? '⚠ ' : '· '}
               {log.message}
             </span>
           </div>

@@ -147,6 +147,27 @@ export function Toolbar({
           >
             — 수평선
           </button>
+          <button
+            style={{ ...styles.drawBtn, ...(drawingMode === 'fib' ? styles.drawFibActive : {}) }}
+            onClick={() => toggleMode('fib')}
+            title="피보나치 되돌림 (두 점 클릭)"
+          >
+            ⟨⟩ 피보나치
+          </button>
+          <button
+            style={{ ...styles.drawBtn, ...(drawingMode === 'pricerange' ? styles.drawPriceRangeActive : {}) }}
+            onClick={() => toggleMode('pricerange')}
+            title="가격 범위 측정 (두 점 클릭)"
+          >
+            ↕ 가격범위
+          </button>
+          <button
+            style={{ ...styles.drawBtn, ...(drawingMode === 'daterange' ? styles.drawDateRangeActive : {}) }}
+            onClick={() => toggleMode('daterange')}
+            title="기간 범위 측정 (두 점 클릭)"
+          >
+            ↔ 기간범위
+          </button>
         </div>
       )}
 
@@ -530,6 +551,21 @@ const styles: Record<string, React.CSSProperties> = {
     borderColor: '#0ecb81',
     color: '#0ecb81',
     background: 'rgba(14,203,129,0.1)',
+  },
+  drawFibActive: {
+    borderColor: '#e8b73a',
+    color: '#e8b73a',
+    background: 'rgba(232,183,58,0.12)',
+  },
+  drawPriceRangeActive: {
+    borderColor: '#22d3ee',
+    color: '#22d3ee',
+    background: 'rgba(34,211,238,0.1)',
+  },
+  drawDateRangeActive: {
+    borderColor: '#a855f7',
+    color: '#a855f7',
+    background: 'rgba(168,85,247,0.1)',
   },
   // ── Color swatches ────────────────────────────────────────────────────────
   colorGroup: {

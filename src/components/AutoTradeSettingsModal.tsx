@@ -1,5 +1,99 @@
 import React, { useState } from 'react';
 
+// ── Chase-entry prevention mini diagrams ──────────────────────────────────────
+function SignalAgeDiagram({ value }: { value: number }) {
+  const disabled = value === 0;
+  const W = 200; const H = 34;
+  const maxSec = 300;
+  const threshX = disabled ? 0 : Math.round(Math.min(1, value / maxSec) * (W - 4));
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} width={W} height={H} style={{ display: 'block', margin: '5px 0' }}>
+      <rect x={0} y={13} width={W} height={8} rx={4} fill="rgba(255,255,255,0.05)" />
+      {disabled ? (
+        <>
+          <rect x={0} y={13} width={W} height={8} rx={4} fill="rgba(255,255,255,0.06)" />
+          <text x={W / 2} y={30} fontSize={9} fill="#3a4558" textAnchor="middle" fontFamily="monospace">비활성화 (0 = 제한 없음)</text>
+        </>
+      ) : (
+        <>
+          <rect x={0} y={13} width={threshX} height={8} rx={4} fill="rgba(14,203,129,0.45)" />
+          <rect x={threshX} y={13} width={W - threshX} height={8} rx={4} fill="rgba(246,70,93,0.25)" />
+          <rect x={threshX - 1} y={9} width={2} height={16} rx={1} fill="#0ecb81" />
+          <text x={2} y={11} fontSize={8} fill="#3a4558" fontFamily="monospace">0s</text>
+          <text x={Math.max(12, Math.min(threshX, W - 42))} y={11} fontSize={9} fill="#0ecb81" textAnchor="middle" fontFamily="monospace">{value}s</text>
+          {threshX > 28 && <text x={threshX / 2} y={30} fontSize={8} fill="#0ecb81" textAnchor="middle">✓ 허용</text>}
+          {W - threshX > 32 && <text x={threshX + (W - threshX) / 2} y={30} fontSize={8} fill="#f6465d" textAnchor="middle">✗ 초과 차단</text>}
+        </>
+      )}
+    </svg>
+  );
+}
+
+function BreakoutExtDiagram({ value }: { value: number }) {
+  const disabled = value === 0;
+  const W = 200; const H = 58;
+  const trigY = H - 10;
+  const maxPct = 2.0;
+  const threshY = disabled ? 4 : Math.round(trigY - (Math.min(value, maxPct) / maxPct) * (trigY - 14));
+  const barW = 116;
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} width={W} height={H} style={{ display: 'block', margin: '5px 0' }}>
+      {!disabled ? (
+        <>
+          <rect x={4} y={4} width={barW} height={threshY - 4} rx={2} fill="rgba(246,70,93,0.18)" />
+          <rect x={4} y={threshY} width={barW} height={trigY - threshY} rx={2} fill="rgba(14,203,129,0.2)" />
+        </>
+      ) : (
+        <rect x={4} y={4} width={barW} height={trigY - 4} rx={2} fill="rgba(255,255,255,0.04)" />
+      )}
+      <line x1={0} y1={trigY} x2={barW + 4} y2={trigY} stroke="#4a5a70" strokeWidth={1.5} />
+      {!disabled && <line x1={0} y1={threshY} x2={barW + 4} y2={threshY} stroke="#f0b90b" strokeWidth={1} strokeDasharray="3,2" />}
+      {!disabled && (
+        <>
+          <polygon points={`${barW * 0.55},${threshY - 13} ${barW * 0.55 - 5},${threshY - 3} ${barW * 0.55 + 5},${threshY - 3}`} fill="rgba(240,185,11,0.7)" />
+          <text x={barW * 0.55} y={threshY - 15} fontSize={8} fill="#f0b90b" textAnchor="middle">봉종가</text>
+        </>
+      )}
+      <text x={barW + 8} y={trigY + 4} fontSize={9} fill="#4a5a70">돌파선</text>
+      {!disabled && <text x={barW + 8} y={threshY + 4} fontSize={9} fill="#f0b90b">+{value}%</text>}
+      {!disabled && <text x={barW + 8} y={14} fontSize={9} fill="#f6465d">✗ 차단</text>}
+      {!disabled && threshY + 8 < trigY && <text x={barW + 8} y={threshY + (trigY - threshY) / 2 + 4} fontSize={9} fill="#0ecb81">✓ 허용</text>}
+      {disabled && <text x={barW + 8} y={trigY / 2 + 4} fontSize={9} fill="#3a4558">비활성화</text>}
+    </svg>
+  );
+}
+
+function EntryDriftDiagram({ value }: { value: number }) {
+  const disabled = value === 0;
+  const W = 200; const H = 34;
+  const entryX = 70;
+  const maxPct = 4.0;
+  const allowedW = disabled ? 0 : Math.round((Math.min(value, maxPct) / maxPct) * (W - entryX - 4));
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} width={W} height={H} style={{ display: 'block', margin: '5px 0' }}>
+      <rect x={0} y={13} width={W} height={8} rx={4} fill="rgba(255,255,255,0.05)" />
+      <rect x={0} y={13} width={entryX} height={8} rx={4} fill="rgba(14,203,129,0.3)" />
+      {disabled ? (
+        <>
+          <rect x={entryX} y={13} width={W - entryX} height={8} fill="rgba(255,255,255,0.05)" />
+          <text x={entryX + (W - entryX) / 2} y={30} fontSize={9} fill="#3a4558" textAnchor="middle">비활성화</text>
+        </>
+      ) : (
+        <>
+          <rect x={entryX} y={13} width={allowedW} height={8} fill="rgba(14,203,129,0.3)" />
+          <rect x={entryX + allowedW} y={13} width={W - entryX - allowedW} height={8} rx={4} fill="rgba(246,70,93,0.25)" />
+          <rect x={entryX + allowedW - 1} y={9} width={2} height={16} rx={1} fill="#f0b90b" />
+          <text x={entryX + allowedW} y={11} fontSize={9} fill="#f0b90b" textAnchor="middle" fontFamily="monospace">+{value}%</text>
+          {W - entryX - allowedW > 36 && <text x={entryX + allowedW + (W - entryX - allowedW) / 2} y={30} fontSize={8} fill="#f6465d" textAnchor="middle">✗ 추격 차단</text>}
+        </>
+      )}
+      <rect x={entryX - 1} y={9} width={2} height={16} rx={1} fill="#d1d4dc" />
+      <text x={entryX} y={11} fontSize={9} fill="#d1d4dc" textAnchor="middle" fontFamily="monospace">진입가</text>
+      {entryX > 30 && <text x={entryX / 2} y={30} fontSize={8} fill="#0ecb81" textAnchor="middle">✓ 비추격</text>}
+    </svg>
+  );
+}
+
 export type ScanTF = '15m' | '1h' | '4h' | '1d';
 export const ALL_SCAN_TFS: ScanTF[] = ['15m', '1h', '4h', '1d'];
 
@@ -283,49 +377,72 @@ function SettingsEditor({
       {/* Chase-entry prevention */}
       <div style={s.fieldRow}>
         <label style={s.label}>추격 진입 방지</label>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-          <div>
-            <div style={{ fontSize: '0.72rem', color: '#9aa4b5', marginBottom: 3 }}>신호 유효 시간(초)</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <input
-                type="number"
-                min={0} max={600} step={10}
-                value={draft.maxSignalAgeSec ?? 120}
-                onChange={e => set('maxSignalAgeSec', Math.max(0, Math.min(600, parseInt(e.target.value) || 0)))}
-                style={s.numberInput}
-              />
-              <span style={s.unit}>초</span>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+
+          {/* ① Signal age */}
+          <div style={{ background: 'rgba(14,203,129,0.04)', border: '1px solid rgba(14,203,129,0.12)', borderRadius: 6, padding: '8px 10px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
+              <span style={{ fontSize: '0.76rem', color: '#9aa4b5', fontWeight: 700 }}>① 신호봉 경과 시간</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <input
+                  type="number"
+                  min={0} max={600} step={10}
+                  value={draft.maxSignalAgeSec ?? 120}
+                  onChange={e => set('maxSignalAgeSec', Math.max(0, Math.min(600, parseInt(e.target.value) || 0)))}
+                  style={s.numberInput}
+                />
+                <span style={s.unit}>초</span>
+              </div>
+            </div>
+            <SignalAgeDiagram value={draft.maxSignalAgeSec ?? 120} />
+            <div style={s.hint}>
+              신호봉 확정 후 이 시간 안에 진입해야 함. 예) 120초 → 정각 스캔 후 2분 내 처리 안 되면 스킵.
             </div>
           </div>
-          <div>
-            <div style={{ fontSize: '0.72rem', color: '#9aa4b5', marginBottom: 3 }}>최대 진입 이탈폭(%)</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <input
-                type="number"
-                min={0} max={10} step={0.1}
-                value={draft.maxEntryDriftPct ?? 1.0}
-                onChange={e => set('maxEntryDriftPct', Math.max(0, Math.min(10, parseFloat(e.target.value) || 0)))}
-                style={s.numberInput}
-              />
-              <span style={s.unit}>%</span>
+
+          {/* ② Breakout extension */}
+          <div style={{ background: 'rgba(240,185,11,0.04)', border: '1px solid rgba(240,185,11,0.12)', borderRadius: 6, padding: '8px 10px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
+              <span style={{ fontSize: '0.76rem', color: '#9aa4b5', fontWeight: 700 }}>② 신호봉 돌파선 이탈폭</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <input
+                  type="number"
+                  min={0} max={10} step={0.1}
+                  value={draft.maxBreakoutExtensionPct ?? 0.6}
+                  onChange={e => set('maxBreakoutExtensionPct', Math.max(0, Math.min(10, parseFloat(e.target.value) || 0)))}
+                  style={s.numberInput}
+                />
+                <span style={s.unit}>%</span>
+              </div>
+            </div>
+            <BreakoutExtDiagram value={draft.maxBreakoutExtensionPct ?? 0.6} />
+            <div style={s.hint}>
+              신호봉 종가가 돌파선(트리거)에서 너무 멀리 닫히면 과열 신호로 차단. 예) 0.6% → 돌파선 100 기준 종가 100.6 이상이면 스킵.
             </div>
           </div>
-        </div>
-        <div style={{ marginTop: 8 }}>
-          <div style={{ fontSize: '0.72rem', color: '#9aa4b5', marginBottom: 3 }}>돌파선 대비 최대 확정봉 이탈폭(%)</div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <input
-              type="number"
-              min={0} max={10} step={0.1}
-              value={draft.maxBreakoutExtensionPct ?? 0.6}
-              onChange={e => set('maxBreakoutExtensionPct', Math.max(0, Math.min(10, parseFloat(e.target.value) || 0)))}
-              style={s.numberInput}
-            />
-            <span style={s.unit}>%</span>
+
+          {/* ③ Entry drift */}
+          <div style={{ background: 'rgba(59,139,235,0.04)', border: '1px solid rgba(59,139,235,0.12)', borderRadius: 6, padding: '8px 10px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
+              <span style={{ fontSize: '0.76rem', color: '#9aa4b5', fontWeight: 700 }}>③ 주문 시점 추격 이탈폭</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <input
+                  type="number"
+                  min={0} max={10} step={0.1}
+                  value={draft.maxEntryDriftPct ?? 1.0}
+                  onChange={e => set('maxEntryDriftPct', Math.max(0, Math.min(10, parseFloat(e.target.value) || 0)))}
+                  style={s.numberInput}
+                />
+                <span style={s.unit}>%</span>
+              </div>
+            </div>
+            <EntryDriftDiagram value={draft.maxEntryDriftPct ?? 1.0} />
+            <div style={s.hint}>
+              스캔 후 주문 시점 현재가가 계획 진입가 대비 이 % 이상 추격 방향으로 이탈하면 차단. 예) 1% → LONG 시 현재가가 진입가보다 1% 이상 높으면 스킵.
+            </div>
           </div>
+
         </div>
-        <span style={s.hint}>정각 스캔 후 현재가가 너무 멀리 이탈한 경우 추격 진입을 방지합니다. 0 = 비활성화</span>
-        <span style={s.hint}>돌파선 이탈폭: 확정봉 종가가 트리거(돌파선) 기준을 너무 멀리 벗어난 경우 자동진입을 차단합니다. 0 = 비활성화</span>
       </div>
 
       {/* Unattended cadence */}

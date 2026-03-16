@@ -264,7 +264,7 @@ export function useAltAutoTrade({
       const maxPositions = maxAutoPositionsRef.current;
       for (const c of top) {
         if (maxPositions > 0 && totalEntered >= maxPositions) {
-          addLog(`⛔ [${interval}] 최대 진입 수(${maxPositions}) 도달 — ${c.symbol} 건너뜀`, 'info');
+          addLog(`⛔ [${interval}] 최대 진입 수(${maxPositions}) 도달 — ${c.symbol} 건너뜀`, 'warn');
           continue;
         }
         const key = `${c.symbol}_${c.direction}`;
@@ -272,9 +272,10 @@ export function useAltAutoTrade({
           addLog(`⏭ [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — 이미 이번 실행에서 진입됨 (중복 건너뜀)`, 'info');
           continue;
         }
+        // Log at info level only — actual entry confirmation is emitted by the callback after passing all filters
         addLog(
-          `✅ [${interval}] ${enterLabelRef.current}: ${c.symbol} ${c.direction.toUpperCase()} 점수${c.score} 진입${c.entryPrice.toFixed(4)} SL${c.slPrice.toFixed(4)} TP${c.tpPrice.toFixed(4)}`,
-          'success',
+          `🔍 [${interval}] 후보 전달: ${c.symbol} ${c.direction.toUpperCase()} 점수${c.score} 진입${c.entryPrice.toFixed(4)} SL${c.slPrice.toFixed(4)} TP${c.tpPrice.toFixed(4)}`,
+          'info',
         );
         onEnterRef.current(c);
         enteredThisRun.add(key);
@@ -282,7 +283,7 @@ export function useAltAutoTrade({
         if (firstCandidateReadyAt == null) {
           firstCandidateReadyAt = Date.now();
           const firstLagSec = Math.max(0, Math.round((firstCandidateReadyAt - boundaryTime) / 1000));
-          addLog(`⚡ [${interval}] 첫 후보 반영 완료 — 경계 대비 ${firstLagSec}s`, 'success');
+          addLog(`⚡ [${interval}] 첫 후보 전달 — 경계 대비 ${firstLagSec}s`, 'info');
         }
       }
     }
@@ -292,7 +293,7 @@ export function useAltAutoTrade({
       ? `${Math.max(0, Math.round((firstCandidateReadyAt - startTime) / 1000))}s`
       : '없음';
     addLog(
-      `🏁 자동 스캔 완료 (${elapsed}초) — 첫 후보 ${firstReadyText} · 총 ${totalEntered}개 ${enterLabelRef.current}`,
+      `🏁 자동 스캔 완료 (${elapsed}초) — 첫 후보 ${firstReadyText} · 후보 ${totalEntered}개 진입필터 전달`,
       'success',
     );
     onScanEventRef.current?.({ type: 'scan_done', totalEntered, intervals: dueIntervals, mode });

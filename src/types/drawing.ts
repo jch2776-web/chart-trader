@@ -1,4 +1,4 @@
-export type DrawingType = 'trendline' | 'box' | 'hline';
+export type DrawingType = 'trendline' | 'box' | 'hline' | 'fib' | 'pricerange' | 'daterange';
 
 export interface Point {
   time: number;   // Unix ms (candle open time)
@@ -47,9 +47,52 @@ export interface HlineDrawing {
   active?: boolean;
 }
 
-export type Drawing = TrendlineDrawing | BoxDrawing | HlineDrawing;
+// ── Fibonacci Retracement ─────────────────────────────────────────────────────
+// Levels computed as: price = p1.price + level * (p2.price - p1.price)
+// 0% = p1.price, 100% = p2.price
+export const FIB_LEVELS = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0] as const;
+export const FIB_LEVEL_COLORS = ['#0ecb81', '#3b8beb', '#f0b90b', '#f59e42', '#a855f7', '#f6465d', '#0ecb81'] as const;
 
-export type DrawingMode = 'none' | 'trendline' | 'box' | 'hline';
+export interface FibRetracementDrawing {
+  id: string;
+  type: 'fib';
+  ticker: string;
+  p1: Point;
+  p2: Point;
+  color?: string;
+  memo?: string;
+  active?: boolean;
+}
+
+// ── Price Range ───────────────────────────────────────────────────────────────
+// Shows the absolute and percentage price range between p1 and p2
+export interface PriceRangeDrawing {
+  id: string;
+  type: 'pricerange';
+  ticker: string;
+  p1: Point;
+  p2: Point;
+  color?: string;
+  memo?: string;
+  active?: boolean;
+}
+
+// ── Date Range ────────────────────────────────────────────────────────────────
+// Shows the time span between p1.time and p2.time (price is ignored)
+export interface DateRangeDrawing {
+  id: string;
+  type: 'daterange';
+  ticker: string;
+  p1: Point;
+  p2: Point;
+  color?: string;
+  memo?: string;
+  active?: boolean;
+}
+
+export type Drawing = TrendlineDrawing | BoxDrawing | HlineDrawing | FibRetracementDrawing | PriceRangeDrawing | DateRangeDrawing;
+
+export type DrawingMode = 'none' | 'trendline' | 'box' | 'hline' | 'fib' | 'pricerange' | 'daterange';
 
 // Canvas pixel coordinates
 export interface PixelPoint {
