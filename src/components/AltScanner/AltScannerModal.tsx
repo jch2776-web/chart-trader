@@ -5,6 +5,7 @@ import type { AltMeta } from '../../types/paperTrading';
 import { CandleChart } from '../Chart/CandleChart';
 import { runBreakoutScan } from './breakoutScanner';
 import type { ScanCandidate, ScanInterval, ScanDirection, CandidateStatus } from './breakoutScanner';
+import { runLeaderRetestScan } from './strategies/leaderRetest';
 import { useBinanceWS } from '../../hooks/useBinanceWS';
 import { revalidateCandidate } from './validateSignal';
 import { fetchBinanceKlinesCached } from '../../lib/binanceKlineCache';
@@ -776,11 +777,20 @@ export function AltScannerModal({
   // Snapshot view: candles fetched when snapshotMeta is provided
   const [snapshotCandles, setSnapshotCandles] = useState<Candle[]>([]);
 
+  // Strategy selection
+  const [strategy, setStrategy] = useState<string>(
+    () => localStorage.getItem('altScanStrategy') ?? 'breakout',
+  );
+
   // Auto-scan
   const [autoScanEnabled, setAutoScanEnabled] = useState<boolean>(() => defaultAutoScan('1h'));
   const [nextAutoScanAt, setNextAutoScanAt]   = useState<number | null>(null);
   const [lastScanAt, setLastScanAt]           = useState<number | null>(null);
   const [scanNotice, setScanNotice]           = useState<string>('');
+
+  // Persist strategy choice
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { localStorage.setItem('altScanStrategy', strategy); }, [strategy]);
 
   // 1-second ticker for countdown + EXPIRED updates
   const [nowMs, setNowMs] = useState(Date.now());
@@ -916,8 +926,9 @@ export function AltScannerModal({
     setCandidatesCache(prev => ({ ...prev, [scanInterval]: [] }));
     setSelected(null);
     setProgress({ done: 0, total: symbols.length });
+    const scanFn = strategy === 'leader-retest' ? runLeaderRetestScan : runBreakoutScan;
     try {
-      await runBreakoutScan(symbols, scanInterval, direction,
+      await scanFn(symbols, scanInterval, direction,
         (done, total) => setProgress({ done, total }),
         (c) => setCandidatesCache(prev => ({
           ...prev,
@@ -936,7 +947,7 @@ export function AltScannerModal({
       setScanning(false);
       setLastScanAt(Date.now());
     }
-  }, [scanning, symbols, scanInterval, direction]);
+  }, [scanning, symbols, scanInterval, direction, strategy]);
 
   // Auto-select first candidate after scan
   useEffect(() => {
@@ -988,8 +999,9 @@ export function AltScannerModal({
       setCandidatesCache(prev => ({ ...prev, [scanInterval]: [] }));
       setSelected(null);
       setProgress({ done: 0, total: symbols.length });
+      const autoScanFn = strategy === 'leader-retest' ? runLeaderRetestScan : runBreakoutScan;
       try {
-        await runBreakoutScan(
+        await autoScanFn(
           symbols, scanInterval, direction,
           (done, total) => setProgress({ done, total }),
           (c) => setCandidatesCache(prev => ({
@@ -1020,7 +1032,7 @@ export function AltScannerModal({
     }, delay);
 
     return () => clearTimeout(tid);
-  }, [nextAutoScanAt, autoScanEnabled, symbols, scanInterval, direction]);
+  }, [nextAutoScanAt, autoScanEnabled, symbols, scanInterval, direction, strategy]);
 
   // Cleanup on unmount
   useEffect(() => () => { abortRef.current?.abort(); }, []);
@@ -1183,6 +1195,19 @@ export function AltScannerModal({
                 style={{ ...S.ctrlBtn, ...(statusFilter === f ? S.ctrlActive : {}) }}
                 onClick={() => setStatusFilter(f)}>
                 {f === 'all' ? '전체' : STATUS_LABEL[f as CandidateStatus]}
+              </button>
+            ))}
+          </div>
+          <div style={S.ctrlGroup}>
+            <span style={S.ctrlLabel}>전략</span>
+            {([
+              { id: 'breakout', label: '기존 돌파' },
+              { id: 'leader-retest', label: '리더-리테스트' },
+            ]).map(s => (
+              <button key={s.id}
+                style={{ ...S.ctrlBtn, ...(strategy === s.id ? S.ctrlActive : {}) }}
+                onClick={() => setStrategy(s.id)}>
+                {s.label}
               </button>
             ))}
           </div>

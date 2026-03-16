@@ -1030,8 +1030,6 @@ function renderPriceRange(
   // Directional: p1 = first click, p2 = second click
   const priceDiff = d.p2.price - d.p1.price;  // negative = down, positive = up
   const pctDiff   = d.p1.price > 0 ? (priceDiff / d.p1.price * 100) : 0;
-  const highPrice = Math.max(d.p1.price, d.p2.price);
-  const lowPrice  = Math.min(d.p1.price, d.p2.price);
 
   // Direction-aware color: green for up (p2 > p1), red for down (p2 < p1)
   const dirColor = priceDiff >= 0 ? '#0ecb81' : '#f6465d';
@@ -1064,10 +1062,6 @@ function renderPriceRange(
     const bx = left + 12;
     const arrowH = Math.min(6, bh * 0.2);
     ctx.fillStyle = hexToRgba(fillColor, 0.7);
-    const arrowAtTip = p2px.y;  // arrowhead points toward p2
-    const arrowFrom  = p1px.y;
-    const tipY  = arrowAtTip < arrowFrom ? top + 2      : bot - 2;       // p2 side
-    const tailY = arrowAtTip < arrowFrom ? top + 2 + arrowH : bot - 2 - arrowH;
     // Arrowhead at p2 side
     ctx.beginPath();
     if (priceDiff > 0) {

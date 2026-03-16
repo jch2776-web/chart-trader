@@ -59,6 +59,9 @@ export interface ScanCandidate {
   invalidReason?: string;
   expiredReason?: string;
   distanceNowPct?: number;
+
+  // Strategy that produced this candidate (undefined = legacy breakout)
+  strategyId?: string;
 }
 
 // ── Utilities ──────────────────────────────────────────────────────────────
