@@ -118,6 +118,14 @@ export interface AutoTradeSettings {
   maxSignalAgeSec?: number;          // max age of signal since asOfCloseTime (default 120s, 0 = disable)
   maxEntryDriftPct?: number;         // max allowed drift from plannedEntry before skipping (default 1.0%, 0 = disable)
   maxBreakoutExtensionPct?: number;  // max allowed extension of confirmed candle close beyond trigger line (default 0.6%, 0 = disable)
+  // Strategy selection (default 'breakout' — preserves existing behavior)
+  strategyId?: 'breakout' | 'leader-retest';
+  // Leader-retest specific parameters (only used when strategyId === 'leader-retest')
+  retestMinBars?: number;            // min bars since breakout (default 1)
+  retestMaxBars?: number;            // max bars since breakout (default 12)
+  retestToleranceAtr?: number;       // price must be within level ± toleranceAtr × ATR (default 0.30)
+  retestMaxOvershootAtr?: number;    // max allowed overshoot beyond level in ATR multiples (default 1.0)
+  retestAutoDirection?: 'long' | 'both'; // scan direction for unattended auto-trade (default 'long')
 }
 
 const CADENCE_PRESETS = [15, 30, 60, 120, 240] as const;
@@ -493,6 +501,79 @@ function SettingsEditor({
           실제 스캔은 무인 주기·TF 경계가 겹칠 때만 실행됩니다. 15m 설정이라도 주기가 1h이면 매시 정각에만 스캔합니다.
         </div>
       </div>
+
+      {/* ── Strategy selection ──────────────────────────────────────── */}
+      <div style={s.fieldRow}>
+        <label style={s.label}>스캔 전략</label>
+        <div style={{ display: 'flex', gap: 6 }}>
+          {(['breakout', 'leader-retest'] as const).map(sid => (
+            <button
+              key={sid}
+              style={{ ...s.toggleChip, ...((draft.strategyId ?? 'breakout') === sid ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
+              onClick={() => set('strategyId', sid)}
+            >
+              {sid === 'breakout' ? '기존 돌파' : '리더-리테스트'}
+            </button>
+          ))}
+        </div>
+        <span style={s.hint}>
+          기존 돌파: 직전 확정봉 기준 추세선·수평·박스 돌파 감지. 리더-리테스트: 돌파 후 리테스트 구간 진입.
+        </span>
+      </div>
+
+      {/* Leader-retest options (only shown when leader-retest is selected) */}
+      {(draft.strategyId ?? 'breakout') === 'leader-retest' && (
+        <div style={{ background: 'rgba(59,139,235,0.05)', border: '1px solid rgba(59,139,235,0.18)', borderRadius: 7, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ fontSize: '0.72rem', color: '#3b8beb', fontWeight: 700, marginBottom: 2 }}>리테스트 감지 조건</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap' as const, gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>돌파봉 최소</span>
+              <input type="number" min={1} max={20} step={1}
+                value={draft.retestMinBars ?? 1}
+                onChange={e => set('retestMinBars', Math.max(1, Math.min(20, parseInt(e.target.value) || 1)))}
+                style={{ ...s.numberInput, width: 52 }} />
+              <span style={s.unit}>봉</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>최대</span>
+              <input type="number" min={2} max={50} step={1}
+                value={draft.retestMaxBars ?? 12}
+                onChange={e => set('retestMaxBars', Math.max(2, Math.min(50, parseInt(e.target.value) || 12)))}
+                style={{ ...s.numberInput, width: 52 }} />
+              <span style={s.unit}>봉</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>허용폭</span>
+              <input type="number" min={0.1} max={2.0} step={0.05}
+                value={draft.retestToleranceAtr ?? 0.30}
+                onChange={e => set('retestToleranceAtr', Math.max(0.1, Math.min(2.0, parseFloat(e.target.value) || 0.30)))}
+                style={{ ...s.numberInput, width: 60 }} />
+              <span style={s.unit}>× ATR</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>오버슈트</span>
+              <input type="number" min={0.1} max={3.0} step={0.1}
+                value={draft.retestMaxOvershootAtr ?? 1.0}
+                onChange={e => set('retestMaxOvershootAtr', Math.max(0.1, Math.min(3.0, parseFloat(e.target.value) || 1.0)))}
+                style={{ ...s.numberInput, width: 60 }} />
+              <span style={s.unit}>× ATR</span>
+            </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>자동매매 방향</span>
+            {(['long', 'both'] as const).map(d => (
+              <button key={d}
+                style={{ ...s.toggleChip, ...((draft.retestAutoDirection ?? 'long') === d ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
+                onClick={() => set('retestAutoDirection', d)}>
+                {d === 'long' ? '롱만' : '양방향'}
+              </button>
+            ))}
+          </div>
+          <span style={s.hint}>
+            최소/최대봉: 돌파 후 몇 봉 이내에 리테스트가 와야 하는지. 허용폭: 레벨과의 근접도(ATR 배수). 자동매매는 기본 롱만 권장.
+          </span>
+        </div>
+      )}
 
       {/* Time-stop toggle (unattended auto-trade scope) */}
       <div style={s.fieldRow}>

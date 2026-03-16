@@ -23,7 +23,31 @@ import type { HVNZone } from '../volumeProfile';
 import { intervalToMs, getTtlBars, getVolFactor, triggerPrice } from '../timeUtils';
 import { fetchBinanceKlinesCached } from '../../../lib/binanceKlineCache';
 import { acquireScanSlot, getBinanceGovernorSnapshot } from '../../../lib/binanceRequestGovernor';
-import type { ScanStrategy } from '../strategyTypes';
+import type { ScanFn, ScanStrategy } from '../strategyTypes';
+
+// ── Retest detection parameters ────────────────────────────────────────────
+
+/**
+ * Tunable parameters for the leader-retest detector.
+ * All values are per-symbol; defaults are applied when a field is omitted.
+ */
+export interface RetestOptions {
+  /** Min bars between the breakout candle and current bar (default 1 — catches immediate retests) */
+  minBars?: number;
+  /** Max bars between the breakout candle and current bar (default 12 — avoids stale moves) */
+  maxBars?: number;
+  /** Price must be within level ± toleranceAtr × ATR  (default 0.30) */
+  toleranceAtr?: number;
+  /** Max allowed overshoot beyond the far side of the level, in ATR multiples (default 1.0) */
+  maxOvershootAtr?: number;
+}
+
+const DEFAULT_RETEST_OPTIONS: Required<RetestOptions> = {
+  minBars: 1,
+  maxBars: 12,
+  toleranceAtr: 0.30,
+  maxOvershootAtr: 1.0,
+};
 
 // ── Utilities ──────────────────────────────────────────────────────────────
 function uid() { return Math.random().toString(36).slice(2, 10); }
@@ -63,23 +87,27 @@ interface RetestResult {
 
 /**
  * For a given direction, check whether:
- *  1. A breakout occurred 3–20 bars from the end of `closed`
- *  2. The current (last) close is within tolerance of the broken level
+ *  1. A breakout occurred minBars–maxBars from the end of `closed`
+ *  2. The current (last) close is within toleranceAtr × ATR of the broken level
  */
 function detectRetest(
   closed: Candle[],
   dir: 'long' | 'short',
   atr: number,
   srLevels: LevelZone[],
+  opts: Required<RetestOptions>,
 ): RetestResult | null {
   const n = closed.length;
-  if (n < 25) return null;
+  if (n < 15) return null;
 
   const currentClose = closed[n - 1].close;
-  const tol = atr * 0.4;
+  const tol = atr * opts.toleranceAtr;
+  const overshoot = atr * opts.maxOvershootAtr;
+  // breakout search window: bars [n-maxBars .. n-minBars] relative to last bar
+  const searchStart = Math.max(1, n - opts.maxBars);
+  const searchEnd   = n - opts.minBars;
 
   if (dir === 'long') {
-    // Look for a resistance that was broken upward and is now being retested from above
     const candidates = srLevels
       .filter(z => z.kind === 'resistance' && z.score >= 20)
       .sort((a, b) => b.score - a.score)
@@ -87,12 +115,12 @@ function detectRetest(
 
     for (const zone of candidates) {
       const level = zone.centerPrice;
-      // Current price must be near the level (retesting from above)
-      if (currentClose < level - tol || currentClose > level + atr * 1.5) continue;
+      // current close must be within [level - tol, level + overshoot] (retesting from above or at level)
+      if (currentClose < level - tol || currentClose > level + overshoot) continue;
 
-      // Find a breakout candle in bars [n-22 .. n-3]: prev.close < level, bar.close > level+margin
+      // find breakout candle: prev.close below level, bar.close above level + small margin
       let broke = false;
-      for (let i = Math.max(1, n - 22); i <= n - 3; i++) {
+      for (let i = searchStart; i <= searchEnd; i++) {
         if (closed[i - 1].close < level - atr * 0.05 && closed[i].close > level + atr * 0.1) {
           broke = true;
           break;
@@ -101,7 +129,6 @@ function detectRetest(
       if (broke) return { level, direction: 'long' };
     }
   } else {
-    // Look for a support that was broken downward and is now being retested from below
     const candidates = srLevels
       .filter(z => z.kind === 'support' && z.score >= 20)
       .sort((a, b) => b.score - a.score)
@@ -109,11 +136,11 @@ function detectRetest(
 
     for (const zone of candidates) {
       const level = zone.centerPrice;
-      // Current price must be near the level (retesting from below)
-      if (currentClose > level + tol || currentClose < level - atr * 1.5) continue;
+      // current close must be within [level - overshoot, level + tol] (retesting from below or at level)
+      if (currentClose > level + tol || currentClose < level - overshoot) continue;
 
       let broke = false;
-      for (let i = Math.max(1, n - 22); i <= n - 3; i++) {
+      for (let i = searchStart; i <= searchEnd; i++) {
         if (closed[i - 1].close > level + atr * 0.05 && closed[i].close < level - atr * 0.1) {
           broke = true;
           break;
@@ -194,7 +221,6 @@ function buildRetestDrawings(
   const R = Math.abs(entryPrice - sl);
   const rr = R > 0 ? Math.abs(tp2 - entryPrice) / R : 0;
 
-  // The retest level line (shown as breakout drawing)
   const retestLine: HlineDrawing = {
     id: uid(), type: 'hline', ticker: symbol, price: level,
     color: isLong ? 'rgba(14,203,129,0.65)' : 'rgba(246,70,93,0.65)',
@@ -233,6 +259,7 @@ async function scanSymbolRetest(
   symbol: string,
   interval: ScanInterval,
   direction: ScanDirection,
+  opts: Required<RetestOptions>,
   signal?: AbortSignal,
 ): Promise<ScanCandidate | null> {
   const iMs = intervalToMs(interval);
@@ -240,7 +267,7 @@ async function scanSymbolRetest(
   const raw = await fetchBinanceKlinesCached(symbol, interval, 302, signal);
   if (raw.length < 52) return null;
   const closed = closedOnly(raw, iMs);
-  if (closed.length < 50) return null;
+  if (closed.length < 15) return null;
 
   const lastClosed = closed[closed.length - 1];
   const lastClosedCloseTime = lastClosed.time + iMs;
@@ -256,7 +283,7 @@ async function scanSymbolRetest(
 
   let found: RetestResult | null = null;
   for (const dir of dirs) {
-    const r = detectRetest(closed, dir, atr, srLevels);
+    const r = detectRetest(closed, dir, atr, srLevels, opts);
     if (r) { found = r; break; }
   }
   if (!found) return null;
@@ -342,14 +369,15 @@ async function scanSymbolRetest(
   };
 }
 
-// ── Public scan function ───────────────────────────────────────────────────
+// ── Internal scan runner (accepts retestOptions) ───────────────────────────
 
-export async function runLeaderRetestScan(
+async function runLeaderRetestScanInternal(
   symbols: string[],
   interval: ScanInterval,
   direction: ScanDirection,
   onProgress: (done: number, total: number) => void,
   onResult: (candidate: ScanCandidate) => void,
+  retestOpts: Required<RetestOptions>,
   signal?: AbortSignal,
   options?: ScanOptions,
 ): Promise<void> {
@@ -387,7 +415,7 @@ export async function runLeaderRetestScan(
       const sym = queue.shift();
       if (!sym) return;
       try {
-        const result = await scanSymbolRetest(sym, interval, direction, signal);
+        const result = await scanSymbolRetest(sym, interval, direction, retestOpts, signal);
         if (result) onResult(result);
       } catch { /* swallow per-symbol errors */ } finally {
         done++;
@@ -402,6 +430,36 @@ export async function runLeaderRetestScan(
   } finally {
     scanSlot.release();
   }
+}
+
+// ── Public scan function (ScanFn-compatible, uses defaults) ────────────────
+
+export async function runLeaderRetestScan(
+  symbols: string[],
+  interval: ScanInterval,
+  direction: ScanDirection,
+  onProgress: (done: number, total: number) => void,
+  onResult: (candidate: ScanCandidate) => void,
+  signal?: AbortSignal,
+  options?: ScanOptions,
+): Promise<void> {
+  return runLeaderRetestScanInternal(
+    symbols, interval, direction, onProgress, onResult,
+    DEFAULT_RETEST_OPTIONS, signal, options,
+  );
+}
+
+/**
+ * Factory: creates a ScanFn with custom retest options baked in.
+ * Used by useAltAutoTrade when the auto-trade settings include retest params.
+ */
+export function createLeaderRetestScan(retestOptions?: RetestOptions): ScanFn {
+  const opts: Required<RetestOptions> = {
+    ...DEFAULT_RETEST_OPTIONS,
+    ...retestOptions,
+  };
+  return (symbols, interval, direction, onProgress, onResult, signal, options) =>
+    runLeaderRetestScanInternal(symbols, interval, direction, onProgress, onResult, opts, signal, options);
 }
 
 export const leaderRetestStrategy: ScanStrategy = {

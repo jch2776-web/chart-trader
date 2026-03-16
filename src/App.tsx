@@ -1807,6 +1807,7 @@ function AppInner() {
     }
   }, [speakSound]);
 
+  const activeAutoTradeSettings = autoTradeMode === 'live' ? liveAutoTradeSettings : paperAutoTradeSettings;
   const altAutoTrade = useAltAutoTrade({
     symbols: tickers.map(t => t.symbol),
     onEnterTrade: handleAutoTradeScan,
@@ -1820,9 +1821,17 @@ function AppInner() {
     },
     onScanEvent: handleScanEvent,
     enterLabel: autoTradeMode === 'live' ? '실전진입' : '모의진입',
-    scanIntervals: (autoTradeMode === 'live' ? liveAutoTradeSettings : paperAutoTradeSettings).scanIntervals,
-    cadenceMinutes: (autoTradeMode === 'live' ? liveAutoTradeSettings : paperAutoTradeSettings).scanCadenceMinutes,
-    maxAutoPositionsPerScan: (autoTradeMode === 'live' ? liveAutoTradeSettings : paperAutoTradeSettings).maxAutoPositionsPerScan ?? 1,
+    scanIntervals: activeAutoTradeSettings.scanIntervals,
+    cadenceMinutes: activeAutoTradeSettings.scanCadenceMinutes,
+    maxAutoPositionsPerScan: activeAutoTradeSettings.maxAutoPositionsPerScan ?? 1,
+    strategyId: activeAutoTradeSettings.strategyId ?? 'breakout',
+    retestOptions: {
+      minBars: activeAutoTradeSettings.retestMinBars,
+      maxBars: activeAutoTradeSettings.retestMaxBars,
+      toleranceAtr: activeAutoTradeSettings.retestToleranceAtr,
+      maxOvershootAtr: activeAutoTradeSettings.retestMaxOvershootAtr,
+    },
+    retestAutoDirection: activeAutoTradeSettings.retestAutoDirection ?? 'long',
   });
   altAutoTradeSetActiveRef.current = altAutoTrade.setActive;
 

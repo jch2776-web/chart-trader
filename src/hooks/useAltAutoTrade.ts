@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { runBreakoutScan } from '../components/AltScanner/breakoutScanner';
 import type { ScanCandidate, ScanInterval } from '../components/AltScanner/breakoutScanner';
+import { createLeaderRetestScan } from '../components/AltScanner/strategies/leaderRetest';
+import type { RetestOptions } from '../components/AltScanner/strategies/leaderRetest';
+import type { ScanFn } from '../components/AltScanner/strategyTypes';
 import { getBinanceGovernorSnapshot } from '../lib/binanceRequestGovernor';
 
 const AUTO_TRADE_KEY   = 'alt_auto_trade_active';
@@ -85,6 +88,9 @@ export function useAltAutoTrade({
   scanIntervals,
   cadenceMinutes,
   maxAutoPositionsPerScan,
+  strategyId,
+  retestOptions,
+  retestAutoDirection,
 }: {
   symbols: string[];
   onEnterTrade: (candidate: ScanCandidate) => void;
@@ -94,6 +100,12 @@ export function useAltAutoTrade({
   scanIntervals?: ScanInterval[];
   cadenceMinutes?: number;
   maxAutoPositionsPerScan?: number;
+  /** Strategy to use for scanning. Default 'breakout' preserves legacy behavior. */
+  strategyId?: string;
+  /** Retest options — only used when strategyId === 'leader-retest' */
+  retestOptions?: RetestOptions;
+  /** Scan direction override for leader-retest auto-trade (default 'long') */
+  retestAutoDirection?: 'long' | 'both';
 }) {
   const [isActive, setIsActiveState] = useState<boolean>(() => {
     try { return localStorage.getItem(AUTO_TRADE_KEY) === 'true'; } catch { return false; }
@@ -116,6 +128,9 @@ export function useAltAutoTrade({
   const maxAutoPositionsRef       = useRef(maxAutoPositionsPerScan ?? 0); // 0 = unlimited
   const scanningRef               = useRef(false);
   const lastRunSlotRef            = useRef<number>(-1);
+  const strategyIdRef             = useRef(strategyId ?? 'breakout');
+  const retestOptionsRef          = useRef(retestOptions);
+  const retestAutoDirectionRef    = useRef<'long' | 'both'>(retestAutoDirection ?? 'long');
   isActiveRef.current             = isActive;
   symbolsRef.current              = symbols;
   onEnterRef.current              = onEnterTrade;
@@ -125,6 +140,9 @@ export function useAltAutoTrade({
   scanIntervalsRef.current        = scanIntervals && scanIntervals.length > 0 ? scanIntervals : DEFAULT_SCAN_INTERVALS;
   cadenceRef.current              = normalizeCadenceMinutes(cadenceMinutes);
   maxAutoPositionsRef.current     = maxAutoPositionsPerScan ?? 0;
+  strategyIdRef.current           = strategyId ?? 'breakout';
+  retestOptionsRef.current        = retestOptions;
+  retestAutoDirectionRef.current  = retestAutoDirection ?? 'long';
 
   const addLog = useCallback((msg: string, type: AutoTradeLog['type'] = 'info') => {
     setLogs(prev => [{ id: ++logSeq, time: Date.now(), msg, type }, ...prev].slice(0, 200));
@@ -222,11 +240,18 @@ export function useAltAutoTrade({
       const abortCtrl = new AbortController();
       setScanProgress({ interval, done: 0, total: syms.length });
 
+      // Resolve scan function based on strategy selection
+      const activeScanFn: ScanFn = strategyIdRef.current === 'leader-retest'
+        ? createLeaderRetestScan(retestOptionsRef.current)
+        : runBreakoutScan;
+      const scanDirection = strategyIdRef.current === 'leader-retest'
+        ? retestAutoDirectionRef.current
+        : 'both' as const;
       try {
-        await runBreakoutScan(
+        await activeScanFn(
           syms,
           interval,
-          'both',
+          scanDirection,
           (done, total) => {
             setScanProgress({ interval, done, total });
             if (done === total || done % 50 === 0) {
