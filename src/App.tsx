@@ -1568,6 +1568,7 @@ function AppInner() {
       validUntilTimeAtEntry: params.validUntilTimeAtEntry ?? params.validUntilTime,
       scanCadenceMinutesAtEntry: params.scanCadenceMinutesAtEntry ?? null,
       entryDriftPct: params.entryDriftPct ?? null,
+      strategyId: params.strategyId,
       ...paperTp1Meta,
     };
     const side: 'BUY' | 'SELL' = params.direction === 'long' ? 'BUY' : 'SELL';
@@ -1660,18 +1661,25 @@ function AppInner() {
     const autoSettings = (autoTradeModeRef.current === 'live' ? liveAutoTradeSettingsRef : paperAutoTradeSettingsRef).current;
 
     // ── Chase-entry prevention filter (auto-trade only) ─────────────────────
-    // 1) Signal age: skip if too much time has elapsed since the signal candle closed
-    const signalAgeSec = (now - c.asOfCloseTime) / 1000;
+    // 1) Signal age: skip if signal was already stale when the scan started
+    //    - For manual/immediate scans: skipped entirely (user explicitly requested entry now)
+    //    - For scheduled scans: measure age at scan START time (not callback time) so slow
+    //      multi-symbol scans don't unfairly penalise candidates processed later in the run
     const maxSignalAgeSec = autoSettings.maxSignalAgeSec ?? 120;
-    if (maxSignalAgeSec > 0 && signalAgeSec > maxSignalAgeSec) {
-      addLog('warn',
-        `[자동매매] ⛔ ${c.symbol} ${c.direction.toUpperCase()} — 추격진입 방지: 신호경과 ${signalAgeSec.toFixed(0)}s > ${maxSignalAgeSec}s`,
-      );
-      return;
+    if (c.scanMode !== 'manual' && maxSignalAgeSec > 0) {
+      const ageRef = c.scanStartTime ?? now;           // use scan-start epoch when available
+      const signalAgeSec = (ageRef - c.asOfCloseTime) / 1000;
+      if (signalAgeSec > maxSignalAgeSec) {
+        addLog('warn',
+          `[자동매매] ⛔ ${c.symbol} ${c.direction.toUpperCase()} — 추격진입 방지: 신호경과 ${signalAgeSec.toFixed(0)}s > ${maxSignalAgeSec}s`,
+        );
+        return;
+      }
     }
     // 2) Breakout extension: skip if confirmed candle close is too far beyond the trigger line
+    //    Not applicable for leader-retest (retest entry has no "breakout extension" concept)
     const maxBreakoutExtensionPct = autoSettings.maxBreakoutExtensionPct ?? 0.6;
-    if (maxBreakoutExtensionPct > 0 && c.triggerSpec && c.entryPrice > 0) {
+    if (maxBreakoutExtensionPct > 0 && c.strategyId !== 'leader-retest' && c.triggerSpec && c.entryPrice > 0) {
       const tPrice = triggerPrice(c.triggerSpec, c.asOfCloseTime);
       if (tPrice > 0) {
         const ext = c.direction === 'long'
@@ -1745,6 +1753,7 @@ function AppInner() {
       sizeMode:   autoSettings.sizeMode,
       marginUsdt: autoSettings.marginUsdt,
       entryDriftPct,
+      strategyId: c.strategyId,
     };
     // All filters passed — log confirmed entry attempt and record for scan-done voice
     addLog('order',
@@ -1832,6 +1841,7 @@ function AppInner() {
       maxOvershootAtr: activeAutoTradeSettings.retestMaxOvershootAtr,
     },
     retestAutoDirection: activeAutoTradeSettings.retestAutoDirection ?? 'long',
+    minCandidateScore: activeAutoTradeSettings.minCandidateScore ?? 90,
   });
   altAutoTradeSetActiveRef.current = altAutoTrade.setActive;
 
@@ -2159,6 +2169,7 @@ function AppInner() {
       validUntilTimeAtEntry: params.validUntilTimeAtEntry ?? params.validUntilTime,
       scanCadenceMinutesAtEntry: params.scanCadenceMinutesAtEntry ?? null,
       entryDriftPct: params.entryDriftPct ?? null,
+      strategyId: params.strategyId,
       ...liveTp1Meta,
     };
 
@@ -3451,6 +3462,7 @@ function AppInner() {
         scanCadenceMinutesAtEntry: meta.scanCadenceMinutesAtEntry ?? null,
         tp1Hit: meta.tp1Hit === true ? true : (meta.tp1Enabled === true ? false : null),
         movedSlToBe: meta.movedSlToBe ?? null,
+        strategyId: meta.strategyId,
       });
       removeAltManagedDrawingsForCandidate(meta.symbol, meta.candidateId);
       cleanupKeys.push(key);

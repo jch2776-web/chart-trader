@@ -7,7 +7,6 @@ import type { ScanFn } from '../components/AltScanner/strategyTypes';
 import { getBinanceGovernorSnapshot } from '../lib/binanceRequestGovernor';
 
 const AUTO_TRADE_KEY   = 'alt_auto_trade_active';
-const SCORE_THRESHOLD  = 90;
 const TOP_N_PER_TF     = 2;
 const DEFAULT_SCAN_INTERVALS: ScanInterval[] = ['1h', '4h', '1d'];
 const DEFAULT_CADENCE_MINUTES = 60;
@@ -91,6 +90,7 @@ export function useAltAutoTrade({
   strategyId,
   retestOptions,
   retestAutoDirection,
+  minCandidateScore,
 }: {
   symbols: string[];
   onEnterTrade: (candidate: ScanCandidate) => void;
@@ -106,6 +106,8 @@ export function useAltAutoTrade({
   retestOptions?: RetestOptions;
   /** Scan direction override for leader-retest auto-trade (default 'long') */
   retestAutoDirection?: 'long' | 'both';
+  /** Minimum candidate score to qualify for auto-entry (default 90) */
+  minCandidateScore?: number;
 }) {
   const [isActive, setIsActiveState] = useState<boolean>(() => {
     try { return localStorage.getItem(AUTO_TRADE_KEY) === 'true'; } catch { return false; }
@@ -131,6 +133,7 @@ export function useAltAutoTrade({
   const strategyIdRef             = useRef(strategyId ?? 'breakout');
   const retestOptionsRef          = useRef(retestOptions);
   const retestAutoDirectionRef    = useRef<'long' | 'both'>(retestAutoDirection ?? 'long');
+  const scoreThresholdRef         = useRef(minCandidateScore ?? 90);
   isActiveRef.current             = isActive;
   symbolsRef.current              = symbols;
   onEnterRef.current              = onEnterTrade;
@@ -143,6 +146,7 @@ export function useAltAutoTrade({
   strategyIdRef.current           = strategyId ?? 'breakout';
   retestOptionsRef.current        = retestOptions;
   retestAutoDirectionRef.current  = retestAutoDirection ?? 'long';
+  scoreThresholdRef.current       = minCandidateScore ?? 90;
 
   const addLog = useCallback((msg: string, type: AutoTradeLog['type'] = 'info') => {
     setLogs(prev => [{ id: ++logSeq, time: Date.now(), msg, type }, ...prev].slice(0, 200));
@@ -275,14 +279,15 @@ export function useAltAutoTrade({
         continue;
       }
 
+      const scoreThreshold = scoreThresholdRef.current;
       const qualified = candidates
-        .filter(c => c.score >= SCORE_THRESHOLD)
+        .filter(c => c.score >= scoreThreshold)
         .sort((a, b) => b.score - a.score);
       const top = qualified.slice(0, TOP_N_PER_TF);
 
       addLog(
-        `[${interval}] 완료 — 전체 ${candidates.length}개 · ${SCORE_THRESHOLD}점+ ${qualified.length}개 · 진입대상 ${top.length}개`,
-        top.length > 0 ? 'success' : 'info',
+        `[${interval}] 완료 — 전체 ${candidates.length}개 · ${scoreThreshold}점+ ${qualified.length}개 · 진입대상 ${top.length}개`,
+        top.length > 0 ? 'success' : (candidates.length > 0 ? 'warn' : 'info'),
       );
       onScanEventRef.current?.({ type: 'interval_done', interval, total: candidates.length, qualified: qualified.length, entered: top.length });
 
@@ -302,7 +307,7 @@ export function useAltAutoTrade({
           `🔍 [${interval}] 후보 전달: ${c.symbol} ${c.direction.toUpperCase()} 점수${c.score} 진입${c.entryPrice.toFixed(4)} SL${c.slPrice.toFixed(4)} TP${c.tpPrice.toFixed(4)}`,
           'info',
         );
-        onEnterRef.current(c);
+        onEnterRef.current({ ...c, scanMode: mode, scanStartTime: startTime });
         enteredThisRun.add(key);
         totalEntered++;
         if (firstCandidateReadyAt == null) {

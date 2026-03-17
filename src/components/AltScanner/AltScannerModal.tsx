@@ -51,6 +51,8 @@ export interface AltTradeParams {
   marginUsdt?: number; // only when sizeMode === 'margin'
   // Chase-entry filter metadata (auto-trade only, optional)
   entryDriftPct?: number | null;
+  // Strategy that produced this candidate (undefined = legacy breakout)
+  strategyId?: string;
 }
 
 interface Props {
@@ -289,6 +291,7 @@ function TradingInfoPanel({
     breakoutType: c.breakoutType,
     candidateStatus: c.status,
     triggerPriceAtNextClose: c.triggerPriceAtNextClose,
+    strategyId: c.strategyId,
   };
   const paperTradeParams: AltTradeParams = {
     ...baseParams,
@@ -1086,7 +1089,7 @@ export function AltScannerModal({
       <div style={S.modal}>
         {/* ── Header ─────────────────────────────────────────────────────── */}
         <div style={S.header}>
-          <span style={S.title}>🔍 알트추천 (돌파 스캐너)</span>
+          <span style={S.title}>🔍 알트추천 (스마트 스캐너)</span>
           <div style={S.headerRight}>
             <span style={S.toggleLabel}>레벨 표시</span>
             <button

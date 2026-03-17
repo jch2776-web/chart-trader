@@ -39,6 +39,8 @@ export interface AltMeta {
   maxAutoPositionsPerScanAtEntry?: number | null;
   // Chase-entry filter metadata (auto-trade only)
   entryDriftPct?: number | null;   // (markPrice - entryPrice) / entryPrice * 100 at decision time
+  // Scan strategy that produced this candidate (undefined = legacy breakout)
+  strategyId?: string;
 }
 
 export interface PaperPosition {
@@ -103,6 +105,7 @@ export interface PaperHistoryEntry {
   tp1Hit?: boolean | null;
   movedSlToBe?: boolean | null;
   maxAutoPositionsPerScanAtEntry?: number | null;
+  strategyId?: string;
 }
 
 export interface PaperState {

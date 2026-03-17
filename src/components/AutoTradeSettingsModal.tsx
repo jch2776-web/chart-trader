@@ -118,6 +118,8 @@ export interface AutoTradeSettings {
   maxSignalAgeSec?: number;          // max age of signal since asOfCloseTime (default 120s, 0 = disable)
   maxEntryDriftPct?: number;         // max allowed drift from plannedEntry before skipping (default 1.0%, 0 = disable)
   maxBreakoutExtensionPct?: number;  // max allowed extension of confirmed candle close beyond trigger line (default 0.6%, 0 = disable)
+  // Candidate score threshold for auto-entry (default 90; lower = more candidates qualify)
+  minCandidateScore?: number;
   // Strategy selection (default 'breakout' — preserves existing behavior)
   strategyId?: 'breakout' | 'leader-retest';
   // Leader-retest specific parameters (only used when strategyId === 'leader-retest')
@@ -409,25 +411,42 @@ function SettingsEditor({
           </div>
 
           {/* ② Breakout extension */}
-          <div style={{ background: 'rgba(240,185,11,0.04)', border: '1px solid rgba(240,185,11,0.12)', borderRadius: 6, padding: '8px 10px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
-              <span style={{ fontSize: '0.76rem', color: '#9aa4b5', fontWeight: 700 }}>② 신호봉 돌파선 이탈폭</span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <input
-                  type="number"
-                  min={0} max={10} step={0.1}
-                  value={draft.maxBreakoutExtensionPct ?? 0.6}
-                  onChange={e => set('maxBreakoutExtensionPct', Math.max(0, Math.min(10, parseFloat(e.target.value) || 0)))}
-                  style={s.numberInput}
-                />
-                <span style={s.unit}>%</span>
+          {(() => {
+            const isLeaderRetest = (draft.strategyId ?? 'breakout') === 'leader-retest';
+            return (
+              <div style={{ position: 'relative' as const, opacity: isLeaderRetest ? 0.38 : 1 }}>
+                <div style={{ background: 'rgba(240,185,11,0.04)', border: '1px solid rgba(240,185,11,0.12)', borderRadius: 6, padding: '8px 10px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ fontSize: '0.76rem', color: '#9aa4b5', fontWeight: 700 }}>② 신호봉 돌파선 이탈폭</span>
+                      {isLeaderRetest && (
+                        <span style={{ fontSize: '0.66rem', color: '#5e6673', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 3, padding: '1px 5px' }}>
+                          리테스트 미적용
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <input
+                        type="number"
+                        min={0} max={10} step={0.1}
+                        value={draft.maxBreakoutExtensionPct ?? 0.6}
+                        onChange={e => set('maxBreakoutExtensionPct', Math.max(0, Math.min(10, parseFloat(e.target.value) || 0)))}
+                        style={s.numberInput}
+                        disabled={isLeaderRetest}
+                      />
+                      <span style={s.unit}>%</span>
+                    </div>
+                  </div>
+                  <BreakoutExtDiagram value={isLeaderRetest ? 0 : (draft.maxBreakoutExtensionPct ?? 0.6)} />
+                  <div style={s.hint}>
+                    {isLeaderRetest
+                      ? '리더-리테스트 전략에서는 돌파선 이탈폭 개념이 없으므로 이 필터는 자동으로 무시됩니다.'
+                      : '신호봉 종가가 돌파선(트리거)에서 너무 멀리 닫히면 과열 신호로 차단. 예) 0.6% → 돌파선 100 기준 종가 100.6 이상이면 스킵.'}
+                  </div>
+                </div>
               </div>
-            </div>
-            <BreakoutExtDiagram value={draft.maxBreakoutExtensionPct ?? 0.6} />
-            <div style={s.hint}>
-              신호봉 종가가 돌파선(트리거)에서 너무 멀리 닫히면 과열 신호로 차단. 예) 0.6% → 돌파선 100 기준 종가 100.6 이상이면 스킵.
-            </div>
-          </div>
+            );
+          })()}
 
           {/* ③ Entry drift */}
           <div style={{ background: 'rgba(59,139,235,0.04)', border: '1px solid rgba(59,139,235,0.12)', borderRadius: 6, padding: '8px 10px' }}>
@@ -510,7 +529,15 @@ function SettingsEditor({
             <button
               key={sid}
               style={{ ...s.toggleChip, ...((draft.strategyId ?? 'breakout') === sid ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
-              onClick={() => set('strategyId', sid)}
+              onClick={() => {
+                set('strategyId', sid);
+                // Auto-adjust minCandidateScore when switching strategies:
+                // leader-retest scores top out ~80 (formula: 40 + RR×15 + 10),
+                // so 90 default blocks everything. Switch to 70 automatically.
+                const cur = draft.minCandidateScore ?? 90;
+                if (sid === 'leader-retest' && cur >= 80) set('minCandidateScore', 70);
+                if (sid === 'breakout' && cur <= 70) set('minCandidateScore', 90);
+              }}
             >
               {sid === 'breakout' ? '기존 돌파' : '리더-리테스트'}
             </button>
@@ -574,6 +601,27 @@ function SettingsEditor({
           </span>
         </div>
       )}
+
+      {/* Min candidate score */}
+      <div style={s.fieldRow}>
+        <label style={s.label}>최소 진입 점수</label>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input
+            type="number"
+            min={50} max={100} step={1}
+            value={draft.minCandidateScore ?? 90}
+            onChange={e => set('minCandidateScore', Math.max(50, Math.min(100, parseInt(e.target.value) || 90)))}
+            style={s.numberInput}
+          />
+          <span style={s.unit}>점</span>
+        </div>
+        <span style={s.hint}>
+          이 점수 이상인 후보만 자동 진입합니다.{' '}
+          {(draft.strategyId ?? 'breakout') === 'leader-retest'
+            ? '리더-리테스트 스코어는 구조적으로 40~80점 범위 — 70점 내외 권장. 전략 전환 시 자동 조정됩니다.'
+            : '기존 돌파 스코어는 0~100점 분포 — 기본 90점. 낮출수록 후보 증가, 높일수록 고품질 집중.'}
+        </span>
+      </div>
 
       {/* Time-stop toggle (unattended auto-trade scope) */}
       <div style={s.fieldRow}>

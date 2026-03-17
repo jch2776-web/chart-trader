@@ -454,9 +454,13 @@ export async function runLeaderRetestScan(
  * Used by useAltAutoTrade when the auto-trade settings include retest params.
  */
 export function createLeaderRetestScan(retestOptions?: RetestOptions): ScanFn {
+  // Filter out undefined values so they don't override DEFAULT_RETEST_OPTIONS
+  const defined = retestOptions
+    ? Object.fromEntries(Object.entries(retestOptions).filter(([, v]) => v !== undefined))
+    : {};
   const opts: Required<RetestOptions> = {
     ...DEFAULT_RETEST_OPTIONS,
-    ...retestOptions,
+    ...defined,
   };
   return (symbols, interval, direction, onProgress, onResult, signal, options) =>
     runLeaderRetestScanInternal(symbols, interval, direction, onProgress, onResult, opts, signal, options);

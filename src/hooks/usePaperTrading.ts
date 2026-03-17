@@ -191,6 +191,7 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
         tp1Hit: pos.altMeta?.tp1Hit === true ? true : (pos.altMeta?.tp1Enabled === true ? false : null),
         movedSlToBe: pos.altMeta?.movedSlToBe ?? null,
         maxAutoPositionsPerScanAtEntry: pos.altMeta?.maxAutoPositionsPerScanAtEntry ?? null,
+        strategyId: pos.altMeta?.strategyId,
       };
       // Cancel any orphaned reduce-only orders whose parent position is now closing
       // (e.g. manual close-limit orders placed against this position become orphans)
@@ -256,6 +257,7 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
         tp1Hit: pos.altMeta?.tp1Hit === true ? true : (pos.altMeta?.tp1Enabled === true ? false : null),
         movedSlToBe: pos.altMeta?.movedSlToBe ?? null,
         maxAutoPositionsPerScanAtEntry: pos.altMeta?.maxAutoPositionsPerScanAtEntry ?? null,
+        strategyId: pos.altMeta?.strategyId,
       };
       const isFull = qty >= totalQty;
       return {

@@ -62,6 +62,11 @@ export interface ScanCandidate {
 
   // Strategy that produced this candidate (undefined = legacy breakout)
   strategyId?: string;
+
+  // Scan mode / timing metadata (set by useAltAutoTrade before onEnterTrade callback)
+  scanMode?: 'scheduled' | 'manual';
+  /** ms epoch — when the scan run started; used to measure signal age at scan-start, not at callback time */
+  scanStartTime?: number;
 }
 
 // ── Utilities ──────────────────────────────────────────────────────────────

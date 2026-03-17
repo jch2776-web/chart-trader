@@ -53,6 +53,7 @@ export interface LiveTradeHistoryEntry {
   tp1Hit?: boolean | null;
   movedSlToBe?: boolean | null;
   maxAutoPositionsPerScanAtEntry?: number | null;
+  strategyId?: string;
 }
 
 export interface FuturesUserTrade {

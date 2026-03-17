@@ -150,6 +150,7 @@ interface UnifiedHistoryRow {
   scanCadenceMinutesAtEntry?: number | null;
   tp1Hit?: boolean | null;
   movedSlToBe?: boolean | null;
+  strategyId?: string;
 }
 
 function reasonLabel(reason: UnifiedHistoryReason): string {
@@ -441,7 +442,7 @@ function PerformanceAnalysisSection({
 }) {
   const [cfLoading, setCfLoading] = useState(false);
   const [revealed, setRevealed] = useState(false);
-  const [drillKey, setDrillKey] = useState<'timeframe' | 'side' | 'source' | 'leverage' | 'cadence'>('timeframe');
+  const [drillKey, setDrillKey] = useState<'timeframe' | 'side' | 'source' | 'leverage' | 'cadence' | 'strategy'>('timeframe');
   const [cfSummary, setCfSummary] = useState<CfSummary | null>(null);
 
   const altRows = useMemo(() => rows.filter(r => r.isAltTrade), [rows]);
@@ -636,6 +637,13 @@ function PerformanceAnalysisSection({
     ];
   }, [altRows]);
 
+  const byStrategy = useMemo(() => {
+    return [
+      { key: 'breakout', label: '기존 돌파', ...summarizeCohort(altRows.filter(r => !r.strategyId || r.strategyId === 'breakout')) },
+      { key: 'leader-retest', label: '리더-리테스트', ...summarizeCohort(altRows.filter(r => r.strategyId === 'leader-retest')) },
+    ];
+  }, [altRows]);
+
   const byLeverage = useMemo(() => {
     const map = new Map<string, UnifiedHistoryRow[]>();
     for (const row of altRows) {
@@ -718,14 +726,16 @@ function PerformanceAnalysisSection({
     if (drillKey === 'side') return bySide;
     if (drillKey === 'source') return byEntrySource;
     if (drillKey === 'leverage') return byLeverage;
+    if (drillKey === 'strategy') return byStrategy;
     return byCadence;
-  }, [drillKey, byTimeframe, bySide, byEntrySource, byLeverage, byCadence]);
+  }, [drillKey, byTimeframe, bySide, byEntrySource, byLeverage, byCadence, byStrategy]);
 
   const drillTitle = useMemo(() => {
     if (drillKey === 'timeframe') return '봉 기준별 성과 (총손익 | 승률)';
     if (drillKey === 'side') return 'LONG / SHORT 성과';
     if (drillKey === 'source') return '진입 방식별 성과';
     if (drillKey === 'leverage') return '레버리지 구간별 성과';
+    if (drillKey === 'strategy') return '전략별 성과';
     return '스캔 주기별 성과';
   }, [drillKey]);
 
@@ -1038,6 +1048,7 @@ function PerformanceAnalysisSection({
               { key: 'source', label: '진입' },
               { key: 'leverage', label: '레버' },
               { key: 'cadence', label: '주기' },
+              { key: 'strategy', label: '전략' },
             ].map(x => {
               const active = drillKey === x.key;
               return (
@@ -1209,6 +1220,81 @@ function PerformanceAnalysisSection({
                 </div>
               )}
             </div>
+          </PerfCard>
+        </div>
+      )}
+
+      {/* ── Row 6: 전략별 성과 비교 ─────────────────────────────── */}
+      {altRows.length > 0 && (
+        <div style={{ ...revealStyle(5), marginTop: 10 }}>
+          <PerfCard>
+            <PerfCardTitle icon="⚔️" title="전략별 성과 비교" badge={
+              <span style={{ fontSize: '0.63rem', color: '#6b7892' }}>기존 돌파 vs 리더-리테스트</span>
+            } />
+            {byStrategy.every(s => s.count === 0) ? (
+              <div style={{ fontSize: '0.73rem', color: '#5d6776' }}>비교 데이터가 없습니다.</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {byStrategy.map(({ key, count, winRate, totalPnl, avgPnl, avgHoldMin }) => {
+                  const accent = key === 'leader-retest' ? '#9b59b6' : '#3b8beb';
+                  const accentBg = key === 'leader-retest' ? 'rgba(155,89,182,0.06)' : 'rgba(59,139,235,0.06)';
+                  const accentBorder = key === 'leader-retest' ? 'rgba(155,89,182,0.25)' : 'rgba(59,139,235,0.25)';
+                  return (
+                    <div key={key} style={{ border: `1px solid ${accentBorder}`, borderRadius: 10, padding: '9px 11px', background: accentBg }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                        <div style={{ fontSize: '0.67rem', color: accent, fontWeight: 700, letterSpacing: '0.01em' }}>
+                          {key === 'leader-retest' ? 'ALT추천 + 리테스트' : 'ALT추천 + 돌파'}
+                        </div>
+                        <span style={{ fontSize: '0.62rem', color: '#5d6776' }}>{count}건</span>
+                      </div>
+                      {count === 0 ? (
+                        <div style={{ fontSize: '0.69rem', color: '#3d4a58' }}>거래 없음</div>
+                      ) : (
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6 }}>
+                          {[
+                            { label: '승률', value: `${winRate.toFixed(1)}%`, color: winRate >= 50 ? '#0ecb81' : '#f6465d' },
+                            { label: '누적 손익', value: `${totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(2)}`, color: totalPnl >= 0 ? '#0ecb81' : '#f6465d' },
+                            { label: '거래당', value: `${avgPnl >= 0 ? '+' : ''}${avgPnl.toFixed(2)}`, color: avgPnl >= 0 ? '#0ecb81' : '#f6465d' },
+                            { label: '평균 보유', value: avgHoldMin != null ? `${avgHoldMin.toFixed(0)}분` : '—', color: '#c8d4e5' },
+                          ].map(({ label: lbl, value, color }) => (
+                            <div key={lbl} style={{ background: 'rgba(0,0,0,0.2)', borderRadius: 6, padding: '5px 6px', textAlign: 'center' as const }}>
+                              <div style={{ fontSize: '0.57rem', color: '#3d5060', marginBottom: 2 }}>{lbl}</div>
+                              <div style={{ fontSize: '0.71rem', color, fontWeight: 700, fontFamily: '"SF Mono",Consolas,monospace' }}>{value}</div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                {/* Win-rate comparison bar */}
+                {byStrategy.every(s => s.count > 0) && (() => {
+                  const brk = byStrategy.find(s => s.key === 'breakout')!;
+                  const ret = byStrategy.find(s => s.key === 'leader-retest')!;
+                  const brkWr = brk.winRate;
+                  const retWr = ret.winRate;
+                  return (
+                    <div style={{ marginTop: 4, padding: '8px 10px', background: 'rgba(255,255,255,0.02)', borderRadius: 8, border: '1px solid rgba(255,255,255,0.05)' }}>
+                      <div style={{ fontSize: '0.61rem', color: '#5d7080', marginBottom: 6, fontWeight: 600 }}>승률 비교</div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                        {[
+                          { label: 'ALT추천 + 돌파', wr: brkWr, accent: '#3b8beb' },
+                          { label: 'ALT추천 + 리테스트', wr: retWr, accent: '#9b59b6' },
+                        ].map(({ label: lbl, wr, accent }) => (
+                          <div key={lbl} style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                            <span style={{ fontSize: '0.61rem', color: '#6a7a8e', width: 110, flexShrink: 0 }}>{lbl}</span>
+                            <div style={{ flex: 1, height: 7, borderRadius: 4, background: 'rgba(255,255,255,0.05)', overflow: 'hidden' }}>
+                              <div style={{ height: '100%', width: `${wr}%`, background: accent, borderRadius: 4, opacity: 0.8 }} />
+                            </div>
+                            <span style={{ fontSize: '0.65rem', color: wr >= 50 ? '#0ecb81' : '#f6465d', fontWeight: 700, fontFamily: '"SF Mono",Consolas,monospace', width: 36, textAlign: 'right' as const }}>{wr.toFixed(1)}%</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
           </PerfCard>
         </div>
       )}
@@ -2220,6 +2306,7 @@ export function BottomPanel({
       scanCadenceMinutesAtEntry: h.scanCadenceMinutesAtEntry ?? null,
       tp1Hit: h.tp1Hit ?? null,
       movedSlToBe: h.movedSlToBe ?? null,
+      strategyId: h.strategyId,
     })),
     [paperHistory],
   );
@@ -2251,6 +2338,7 @@ export function BottomPanel({
       scanCadenceMinutesAtEntry: h.scanCadenceMinutesAtEntry ?? null,
       tp1Hit: h.tp1Hit ?? null,
       movedSlToBe: h.movedSlToBe ?? null,
+      strategyId: h.strategyId,
     })),
     [liveHistory],
   );
@@ -2472,9 +2560,15 @@ export function BottomPanel({
                       <span style={s.symbolFull}>{h.symbol}</span>
                     </div>
                     {h.isAltTrade && (
-                      <span style={{ fontSize: '0.58rem', background: 'rgba(59,139,235,0.18)', color: '#3b8beb', borderRadius: 3, padding: '1px 5px', fontWeight: 700, border: '1px solid rgba(59,139,235,0.4)', marginLeft: 4 }}>
-                        ALT추천
-                      </span>
+                      h.strategyId === 'leader-retest' ? (
+                        <span style={{ fontSize: '0.58rem', background: 'rgba(155,89,182,0.18)', color: '#9b59b6', borderRadius: 3, padding: '1px 5px', fontWeight: 700, border: '1px solid rgba(155,89,182,0.4)', marginLeft: 4 }}>
+                          ALT추천 + 리테스트
+                        </span>
+                      ) : (
+                        <span style={{ fontSize: '0.58rem', background: 'rgba(59,139,235,0.18)', color: '#3b8beb', borderRadius: 3, padding: '1px 5px', fontWeight: 700, border: '1px solid rgba(59,139,235,0.4)', marginLeft: 4 }}>
+                          ALT추천 + 돌파
+                        </span>
+                      )
                     )}
                   </div>
                 </td>
