@@ -124,10 +124,11 @@ export interface AutoTradeSettings {
   strategyId?: 'breakout' | 'leader-retest';
   // Leader-retest specific parameters (only used when strategyId === 'leader-retest')
   retestMinBars?: number;            // min bars since breakout (default 1)
-  retestMaxBars?: number;            // max bars since breakout (default 12)
+  retestMaxBars?: number;            // max bars since breakout (default 8)
   retestToleranceAtr?: number;       // price must be within level ± toleranceAtr × ATR (default 0.30)
   retestMaxOvershootAtr?: number;    // max allowed overshoot beyond level in ATR multiples (default 1.0)
   retestAutoDirection?: 'long' | 'both'; // scan direction for unattended auto-trade (default 'long')
+  retestRequire4hTrend?: boolean;    // require 4H EMA20 > EMA50 for LONG entry (default true)
 }
 
 const CADENCE_PRESETS = [15, 30, 60, 120, 240] as const;
@@ -596,8 +597,17 @@ function SettingsEditor({
               </button>
             ))}
           </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>4H 상승 추세 필터</span>
+            <button
+              style={{ ...s.toggleChip, ...((draft.retestRequire4hTrend ?? true) ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
+              onClick={() => set('retestRequire4hTrend', !(draft.retestRequire4hTrend ?? true))}>
+              {(draft.retestRequire4hTrend ?? true) ? 'ON' : 'OFF'}
+            </button>
+          </div>
           <span style={s.hint}>
             최소/최대봉: 돌파 후 몇 봉 이내에 리테스트가 와야 하는지. 허용폭: 레벨과의 근접도(ATR 배수). 자동매매는 기본 롱만 권장.
+            4H 추세 필터 ON 시 4H EMA20 &gt; EMA50인 경우에만 롱 진입.
           </span>
         </div>
       )}

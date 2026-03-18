@@ -1,11 +1,15 @@
 /**
- * Leader-Retest Strategy
+ * Leader-Retest Strategy (v2)
  *
  * Finds coins where price broke out of a key SR level some bars ago
- * and has now pulled back to retest that level.
+ * and has now pulled back to retest that level WITH CONFIRMATION.
  *
- * Long: price broke above a resistance → now retesting it as support
- * Short: price broke below a support → now retesting it as resistance
+ * v2 changes vs v1:
+ *  - detectRetest: no longer accepts "close near level" alone.
+ *    Requires a historical bar where low <= level+tol AND close >= level
+ *    (touched the level but closed back above it = retest confirmed).
+ *  - 4H uptrend filter: for LONG, EMA20 > EMA50 on 4H must hold.
+ *  - Default maxBars reduced 12 → 8 (tighter recency).
  *
  * Completely separate from the legacy breakout strategy.
  */
@@ -32,21 +36,24 @@ import type { ScanFn, ScanStrategy } from '../strategyTypes';
  * All values are per-symbol; defaults are applied when a field is omitted.
  */
 export interface RetestOptions {
-  /** Min bars between the breakout candle and current bar (default 1 — catches immediate retests) */
+  /** Min bars between the breakout candle and current bar (default 1) */
   minBars?: number;
-  /** Max bars between the breakout candle and current bar (default 12 — avoids stale moves) */
+  /** Max bars between the breakout candle and current bar (default 8) */
   maxBars?: number;
-  /** Price must be within level ± toleranceAtr × ATR  (default 0.30) */
+  /** Candle low must be within level + toleranceAtr × ATR to count as retest touch (default 0.30) */
   toleranceAtr?: number;
-  /** Max allowed overshoot beyond the far side of the level, in ATR multiples (default 1.0) */
+  /** Max allowed overshoot of current close beyond the far side of the level, in ATR multiples (default 1.0) */
   maxOvershootAtr?: number;
+  /** Require 4H EMA20 > EMA50 before allowing LONG entry (default true) */
+  require4hTrend?: boolean;
 }
 
 const DEFAULT_RETEST_OPTIONS: Required<RetestOptions> = {
   minBars: 1,
-  maxBars: 12,
+  maxBars: 8,          // v2: reduced from 12 — keep retest recent
   toleranceAtr: 0.30,
   maxOvershootAtr: 1.0,
+  require4hTrend: true, // v2: 4H uptrend guard for LONG
 };
 
 // ── Utilities ──────────────────────────────────────────────────────────────
@@ -71,6 +78,17 @@ function calcATR(candles: Candle[], period = 14): number {
   return atr;
 }
 
+/** EMA of close prices; returns the last (most recent) EMA value. */
+function calcEMA(candles: Candle[], period: number): number {
+  if (candles.length < period) return 0;
+  const k = 2 / (period + 1);
+  let ema = candles.slice(0, period).reduce((s, c) => s + c.close, 0) / period;
+  for (let i = period; i < candles.length; i++) {
+    ema = candles[i].close * k + ema * (1 - k);
+  }
+  return ema;
+}
+
 function closedOnly(candles: Candle[], intervalMs: number): Candle[] {
   if (candles.length === 0) return candles;
   const last = candles[candles.length - 1];
@@ -86,9 +104,17 @@ interface RetestResult {
 }
 
 /**
- * For a given direction, check whether:
- *  1. A breakout occurred minBars–maxBars from the end of `closed`
- *  2. The current (last) close is within toleranceAtr × ATR of the broken level
+ * v2 detectRetest: requires confirmed retest candle.
+ *
+ * LONG conditions:
+ *  1. A breakout candle exists in [n-maxBars .. n-minBars] range
+ *     (prev.close < level, bar.close > level)
+ *  2. At least one bar AFTER the breakout has:
+ *     - low  <= level + tol  (touched the level from above)
+ *     - close >= level       (closed back above = retest confirmed)
+ *  3. Current close (n-1) >= level - tol  (still holding, not broken down)
+ *
+ * SHORT is the exact mirror.
  */
 function detectRetest(
   closed: Candle[],
@@ -102,10 +128,9 @@ function detectRetest(
 
   const currentClose = closed[n - 1].close;
   const tol = atr * opts.toleranceAtr;
-  const overshoot = atr * opts.maxOvershootAtr;
-  // breakout search window: bars [n-maxBars .. n-minBars] relative to last bar
   const searchStart = Math.max(1, n - opts.maxBars);
   const searchEnd   = n - opts.minBars;
+  if (searchEnd < searchStart) return null;
 
   if (dir === 'long') {
     const candidates = srLevels
@@ -115,18 +140,33 @@ function detectRetest(
 
     for (const zone of candidates) {
       const level = zone.centerPrice;
-      // current close must be within [level - tol, level + overshoot] (retesting from above or at level)
-      if (currentClose < level - tol || currentClose > level + overshoot) continue;
 
-      // find breakout candle: prev.close below level, bar.close above level + small margin
-      let broke = false;
+      // 1. Find breakout candle in the search window
+      let breakoutIdx = -1;
       for (let i = searchStart; i <= searchEnd; i++) {
         if (closed[i - 1].close < level - atr * 0.05 && closed[i].close > level + atr * 0.1) {
-          broke = true;
+          breakoutIdx = i;
           break;
         }
       }
-      if (broke) return { level, direction: 'long' };
+      if (breakoutIdx < 0) continue;
+
+      // 2. Confirmed retest: any bar after the breakout where
+      //    low touched level AND close reclaimed it
+      let confirmed = false;
+      for (let i = breakoutIdx + 1; i < n; i++) {
+        const bar = closed[i];
+        if (bar.low <= level + tol && bar.close >= level) {
+          confirmed = true;
+          break;
+        }
+      }
+      if (!confirmed) continue;
+
+      // 3. Current close still at or above level (not blown through)
+      if (currentClose < level - tol) continue;
+
+      return { level, direction: 'long' };
     }
   } else {
     const candidates = srLevels
@@ -136,17 +176,32 @@ function detectRetest(
 
     for (const zone of candidates) {
       const level = zone.centerPrice;
-      // current close must be within [level - overshoot, level + tol] (retesting from below or at level)
-      if (currentClose > level + tol || currentClose < level - overshoot) continue;
 
-      let broke = false;
+      // 1. Find breakout candle (broke below support)
+      let breakoutIdx = -1;
       for (let i = searchStart; i <= searchEnd; i++) {
         if (closed[i - 1].close > level + atr * 0.05 && closed[i].close < level - atr * 0.1) {
-          broke = true;
+          breakoutIdx = i;
           break;
         }
       }
-      if (broke) return { level, direction: 'short' };
+      if (breakoutIdx < 0) continue;
+
+      // 2. Confirmed retest: high touched level AND close reclaimed below
+      let confirmed = false;
+      for (let i = breakoutIdx + 1; i < n; i++) {
+        const bar = closed[i];
+        if (bar.high >= level - tol && bar.close <= level) {
+          confirmed = true;
+          break;
+        }
+      }
+      if (!confirmed) continue;
+
+      // 3. Current close still at or below level
+      if (currentClose > level + tol) continue;
+
+      return { level, direction: 'short' };
     }
   }
 
@@ -275,14 +330,43 @@ async function scanSymbolRetest(
   const atr = calcATR(closed);
   if (atr === 0) return null;
 
+  // Build direction list; may be narrowed by 4H trend filter below
+  let activeDirs: ('long' | 'short')[] = direction === 'both' ? ['long', 'short'] : [direction];
+
+  // ── 4H uptrend filter (LONG only, v2) ──────────────────────────────────
+  if (opts.require4hTrend && activeDirs.includes('long')) {
+    // When scanning on 4H or 1D, reuse already-fetched candles; otherwise fetch 4H separately
+    let candles4h: Candle[] = closed;
+    if (interval !== '4h' && interval !== '1d') {
+      try {
+        const raw4h = await fetchBinanceKlinesCached(symbol, '4h', 60, signal);
+        candles4h = closedOnly(raw4h, intervalToMs('4h'));
+      } catch {
+        candles4h = [];
+      }
+    }
+    if (candles4h.length >= 50) {
+      const ema20 = calcEMA(candles4h, 20);
+      const ema50 = calcEMA(candles4h, 50);
+      if (ema20 <= ema50) {
+        // 4H downtrend: LONG not allowed
+        activeDirs = activeDirs.filter(d => d !== 'long');
+      }
+    }
+    // If we can't determine trend (too few 4H bars), be conservative and skip LONG
+    else if (candles4h.length < 50) {
+      activeDirs = activeDirs.filter(d => d !== 'long');
+    }
+    if (activeDirs.length === 0) return null;
+  }
+  // ───────────────────────────────────────────────────────────────────────
+
   const entryPrice = lastClosed.close;
   const srLevels = calcSRLevels(closed, atr, entryPrice);
   const hvnZones = calcHVN(closed.slice(-300), 100, 5, entryPrice);
 
-  const dirs: ('long' | 'short')[] = direction === 'both' ? ['long', 'short'] : [direction];
-
   let found: RetestResult | null = null;
-  for (const dir of dirs) {
+  for (const dir of activeDirs) {
     const r = detectRetest(closed, dir, atr, srLevels, opts);
     if (r) { found = r; break; }
   }
@@ -334,7 +418,7 @@ async function scanSymbolRetest(
     srLevels, hvnZones, closed,
   );
 
-  // Score: RR-based heuristic
+  // Score: RR-based heuristic (unchanged)
   const R = Math.abs(entryPrice - sl);
   const rr = R > 0 ? Math.abs(tp2 - entryPrice) / R : 0;
   const score = Math.round(Math.min(100, 40 + rr * 15 + (tp1 ? 10 : 0)));

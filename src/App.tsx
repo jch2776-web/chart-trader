@@ -1839,6 +1839,7 @@ function AppInner() {
       maxBars: activeAutoTradeSettings.retestMaxBars,
       toleranceAtr: activeAutoTradeSettings.retestToleranceAtr,
       maxOvershootAtr: activeAutoTradeSettings.retestMaxOvershootAtr,
+      require4hTrend: activeAutoTradeSettings.retestRequire4hTrend,
     },
     retestAutoDirection: activeAutoTradeSettings.retestAutoDirection ?? 'long',
     minCandidateScore: activeAutoTradeSettings.minCandidateScore ?? 90,
