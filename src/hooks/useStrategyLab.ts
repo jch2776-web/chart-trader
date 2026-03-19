@@ -98,6 +98,20 @@ export function useStrategyLab(storageKeyPrefix: string, symbols: string[]) {
   const canAdd = configs.some(c => c === null);
   const activeCount = configs.filter(Boolean).length;
 
+  // All unique symbols currently held as positions or orders across all lab ledgers.
+  // Used by App.tsx to extend the REST price-fetch target list so lab-only symbols
+  // receive mark price updates and trigger TP/SL/liquidation correctly.
+  const labSymbols = [...new Set([
+    slot0.paper.positions.map(p => p.symbol),
+    slot0.paper.orders.map(o => o.symbol),
+    slot1.paper.positions.map(p => p.symbol),
+    slot1.paper.orders.map(o => o.symbol),
+    slot2.paper.positions.map(p => p.symbol),
+    slot2.paper.orders.map(o => o.symbol),
+    slot3.paper.positions.map(p => p.symbol),
+    slot3.paper.orders.map(o => o.symbol),
+  ].flat())];
+
   return {
     experiments,
     configs,
@@ -106,6 +120,7 @@ export function useStrategyLab(storageKeyPrefix: string, symbols: string[]) {
     updateExperiment,
     persistAndSet,
     checkPrices,
+    labSymbols,
     canAdd,
     activeCount,
     maxSlots: LAB_MAX_SLOTS,

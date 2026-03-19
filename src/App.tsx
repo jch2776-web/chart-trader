@@ -1279,6 +1279,29 @@ function AppInner() {
   const strategyLabRef = useRef(strategyLab);
   strategyLabRef.current = strategyLab;
 
+  // Lab-only price feed: REST-poll symbols held in lab ledgers but NOT already
+  // covered by the main paperSymbolsKey feed. Ensures TP/SL, liquidation, and
+  // unrealized P&L work correctly for experiment positions.
+  const labSymbolsKey = strategyLab.labSymbols.sort().join(',');
+  React.useEffect(() => {
+    if (labSymbolsKey === '') return;
+    const labSyms = labSymbolsKey.split(',');
+    const fetchAndCheck = () => {
+      labSyms.forEach(sym => {
+        fetch(`https://fapi.binance.com/fapi/v1/ticker/price?symbol=${sym}`)
+          .then(r => r.json())
+          .then((d: { price: string }) => {
+            markPricesMapRef.current[sym] = parseFloat(d.price);
+            strategyLabRef.current.checkPrices(markPricesMapRef.current);
+          })
+          .catch(() => {});
+      });
+    };
+    fetchAndCheck();
+    const id = window.setInterval(fetchAndCheck, 5000);
+    return () => window.clearInterval(id);
+  }, [labSymbolsKey]);
+
   const handleTickerSelect = useCallback((symbol: string, force = false) => {
     if (!force && symbol === tickerRef.current) return;
     setCandles([]);
