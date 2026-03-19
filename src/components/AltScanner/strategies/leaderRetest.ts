@@ -163,8 +163,10 @@ function detectRetest(
       }
       if (!confirmed) continue;
 
-      // 3. Current close still at or above level (not blown through)
+      // 3. Current close still at or above level (not blown through),
+      //    and hasn't overshot too far above the level
       if (currentClose < level - tol) continue;
+      if (currentClose > level + atr * opts.maxOvershootAtr) continue;
 
       return { level, direction: 'long' };
     }
@@ -198,8 +200,10 @@ function detectRetest(
       }
       if (!confirmed) continue;
 
-      // 3. Current close still at or below level
+      // 3. Current close still at or below level,
+      //    and hasn't overshot too far below the level
       if (currentClose > level + tol) continue;
+      if (currentClose < level - atr * opts.maxOvershootAtr) continue;
 
       return { level, direction: 'short' };
     }

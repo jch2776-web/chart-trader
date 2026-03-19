@@ -565,8 +565,8 @@ function SettingsEditor({
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>최대</span>
               <input type="number" min={2} max={50} step={1}
-                value={draft.retestMaxBars ?? 12}
-                onChange={e => set('retestMaxBars', Math.max(2, Math.min(50, parseInt(e.target.value) || 12)))}
+                value={draft.retestMaxBars ?? 8}
+                onChange={e => set('retestMaxBars', Math.max(2, Math.min(50, parseInt(e.target.value) || 8)))}
                 style={{ ...s.numberInput, width: 52 }} />
               <span style={s.unit}>봉</span>
             </div>

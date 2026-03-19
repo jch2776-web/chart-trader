@@ -5,6 +5,8 @@ import type { PaperHistoryEntry, PaperPosition, PaperOrder, AltMeta } from '../.
 import { downloadExcel } from '../../utils/exportExcel';
 import type { ExcelCell } from '../../utils/exportExcel';
 import { fetchBinanceKlinesCached } from '../../lib/binanceKlineCache';
+import { StrategyLabPanel } from '../StrategyLab/StrategyLabPanel';
+import type { StrategyLab } from '../../hooks/useStrategyLab';
 
 const TAKER_FEE = 0.0004; // Binance Futures taker 0.04%
 
@@ -66,9 +68,10 @@ interface Props {
     qty: number,
     limitPrice: number,
   ) => Promise<void>;
+  strategyLab?: StrategyLab;
 }
 
-type Tab = 'positions' | 'orders' | 'paper-orders' | 'paper-history' | 'paper-asset' | 'paper-performance' | 'live-history' | 'live-asset' | 'live-performance';
+type Tab = 'positions' | 'orders' | 'paper-orders' | 'paper-history' | 'paper-asset' | 'paper-performance' | 'live-history' | 'live-asset' | 'live-performance' | 'strategy-lab';
 
 // ── TP/SL modal state ─────────────────────────────────────────────────────────
 interface TPSLModal {
@@ -2191,6 +2194,7 @@ export function BottomPanel({
   onPaperClosePosition, onPaperSetTPSL, onPaperResetBalance,
   onPaperCancelOrder, onPaperClearHistory, onLiveClearHistory, onOpenAltPosition, onOpenAltInMain, liveAltMetaMap,
   liveAltOrderTagMap, liveAltEntryOrderTagMap, liveHistory, liveBalanceHistory, onLiveCloseMarket, onLiveCloseCurrentPrice,
+  strategyLab,
 }: Props) {
   const [tab, setTab] = useState<Tab>('positions');
 
@@ -2236,7 +2240,7 @@ export function BottomPanel({
   const EXPAND_MS = 380;
 
   useEffect(() => {
-    const isPerf = tab === 'paper-performance' || tab === 'live-performance';
+    const isPerf = tab === 'paper-performance' || tab === 'live-performance' || tab === 'strategy-lab';
     if (isPerf) {
       if (expandState === 'collapsed') {
         expandHeightRef.current = height;
@@ -2663,6 +2667,12 @@ export function BottomPanel({
             <button style={{ ...s.tab, ...(tab === 'paper-performance' ? s.tabActive : {}) }} onClick={() => setTab('paper-performance')}>
               성과분석
             </button>
+            {strategyLab && (
+              <button style={{ ...s.tab, ...(tab === 'strategy-lab' ? s.tabActive : {}), color: tab === 'strategy-lab' ? '#c47cf7' : undefined }} onClick={() => setTab('strategy-lab')}>
+                전략 실험실
+                {strategyLab.activeCount > 0 && <span style={{ ...s.badge, background: 'rgba(155,89,182,0.18)', color: '#c47cf7' }}>{strategyLab.activeCount}</span>}
+              </button>
+            )}
             <div style={{ flex: 1 }} />
             <span style={{ fontSize: '0.78rem', color: '#848e9c', paddingRight: 8 }}>
               잔고: <span style={{ color: '#f0b90b', fontWeight: 700 }}>{(paperBalance ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT</span>
@@ -2705,6 +2715,12 @@ export function BottomPanel({
             <button style={{ ...s.tab, ...(tab === 'live-performance' ? s.tabActive : {}) }} onClick={() => setTab('live-performance')}>
               성과분석
             </button>
+            {strategyLab && (
+              <button style={{ ...s.tab, ...(tab === 'strategy-lab' ? s.tabActive : {}), color: tab === 'strategy-lab' ? '#c47cf7' : undefined }} onClick={() => setTab('strategy-lab')}>
+                전략 실험실
+                {strategyLab.activeCount > 0 && <span style={{ ...s.badge, background: 'rgba(155,89,182,0.18)', color: '#c47cf7' }}>{strategyLab.activeCount}</span>}
+              </button>
+            )}
           </>
         )}
         {isExpanded && (
@@ -2824,6 +2840,11 @@ export function BottomPanel({
           <PerformanceAnalysisSection rows={liveHistoryRows} mode="live" active={tab === 'live-performance'} />
         )}
 
+        {/* Strategy Lab tab */}
+        {tab === 'strategy-lab' && strategyLab && (
+          <StrategyLabPanel lab={strategyLab} />
+        )}
+
         {/* Positions tab */}
         {tab === 'positions' && (
           <>
@@ -2877,11 +2898,23 @@ export function BottomPanel({
                             </div>
                             <span style={{ fontSize: '0.6rem', background: 'rgba(240,185,11,0.15)', color: '#f0b90b', borderRadius: 3, padding: '1px 4px', fontWeight: 700, marginLeft: 2 }}>모의</span>
                             {altMeta && (
-                              <button
-                                style={{ fontSize: '0.58rem', background: 'rgba(59,139,235,0.18)', color: '#3b8beb', borderRadius: 3, padding: '1px 5px', fontWeight: 700, border: '1px solid rgba(59,139,235,0.4)', cursor: 'pointer', lineHeight: 1.3, marginLeft: 4 }}
-                                onClick={() => onOpenAltPosition?.(altMeta)}
-                                title="ALT추천 스냅샷 보기"
-                              >ALT추천</button>
+                              <>
+                                <button
+                                  style={{
+                                    fontSize: '0.58rem',
+                                    background: altMeta.strategyId === 'leader-retest' ? 'rgba(155,89,182,0.18)' : 'rgba(59,139,235,0.18)',
+                                    color: altMeta.strategyId === 'leader-retest' ? '#9b59b6' : '#3b8beb',
+                                    borderRadius: 3, padding: '1px 5px', fontWeight: 700,
+                                    border: `1px solid ${altMeta.strategyId === 'leader-retest' ? 'rgba(155,89,182,0.4)' : 'rgba(59,139,235,0.4)'}`,
+                                    cursor: 'pointer', lineHeight: 1.3, marginLeft: 4,
+                                  }}
+                                  onClick={() => onOpenAltPosition?.(altMeta)}
+                                  title="ALT추천 스냅샷 보기"
+                                >{altMeta.strategyId === 'leader-retest' ? 'ALT+리테스트' : 'ALT+돌파'}</button>
+                                {altMeta.candidateScore != null && (
+                                  <span style={{ fontSize: '0.58rem', background: 'rgba(240,185,11,0.1)', color: '#f0b90b', borderRadius: 3, padding: '1px 4px', fontWeight: 700, marginLeft: 2 }}>{altMeta.candidateScore}점</span>
+                                )}
+                              </>
                             )}
                           </div>
                         </td>
@@ -3015,11 +3048,23 @@ export function BottomPanel({
                               <span style={s.symbolFull}>{pos.symbol}</span>
                             </div>
                             {liveMeta && (
-                              <button
-                                style={{ fontSize: '0.58rem', background: 'rgba(59,139,235,0.18)', color: '#3b8beb', borderRadius: 3, padding: '1px 5px', fontWeight: 700, border: '1px solid rgba(59,139,235,0.4)', cursor: 'pointer', lineHeight: 1.3, marginLeft: 4 }}
-                                onClick={() => onOpenAltPosition?.(liveMeta)}
-                                title="ALT추천 스냅샷 보기"
-                              >ALT추천</button>
+                              <>
+                                <button
+                                  style={{
+                                    fontSize: '0.58rem',
+                                    background: liveMeta.strategyId === 'leader-retest' ? 'rgba(155,89,182,0.18)' : 'rgba(59,139,235,0.18)',
+                                    color: liveMeta.strategyId === 'leader-retest' ? '#9b59b6' : '#3b8beb',
+                                    borderRadius: 3, padding: '1px 5px', fontWeight: 700,
+                                    border: `1px solid ${liveMeta.strategyId === 'leader-retest' ? 'rgba(155,89,182,0.4)' : 'rgba(59,139,235,0.4)'}`,
+                                    cursor: 'pointer', lineHeight: 1.3, marginLeft: 4,
+                                  }}
+                                  onClick={() => onOpenAltPosition?.(liveMeta)}
+                                  title="ALT추천 스냅샷 보기"
+                                >{liveMeta.strategyId === 'leader-retest' ? 'ALT+리테스트' : 'ALT+돌파'}</button>
+                                {liveMeta.candidateScore != null && (
+                                  <span style={{ fontSize: '0.58rem', background: 'rgba(240,185,11,0.1)', color: '#f0b90b', borderRadius: 3, padding: '1px 4px', fontWeight: 700, marginLeft: 2 }}>{liveMeta.candidateScore}점</span>
+                                )}
+                              </>
                             )}
                           </div>
                         </td>

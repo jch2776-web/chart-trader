@@ -49,6 +49,7 @@ import { TimeStopDecisionModal } from './components/AltScanner/TimeStopDecisionM
 import type { AltMeta } from './types/paperTrading';
 import { useAltAutoTrade } from './hooks/useAltAutoTrade';
 import type { ScanLifecycleEvent } from './hooks/useAltAutoTrade';
+import { useStrategyLab } from './hooks/useStrategyLab';
 import { useSoundPlayer } from './hooks/useSoundPlayer';
 import { SoundSettingsModal } from './components/SoundSettingsModal';
 import { AutoTradeSettingsModal, DEFAULT_AUTO_TRADE_SETTINGS, DEFAULT_LIVE_AUTO_TRADE_SETTINGS } from './components/AutoTradeSettingsModal';
@@ -202,6 +203,18 @@ interface LiveHistoryEnrichTask {
   tracked: LiveTrackedAltPosition;
   exitTime: number;
   reasonSource: 'explicit' | 'order' | 'fallback';
+  attempts: number;
+  nextAt: number;
+  deadlineAt: number;
+  running?: boolean;
+}
+
+interface ManualFeeEnrichTask {
+  rowId: string;
+  symbol: string;
+  direction: 'long' | 'short';
+  entryTime: number | null;
+  exitTime: number;
   attempts: number;
   nextAt: number;
   deadlineAt: number;
@@ -580,6 +593,7 @@ function AppInner() {
     // when the user is in live mode (isPaperMode may be false).
     markPricesMapRef.current[tickerRef.current] = candle.close;
     paperTradingRef.current.checkPrices(markPricesMapRef.current);
+    strategyLabRef.current.checkPrices(markPricesMapRef.current);
 
     if (!tradeRef.current.active) return;
     if (drawingsRef.current.length === 0) return;
@@ -933,6 +947,7 @@ function AppInner() {
   const liveCloseReasonHintRef = useRef<Record<string, LiveCloseReason>>({});
   const liveEntryFillRetryRef = useRef<Record<string, LiveEntryFillRetryState>>({});
   const liveHistoryEnrichQueueRef = useRef<Record<string, LiveHistoryEnrichTask>>({});
+  const manualFeeQueueRef = useRef<Record<string, ManualFeeEnrichTask>>({});
   // Keys whose ALT position has been detected as closed and cleanup is pending (async state update).
   // Prevents a new manual position on the same symbol/direction from being "adopted" by a stale ALT meta.
   const liveAltPendingCleanupRef = useRef<Set<string>>(new Set());
@@ -1184,6 +1199,7 @@ function AppInner() {
           .then((d: { price: string }) => {
             markPricesMapRef.current[sym] = parseFloat(d.price);
             paperTradingRef.current.checkPrices(markPricesMapRef.current);
+            strategyLabRef.current.checkPrices(markPricesMapRef.current);
           })
           .catch(() => {});
       });
@@ -1258,6 +1274,10 @@ function AppInner() {
 
   // ── Ticker change ─────────────────────────────────────────────────────
   const { tickers, loading: tickersLoading } = useTickers();
+
+  const strategyLab = useStrategyLab(uk('paper-lab'), tickers.map(t => t.symbol));
+  const strategyLabRef = useRef(strategyLab);
+  strategyLabRef.current = strategyLab;
 
   const handleTickerSelect = useCallback((symbol: string, force = false) => {
     if (!force && symbol === tickerRef.current) return;
@@ -1797,22 +1817,12 @@ function AppInner() {
     } else if (event.type === 'scan_done') {
       const entries = scanConfirmedEntriesRef.current;
       scanConfirmedEntriesRef.current = [];  // reset for next scan
+      // entries > 0: 개별 announceAltEntry (모의 1603 / 실전 2295·2303)에서 주문 확정 후 발화.
+      // 여기서 "진입" 음성 중복 발화 + 실패 시에도 발화되는 오류를 방지하기 위해 안내하지 않음.
       if (entries.length === 0) {
         speakSound('스캔 후 진입 조건을 만족하는 코인이 없습니다', { lang: 'ko-KR', rate: 1.0, pitch: 1.0 });
-      } else {
-        const parts = entries.map(e => {
-          const coin = e.symbol.replace(/USDT$/i, '');
-          const side = e.direction === 'long' ? '롱' : '숏';
-          const lev  = e.leverage != null ? `${e.leverage}배 레버리지` : '';
-          const margin = e.sizeMode === 'margin' && e.marginUsdt != null
-            ? `${e.marginUsdt}달러 마진`
-            : e.sizeMode === 'risk' && e.riskPct != null
-              ? `자산의 ${e.riskPct}퍼센트 마진`
-              : '';
-          return [coin, side, lev, margin, '진입'].filter(Boolean).join(' ');
-        });
-        speakSound(parts.join(', '), { lang: 'ko-KR', rate: 1.0, pitch: 1.0 });
       }
+      // entries > 0 → 개별 진입 확정 음성(announceAltEntry)이 실제 주문 성공 후 각자 발화됨
     }
   }, [speakSound]);
 
@@ -2784,6 +2794,17 @@ function AppInner() {
         if (closeQty > 0) {
           await futuresCloseMarket(req.symbol, req.closeSide, closeQty, closePosSide);
           addLog('info', `[ALT실전] ${req.symbol} 타임스탑 청산 (${trigger === 'confirm' ? '사용자 확인' : '5분 자동'})`);
+          // Immediately cancel orphan TP/SL orders without waiting for position-disappearance monitor
+          const liveKey = req.liveMetaKey ?? `${req.symbol}_${req.direction}`;
+          const orphanEntry = liveAltOrderRegistryRef.current[liveKey];
+          if (orphanEntry) {
+            for (const ref of orphanEntry.orders) {
+              if (ref.side === orphanEntry.closeSide) {
+                futuresCancelOrder(ref.orderId, orphanEntry.symbol).catch(() => {});
+              }
+            }
+            futuresRemoveClientSL(orphanEntry.symbol, orphanEntry.positionSide);
+          }
         }
         success = true;
       } catch (e) {
@@ -2813,7 +2834,7 @@ function AppInner() {
         return next;
       });
     }
-  }, [addLog, futuresAllPositions, futuresCloseMarket]);
+  }, [addLog, futuresAllPositions, futuresCloseMarket, futuresCancelOrder, futuresRemoveClientSL]);
 
   const applyTightenAndExtend = useCallback(async (reqKey: string, extendBars: 1 | 2, applyTp: boolean) => {
     const req = timeStopRequestsRef.current[reqKey];
@@ -2823,8 +2844,9 @@ function AppInner() {
     }
     if (req.state !== 'pending') return;
     // Allow extending when eval is done, OR when eval has been loading >15s (scan hang / rate-limit)
+    // flipSuggested shows a warning in the UI but no longer hard-blocks extending.
     const evalStuck = req.eval.status === 'loading' && (Date.now() - req.requestedAt) > 15_000;
-    if ((!evalStuck && req.eval.status !== 'done') || req.eval.flipSuggested === true) {
+    if (!evalStuck && req.eval.status !== 'done') {
       setTimeStopRequests(prev => {
         const cur = prev[reqKey];
         if (!cur) return prev;
@@ -2832,7 +2854,7 @@ function AppInner() {
           ...prev,
           [reqKey]: {
             ...cur,
-            actionError: '연장 조건이 아직 충족되지 않았습니다. 재평가 결과를 확인해주세요.',
+            actionError: '재평가가 아직 완료되지 않았습니다. 잠시 후 다시 시도해주세요.',
           },
         };
       });
@@ -3292,6 +3314,62 @@ function AppInner() {
     }
   }, [futuresFetchUserTrades]);
 
+  /** Fetches Binance user trades and patches fees for manually-entered live positions. */
+  const enrichManualFee = useCallback(async (
+    rowId: string,
+    symbol: string,
+    direction: 'long' | 'short',
+    entryTime: number | null,
+    exitTime: number,
+  ) => {
+    const openSide  = direction === 'long' ? 'BUY'  : 'SELL';
+    const closeSide = direction === 'long' ? 'SELL' : 'BUY';
+    const startTime = Math.max(0, (entryTime ?? exitTime - 7 * 24 * 60 * 60 * 1000) - 60_000);
+    try {
+      const trades = await futuresFetchUserTrades(symbol, startTime, exitTime + 120_000, 1000);
+      const relevant = trades.filter(t => t.symbol === symbol && t.time >= startTime && t.time <= exitTime + 120_000);
+      const openRows  = relevant.filter(t => t.side === openSide);
+      const closeRows = relevant.filter(t => t.side === closeSide);
+      if (!openRows.length && !closeRows.length) return;
+      const nonUsdt = [...openRows, ...closeRows].some(t => (t.commissionAsset ?? '').toUpperCase() !== 'USDT');
+      if (nonUsdt) return;
+      const fees = parseFloat((
+        openRows.reduce((s, t) => s + t.commission, 0) +
+        closeRows.reduce((s, t) => s + t.commission, 0)
+      ).toFixed(8));
+      if (fees > 0) {
+        setLiveHistory(prev => prev.map(h => h.id === rowId ? { ...h, fees } : h));
+      }
+    } catch { /* keep null */ }
+  }, [futuresFetchUserTrades]);
+
+  React.useEffect(() => {
+    const id = window.setInterval(() => {
+      const queue = manualFeeQueueRef.current;
+      const now = Date.now();
+      for (const [rowId, task] of Object.entries(queue)) {
+        const row = liveHistoryRef.current.find(h => h.id === rowId);
+        if (!row || row.fees != null) { delete queue[rowId]; continue; }
+        if (now > task.deadlineAt || task.attempts >= 5) { delete queue[rowId]; continue; }
+        if (task.running || now < task.nextAt) continue;
+        task.running = true;
+        void enrichManualFee(task.rowId, task.symbol, task.direction, task.entryTime, task.exitTime)
+          .finally(() => {
+            const cur = manualFeeQueueRef.current[rowId];
+            if (!cur) return;
+            cur.running = false;
+            cur.attempts += 1;
+            cur.nextAt = Date.now() + 15_000;
+            const latest = liveHistoryRef.current.find(h => h.id === rowId);
+            if (!latest || latest.fees != null || Date.now() > cur.deadlineAt || cur.attempts >= 5) {
+              delete manualFeeQueueRef.current[rowId];
+            }
+          });
+      }
+    }, 5000);
+    return () => window.clearInterval(id);
+  }, [enrichManualFee]);
+
   React.useEffect(() => {
     const nextTracked = { ...liveTrackedRef.current };
     const appended: LiveTradeHistoryEntry[] = [];
@@ -3607,6 +3685,20 @@ function AppInner() {
 
     if (appended.length > 0) {
       setLiveHistory(prev => [...appended, ...prev].slice(0, 1000));
+      // Queue fee enrichment for manual rows (fees are unknown at detection time)
+      const now = Date.now();
+      for (const row of appended) {
+        manualFeeQueueRef.current[row.id] = {
+          rowId: row.id,
+          symbol: row.symbol,
+          direction: row.positionSide === 'LONG' ? 'long' : 'short',
+          entryTime: row.entryTime ?? null,
+          exitTime: row.exitTime,
+          attempts: 0,
+          nextAt: now + 3000,  // 3s initial delay to let trades settle on Binance
+          deadlineAt: row.exitTime + 20 * 60 * 1000,
+        };
+      }
     }
   }, [futuresAllPositions, liveAltMetaMap, liveCloseMetaSnapshotMap, binanceApiKey, binanceApiSecret]);
 
@@ -4287,6 +4379,7 @@ function AppInner() {
           liveBalanceHistory={liveBalanceHistory}
           onLiveCloseMarket={handleLiveCloseMarket}
           onLiveCloseCurrentPrice={handleLiveCloseCurrentPrice}
+          strategyLab={strategyLab}
         />
       )}
     </div>

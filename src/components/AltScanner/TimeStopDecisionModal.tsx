@@ -64,10 +64,10 @@ export function TimeStopDecisionModal({
   }, [req.key]);
 
   const remainMs = Math.max(0, req.deadlineAt - nowMs);
-  // canExtend: eval complete + no flip signal + still pending
-  // Also allow extending if eval has been loading for >15s (API rate-limit / scan hang guard)
+  // canExtend: eval complete (or stuck) + still pending
+  // flipSuggested shows a warning but does NOT hard-block extending — user decides.
   const evalStuck = req.eval.status === 'loading' && (nowMs - req.requestedAt) > 15_000;
-  const canExtend = (req.eval.status === 'done' || evalStuck) && req.eval.flipSuggested !== true && req.state === 'pending';
+  const canExtend = (req.eval.status === 'done' || evalStuck) && req.state === 'pending';
   const canUpdateSl = canExtend && req.eval.tightenOk === true;
   const proposedSl = req.eval.newSl;
   const proposedTp = req.eval.newTp;
@@ -83,9 +83,14 @@ export function TimeStopDecisionModal({
 
         <div style={S.section}>
           <div style={S.sectionTitle}>재평가</div>
-          <div style={S.bodyText}>
+          <div style={{ ...S.bodyText, ...(req.eval.flipSuggested ? { color: '#f0b90b' } : {}) }}>
             {req.eval.status === 'loading' ? '재평가 진행 중...' : req.eval.summaryText}
           </div>
+          {req.eval.flipSuggested && (
+            <div style={{ fontSize: '0.74rem', color: '#f59e42', marginTop: 4, lineHeight: 1.4 }}>
+              ⚠ 반대 방향 신호 — 연장 시 본인 판단으로 진행하세요.
+            </div>
+          )}
           {req.eval.candidateScore != null && (
             <div style={S.bodySub}>score: {req.eval.candidateScore}</div>
           )}
