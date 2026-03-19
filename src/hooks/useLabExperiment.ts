@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { usePaperTrading } from './usePaperTrading';
 import { runBreakoutScan } from '../components/AltScanner/breakoutScanner';
 import { createLeaderRetestScan } from '../components/AltScanner/strategies/leaderRetest';
-import type { RetestOptions } from '../components/AltScanner/strategies/leaderRetest';
 import type { ScanInterval, ScanCandidate } from '../components/AltScanner/breakoutScanner';
 import { getBinanceGovernorSnapshot } from '../lib/binanceRequestGovernor';
 import type { AltMeta } from '../types/paperTrading';
@@ -16,7 +15,6 @@ export interface LabExperimentConfig {
   name: string;
   enabled: boolean;
   strategyId: 'breakout' | 'leader-retest';
-  retestOptions?: RetestOptions;
   scanIntervals: ScanInterval[];
   direction: 'long' | 'short' | 'both';
   minScore: number;
@@ -27,7 +25,35 @@ export interface LabExperimentConfig {
   /** 0 = unlimited */
   maxPositions: number;
   initialBalance: number;
+
+  // ── Leader-retest specific parameters ─────────────────────────────────
+  retestMinBars?: number;
+  retestMaxBars?: number;
+  retestToleranceAtr?: number;
+  retestMaxOvershootAtr?: number;
+  /** Direction override for leader-retest scan (default 'long') */
+  retestAutoDirection?: 'long' | 'both';
+
+  // ── No-trade gates ─────────────────────────────────────────────────────
+  /**
+   * Require 4H EMA20 > EMA50 before allowing LONG entries.
+   * Applied for leader-retest (passed to scan fn).
+   * Not enforced for breakout (breakout scan doesn't check 4H trend).
+   */
+  require4hTrend?: boolean;
+  /**
+   * After any losing trade, skip entries for this many cadence cycles.
+   * e.g. cooldownBarsAfterLoss=2 + cadence=60min → 2h cooldown.
+   */
+  cooldownBarsAfterLoss?: number;
+  /**
+   * Maximum number of open positions in the same direction (LONG or SHORT)
+   * at any one entry decision. 0 = no limit.
+   */
+  maxConcurrentCorrelatedPositions?: number;
 }
+
+// ── Helpers ────────────────────────────────────────────────────────────────
 
 function intervalToMs(iv: ScanInterval): number {
   const m = iv === '15m' ? 15 : iv === '1h' ? 60 : iv === '4h' ? 240 : 1440;
@@ -49,6 +75,37 @@ function getNextBoundary(ts: number, cadenceMs: number): number {
 function getDueIntervals(boundaryTime: number, intervals: ScanInterval[]): ScanInterval[] {
   return intervals.filter(iv => boundaryTime % intervalToMs(iv) === 0);
 }
+
+/** Compute stats from history entries for the comparison table. */
+function computeExtendedStats(history: ReturnType<typeof usePaperTrading>['history']) {
+  if (history.length === 0) {
+    return { tpRate: 0, slRate: 0, expiredRate: 0, avgHoldMs: 0, maxConsecLoss: 0 };
+  }
+  let tpCount = 0, slCount = 0, expiredCount = 0, totalHoldMs = 0;
+  let curStreak = 0, maxConsecLoss = 0;
+  for (const h of history) {
+    if (h.closeReason === 'tp') tpCount++;
+    else if (h.closeReason === 'sl' || h.closeReason === 'liq') slCount++;
+    else if (h.closeReason === 'expired') expiredCount++;
+    totalHoldMs += h.exitTime - h.entryTime;
+    if (h.pnl < 0) {
+      curStreak++;
+      if (curStreak > maxConsecLoss) maxConsecLoss = curStreak;
+    } else {
+      curStreak = 0;
+    }
+  }
+  const n = history.length;
+  return {
+    tpRate: (tpCount / n) * 100,
+    slRate: (slCount / n) * 100,
+    expiredRate: (expiredCount / n) * 100,
+    avgHoldMs: totalHoldMs / n,
+    maxConsecLoss,
+  };
+}
+
+// ── Hook ──────────────────────────────────────────────────────────────────
 
 export function useLabExperiment(
   slotIndex: number,
@@ -90,6 +147,22 @@ export function useLabExperiment(
       return;
     }
 
+    // ── Gate 1: cooldownBarsAfterLoss ──────────────────────────────────────
+    if (cfg.cooldownBarsAfterLoss && cfg.cooldownBarsAfterLoss > 0) {
+      const recentLoss = [...paperRef.current.history]
+        .sort((a, b) => b.exitTime - a.exitTime)
+        .find(h => h.pnl < 0);
+      if (recentLoss) {
+        const cadenceMs = normalizeCadence(cfg.cadenceMinutes) * 60_000;
+        const cooldownUntil = recentLoss.exitTime + cfg.cooldownBarsAfterLoss * cadenceMs;
+        if (Date.now() < cooldownUntil) {
+          const remMin = Math.ceil((cooldownUntil - Date.now()) / 60_000);
+          addLog(`⏳ 손실 후 쿨다운 중 (${remMin}분 남음) — 스캔 건너뜀`);
+          return;
+        }
+      }
+    }
+
     scanningRef.current = true;
     setScanning(true);
     setLastRunTime(Date.now());
@@ -106,9 +179,21 @@ export function useLabExperiment(
 
     addLog(`🚀 스캔 시작 (${dueIntervals.join(',')}) ${syms.length}개 심볼`);
 
+    // Build scan function with strategy-specific params injected
     const activeScanFn = cfg.strategyId === 'leader-retest'
-      ? createLeaderRetestScan(cfg.retestOptions)
+      ? createLeaderRetestScan({
+          minBars: cfg.retestMinBars,
+          maxBars: cfg.retestMaxBars,
+          toleranceAtr: cfg.retestToleranceAtr,
+          maxOvershootAtr: cfg.retestMaxOvershootAtr,
+          // Gate: require4hTrend is passed to the scan fn (leader-retest handles it natively)
+          require4hTrend: cfg.require4hTrend,
+        })
       : runBreakoutScan;
+
+    const scanDirection = cfg.strategyId === 'leader-retest'
+      ? (cfg.retestAutoDirection ?? cfg.direction as 'long' | 'both')
+      : cfg.direction;
 
     const entered = new Set<string>();
 
@@ -118,7 +203,7 @@ export function useLabExperiment(
         await activeScanFn(
           syms,
           interval,
-          cfg.direction,
+          scanDirection,
           () => {},
           (c) => { candidates.push(c); },
           undefined,
@@ -147,15 +232,27 @@ export function useLabExperiment(
         const curPositions = paperRef.current.positions;
         if (cfg.maxPositions > 0 && curPositions.length >= cfg.maxPositions) break;
         // Skip if already holding same symbol+direction
-        if (curPositions.some(p => p.symbol === c.symbol && p.positionSide === c.direction.toUpperCase() as 'LONG' | 'SHORT')) continue;
+        if (curPositions.some(p =>
+          p.symbol === c.symbol &&
+          p.positionSide === (c.direction === 'long' ? 'LONG' : 'SHORT'),
+        )) continue;
 
-        // Risk-based position sizing: risk riskPct% of balance at SL
+        // ── Gate 2: maxConcurrentCorrelatedPositions ───────────────────────
+        if (cfg.maxConcurrentCorrelatedPositions && cfg.maxConcurrentCorrelatedPositions > 0) {
+          const sideStr = c.direction === 'long' ? 'LONG' : 'SHORT';
+          const sameDir = curPositions.filter(p => p.positionSide === sideStr).length;
+          if (sameDir >= cfg.maxConcurrentCorrelatedPositions) {
+            addLog(`🚫 [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — 동방향 포지션 한도(${cfg.maxConcurrentCorrelatedPositions}) 도달`);
+            continue;
+          }
+        }
+
+        // Risk-based position sizing
         const balance = paperRef.current.balance;
         const riskAmt = balance * (cfg.riskPct / 100);
         const riskPerUnit = Math.abs(c.entryPrice - c.slPrice);
         if (riskPerUnit <= 0) continue;
         let qty = riskAmt / riskPerUnit;
-        // Cap so margin (qty * price / leverage) doesn't exceed available balance
         const maxQtyByBalance = (balance * cfg.leverage) / c.entryPrice;
         qty = Math.min(qty, maxQtyByBalance * 0.95);
         qty = parseFloat(qty.toFixed(6));
@@ -231,6 +328,7 @@ export function useLabExperiment(
   const pnlPct = paper.initialBalance > 0
     ? ((paper.balance - paper.initialBalance) / paper.initialBalance) * 100
     : 0;
+  const extended = computeExtendedStats(history);
 
   return {
     slotIndex,
@@ -249,6 +347,7 @@ export function useLabExperiment(
       winRate,
       totalPnl,
       pnlPct,
+      ...extended,
     },
   };
 }
