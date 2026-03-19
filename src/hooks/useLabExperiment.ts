@@ -211,7 +211,10 @@ export function useLabExperiment(
             concurrency: LAB_CONCURRENCY,
             delayMs: LAB_DELAY_MS,
             scanTag: `lab:${cfg.id}:${interval}`,
-            busyPolicy: 'queue',
+            // 'skip' prevents lab scans from queuing up and blocking the main
+            // auto-trade scheduled scan (which uses busyPolicy:'skip' and gets
+            // dropped when the governor is occupied).
+            busyPolicy: 'skip',
           },
         );
       } catch (e) {

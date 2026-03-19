@@ -595,6 +595,11 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
     setState(prev => ({ ...prev, history: [] }));
   }, []);
 
+  /** Full reset — clears positions, orders, history and sets a new initial balance. */
+  const reset = useCallback((initialBalance: number) => {
+    setState({ balance: initialBalance, initialBalance, positions: [], orders: [], history: [] });
+  }, []);
+
   return {
     balance: state.balance,
     initialBalance: state.initialBalance,
@@ -614,5 +619,6 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
     toFuturesPositions,
     resetBalance,
     clearHistory,
+    reset,
   };
 }
