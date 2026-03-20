@@ -87,13 +87,14 @@ export function useStrategyLab(storageKeyPrefix: string, symbols: string[]) {
     });
   }, [storageKeyPrefix]);
 
-  // Forward mark prices to all active experiment paper engines
+  // Forward mark prices to all active experiment paper engines + drift/time-stop refs
   const checkPrices = useCallback((markPrices: Record<string, number>) => {
-    slot0.paper.checkPrices(markPrices);
-    slot1.paper.checkPrices(markPrices);
-    slot2.paper.checkPrices(markPrices);
-    slot3.paper.checkPrices(markPrices);
-  }, [slot0.paper, slot1.paper, slot2.paper, slot3.paper]);
+    slot0.paper.checkPrices(markPrices); slot0.setMarkPrices(markPrices);
+    slot1.paper.checkPrices(markPrices); slot1.setMarkPrices(markPrices);
+    slot2.paper.checkPrices(markPrices); slot2.setMarkPrices(markPrices);
+    slot3.paper.checkPrices(markPrices); slot3.setMarkPrices(markPrices);
+  }, [slot0.paper, slot0.setMarkPrices, slot1.paper, slot1.setMarkPrices,
+      slot2.paper, slot2.setMarkPrices, slot3.paper, slot3.setMarkPrices]);
 
   const canAdd = configs.some(c => c === null);
   const activeCount = configs.filter(Boolean).length;

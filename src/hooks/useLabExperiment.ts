@@ -9,6 +9,7 @@ import type { AltMeta } from '../types/paperTrading';
 const LAB_CONCURRENCY = 3;
 const LAB_DELAY_MS = 300;
 const SCHEDULE_CHECK_INTERVAL_MS = 5_000;
+const TIMESTOP_CHECK_INTERVAL_MS = 30_000;
 
 export interface LabExperimentConfig {
   id: string;
@@ -26,31 +27,46 @@ export interface LabExperimentConfig {
   maxPositions: number;
   initialBalance: number;
 
-  // ── Leader-retest specific parameters ─────────────────────────────────
+  // ── Leader-retest specific ──────────────────────────────────────────────
   retestMinBars?: number;
   retestMaxBars?: number;
   retestToleranceAtr?: number;
   retestMaxOvershootAtr?: number;
-  /** Direction override for leader-retest scan (default 'long') */
   retestAutoDirection?: 'long' | 'both';
 
-  // ── No-trade gates ─────────────────────────────────────────────────────
+  // ── Breakout-specific experiment filters ────────────────────────────────
+  /** Direction override for breakout scan (independent from general direction) */
+  breakoutDirection?: 'long' | 'short' | 'both';
   /**
-   * Require 4H EMA20 > EMA50 before allowing LONG entries.
-   * Applied for leader-retest (passed to scan fn).
-   * Not enforced for breakout (breakout scan doesn't check 4H trend).
+   * Max seconds since the cadence boundary before discarding stale signal processing.
+   * If the scan takes longer than this, remaining entry decisions are skipped.
+   * null / 0 = disabled.
    */
+  maxSignalAgeSec?: number | null;
+  /**
+   * Max breakout extension = |entryPrice − slPrice| / entryPrice × 100.
+   * Filters out late/over-extended entries. null / 0 = disabled.
+   */
+  maxBreakoutExtensionPct?: number | null;
+  /**
+   * Max allowed drift between the scan's entryPrice and the current mark price.
+   * Prevents chasing when price has already run. null / 0 = disabled.
+   */
+  maxEntryDriftPct?: number | null;
+
+  // ── No-trade gates ──────────────────────────────────────────────────────
   require4hTrend?: boolean;
-  /**
-   * After any losing trade, skip entries for this many cadence cycles.
-   * e.g. cooldownBarsAfterLoss=2 + cadence=60min → 2h cooldown.
-   */
   cooldownBarsAfterLoss?: number;
-  /**
-   * Maximum number of open positions in the same direction (LONG or SHORT)
-   * at any one entry decision. 0 = no limit.
-   */
   maxConcurrentCorrelatedPositions?: number;
+
+  // ── Lab-only time-stop ──────────────────────────────────────────────────
+  /** Enable lab-only time-stop (never affects main paper/live ledger) */
+  labTimeStopEnabled?: boolean;
+  /**
+   * Close the position after this many scan-interval bars if TP/SL not hit.
+   * Uses the position's altMeta.scanInterval as the bar duration reference.
+   */
+  labTimeStopBars?: number;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -76,7 +92,6 @@ function getDueIntervals(boundaryTime: number, intervals: ScanInterval[]): ScanI
   return intervals.filter(iv => boundaryTime % intervalToMs(iv) === 0);
 }
 
-/** Compute stats from history entries for the comparison table. */
 function computeExtendedStats(history: ReturnType<typeof usePaperTrading>['history']) {
   if (history.length === 0) {
     return { tpRate: 0, slRate: 0, expiredRate: 0, avgHoldMs: 0, maxConsecLoss: 0 };
@@ -118,19 +133,77 @@ export function useLabExperiment(
   const [lastRunTime, setLastRunTime] = useState<number | null>(null);
   const [nextRunTime, setNextRunTime] = useState<number | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
+  const [markPricesState, setMarkPricesState] = useState<Record<string, number>>({});
 
   const scanningRef = useRef(false);
   const lastRunSlotRef = useRef(-1);
   const configRef = useRef(config);
   const symbolsRef = useRef(symbols);
   const paperRef = useRef(paper);
+  const markPricesRef = useRef<Record<string, number>>({});
 
   configRef.current = config;
   symbolsRef.current = symbols;
   paperRef.current = paper;
 
   const addLog = useCallback((msg: string) => {
-    setLogs(prev => [`${new Date().toLocaleTimeString('ko-KR')} ${msg}`, ...prev].slice(0, 200));
+    setLogs(prev => [`${new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })} ${msg}`, ...prev].slice(0, 200));
+  }, []);
+
+  // Clear logs when a new experiment is created (config transitions from null → non-null)
+  const prevConfigNullRef = useRef<boolean>(config === null);
+  useEffect(() => {
+    const wasNull = prevConfigNullRef.current;
+    const isNull = config === null;
+    if (wasNull && !isNull) setLogs([]);
+    prevConfigNullRef.current = isNull;
+  }, [config]);
+
+  // Log entry events when new positions open (all new ones per render cycle)
+  // Initialize with [] so positions already loaded from storage on mount are also logged
+  const prevPositionsRef = useRef<typeof paper.positions>([]);
+  useEffect(() => {
+    const prev = prevPositionsRef.current;
+    const curr = paper.positions;
+    const newPositions = curr.filter(p => !prev.some(pp => pp.id === p.id));
+    for (const newPos of newPositions) {
+      const t = new Date(newPos.entryTime).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+      addLog(`➤ 진입 ${newPos.symbol} / ${newPos.positionSide} / ${newPos.leverage}x / ${t}`);
+    }
+    prevPositionsRef.current = curr;
+  }, [paper.positions, addLog]);
+
+  // Log exit events when trades close (all new ones per render cycle)
+  const prevHistoryRef = useRef(paper.history);
+  useEffect(() => {
+    const prev = prevHistoryRef.current;
+    const curr = paper.history;
+    if (curr.length > prev.length) {
+      const newEntries = curr.filter(h => !prev.some(ph => ph.id === h.id));
+      const reasonMap: Record<string, string> = { tp: 'TP', sl: 'SL', liq: '강청', expired: '타임스탑', manual: '수동' };
+      for (const h of newEntries) {
+        const entryT = new Date(h.entryTime).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+        const exitT = new Date(h.exitTime).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+        const pnlStr = (h.pnl >= 0 ? '+' : '') + h.pnl.toFixed(2);
+        addLog(`◀ 종료 ${h.symbol} / ${h.positionSide} / ${h.leverage}x / ${entryT}→${exitT} / PnL ${pnlStr} (${reasonMap[h.closeReason] ?? h.closeReason})`);
+      }
+    }
+    prevHistoryRef.current = curr;
+  }, [paper.history, addLog]);
+
+  /** Keeps mark prices available for drift filter and time-stop checks. */
+  const setMarkPrices = useCallback((prices: Record<string, number>) => {
+    markPricesRef.current = prices;
+  }, []);
+
+  // Refresh displayed mark prices every 3s so position cards show live unrealized PnL
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (Object.keys(markPricesRef.current).length > 0) {
+        setMarkPricesState({ ...markPricesRef.current });
+      }
+    }, 3000);
+    return () => clearInterval(timer);
   }, []);
 
   const runScan = useCallback(async () => {
@@ -143,7 +216,6 @@ export function useLabExperiment(
     if (governor.cooldownUntil > Date.now()) return;
 
     if (cfg.maxPositions > 0 && paperRef.current.positions.length >= cfg.maxPositions) {
-      addLog(`⛔ 최대 포지션 수(${cfg.maxPositions}) 도달 — 스캔 건너뜀`);
       return;
     }
 
@@ -156,8 +228,6 @@ export function useLabExperiment(
         const cadenceMs = normalizeCadence(cfg.cadenceMinutes) * 60_000;
         const cooldownUntil = recentLoss.exitTime + cfg.cooldownBarsAfterLoss * cadenceMs;
         if (Date.now() < cooldownUntil) {
-          const remMin = Math.ceil((cooldownUntil - Date.now()) / 60_000);
-          addLog(`⏳ 손실 후 쿨다운 중 (${remMin}분 남음) — 스캔 건너뜀`);
           return;
         }
       }
@@ -179,25 +249,32 @@ export function useLabExperiment(
 
     addLog(`🚀 스캔 시작 (${dueIntervals.join(',')}) ${syms.length}개 심볼`);
 
-    // Build scan function with strategy-specific params injected
     const activeScanFn = cfg.strategyId === 'leader-retest'
       ? createLeaderRetestScan({
           minBars: cfg.retestMinBars,
           maxBars: cfg.retestMaxBars,
           toleranceAtr: cfg.retestToleranceAtr,
           maxOvershootAtr: cfg.retestMaxOvershootAtr,
-          // Gate: require4hTrend is passed to the scan fn (leader-retest handles it natively)
           require4hTrend: cfg.require4hTrend,
         })
       : runBreakoutScan;
 
+    // Breakout uses its own direction override; retest uses retestAutoDirection
     const scanDirection = cfg.strategyId === 'leader-retest'
       ? (cfg.retestAutoDirection ?? cfg.direction as 'long' | 'both')
-      : cfg.direction;
+      : (cfg.breakoutDirection ?? cfg.direction);
 
     const entered = new Set<string>();
 
     for (const interval of dueIntervals) {
+      // ── Breakout: max signal age guard ────────────────────────────────────
+      if (cfg.strategyId === 'breakout' && cfg.maxSignalAgeSec != null && cfg.maxSignalAgeSec > 0) {
+        const elapsedSec = (Date.now() - boundaryTime) / 1000;
+        if (elapsedSec > cfg.maxSignalAgeSec) {
+          continue;
+        }
+      }
+
       const candidates: ScanCandidate[] = [];
       try {
         await activeScanFn(
@@ -211,14 +288,11 @@ export function useLabExperiment(
             concurrency: LAB_CONCURRENCY,
             delayMs: LAB_DELAY_MS,
             scanTag: `lab:${cfg.id}:${interval}`,
-            // 'skip' prevents lab scans from queuing up and blocking the main
-            // auto-trade scheduled scan (which uses busyPolicy:'skip' and gets
-            // dropped when the governor is occupied).
             busyPolicy: 'skip',
           },
         );
       } catch (e) {
-        addLog(`[${interval}] 오류: ${e instanceof Error ? e.message : String(e)}`);
+        addLog(`⚠ 스캔 오류 [${interval}]: ${e instanceof Error ? e.message : String(e)}`);
         continue;
       }
 
@@ -226,15 +300,12 @@ export function useLabExperiment(
         .filter(c => c.score >= cfg.minScore)
         .sort((a, b) => b.score - a.score);
 
-      addLog(`[${interval}] ${candidates.length}개 스캔 · ${qualified.length}개 ${cfg.minScore}점+`);
-
       for (const c of qualified) {
         const key = `${c.symbol}_${c.direction}`;
         if (entered.has(key)) continue;
 
         const curPositions = paperRef.current.positions;
         if (cfg.maxPositions > 0 && curPositions.length >= cfg.maxPositions) break;
-        // Skip if already holding same symbol+direction
         if (curPositions.some(p =>
           p.symbol === c.symbol &&
           p.positionSide === (c.direction === 'long' ? 'LONG' : 'SHORT'),
@@ -245,8 +316,26 @@ export function useLabExperiment(
           const sideStr = c.direction === 'long' ? 'LONG' : 'SHORT';
           const sameDir = curPositions.filter(p => p.positionSide === sideStr).length;
           if (sameDir >= cfg.maxConcurrentCorrelatedPositions) {
-            addLog(`🚫 [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — 동방향 포지션 한도(${cfg.maxConcurrentCorrelatedPositions}) 도달`);
             continue;
+          }
+        }
+
+        // ── Breakout-specific candidate filters ───────────────────────────
+        if (cfg.strategyId === 'breakout') {
+          if (cfg.maxBreakoutExtensionPct != null && cfg.maxBreakoutExtensionPct > 0) {
+            const extPct = Math.abs(c.entryPrice - c.slPrice) / c.entryPrice * 100;
+            if (extPct > cfg.maxBreakoutExtensionPct) {
+              continue;
+            }
+          }
+          if (cfg.maxEntryDriftPct != null && cfg.maxEntryDriftPct > 0) {
+            const mark = markPricesRef.current[c.symbol];
+            if (mark && mark > 0) {
+              const driftPct = Math.abs(mark - c.entryPrice) / c.entryPrice * 100;
+              if (driftPct > cfg.maxEntryDriftPct) {
+                continue;
+              }
+            }
           }
         }
 
@@ -254,7 +343,9 @@ export function useLabExperiment(
         const balance = paperRef.current.balance;
         const riskAmt = balance * (cfg.riskPct / 100);
         const riskPerUnit = Math.abs(c.entryPrice - c.slPrice);
-        if (riskPerUnit <= 0) continue;
+        if (riskPerUnit <= 0) {
+          continue;
+        }
         let qty = riskAmt / riskPerUnit;
         const maxQtyByBalance = (balance * cfg.leverage) / c.entryPrice;
         qty = Math.min(qty, maxQtyByBalance * 0.95);
@@ -285,11 +376,8 @@ export function useLabExperiment(
         );
 
         entered.add(key);
-        addLog(`✅ [${interval}] ${c.symbol} ${c.direction.toUpperCase()} 점수${c.score} qty${qty.toFixed(4)}`);
       }
     }
-
-    addLog(`🏁 스캔 완료`);
     scanningRef.current = false;
     setScanning(false);
   }, [addLog]);
@@ -297,7 +385,7 @@ export function useLabExperiment(
   const runScanRef = useRef(runScan);
   runScanRef.current = runScan;
 
-  // Cadence scheduler
+  // ── Cadence scheduler ─────────────────────────────────────────────────────
   useEffect(() => {
     if (!config?.enabled) {
       setNextRunTime(null);
@@ -316,20 +404,63 @@ export function useLabExperiment(
       setNextRunTime(getNextBoundary(now, cMs));
       if (slot !== lastRunSlotRef.current) {
         lastRunSlotRef.current = slot;
-        runScanRef.current();
+        // Stagger scans by slotIndex * 12s to avoid all experiments hitting the Binance governor simultaneously
+        const staggerMs = slotIndex * 12_000;
+        if (staggerMs > 0) {
+          setTimeout(() => runScanRef.current(), staggerMs);
+        } else {
+          runScanRef.current();
+        }
       }
     }, SCHEDULE_CHECK_INTERVAL_MS);
 
     return () => clearInterval(timer);
   }, [config?.enabled, config?.cadenceMinutes]);
 
-  // Computed stats
+  // ── Lab-only time-stop ────────────────────────────────────────────────────
+  // Runs on a 30s polling loop; completely isolated from main paper/live ledger.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const cfg = configRef.current;
+      if (!cfg?.labTimeStopEnabled || !cfg.labTimeStopBars || cfg.labTimeStopBars <= 0) return;
+      const positions = paperRef.current.positions;
+      const closedThisTick = new Set<string>();
+      for (const pos of positions) {
+        if (closedThisTick.has(pos.id) || !pos.altMeta) continue;
+        const scanIv = (pos.altMeta.scanInterval ?? cfg.scanIntervals[0]) as ScanInterval;
+        const maxHoldMs = cfg.labTimeStopBars * intervalToMs(scanIv);
+        if (Date.now() - pos.entryTime < maxHoldMs) continue;
+        const mark = markPricesRef.current[pos.symbol];
+        if (!mark || mark <= 0) continue;
+        paperRef.current.closePosition(pos.id, mark, 'expired');
+        closedThisTick.add(pos.id);
+      }
+    }, TIMESTOP_CHECK_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, []);
+
+  // ── Computed stats ────────────────────────────────────────────────────────
   const history = paper.history;
   const wins = history.filter(h => h.pnl > 0).length;
   const winRate = history.length > 0 ? (wins / history.length) * 100 : 0;
   const totalPnl = history.reduce((sum, h) => sum + h.pnl, 0);
+
+  // Unrealized PnL from open positions using latest mark prices (exit fee projected)
+  const FEE_RATE = 0.0004;
+  const unrealizedPnl = paper.positions.reduce((sum, pos) => {
+    const mark = markPricesState[pos.symbol] ?? 0;
+    if (!mark) return sum;
+    const qty = Math.abs(pos.positionAmt);
+    const rawPnl = (pos.positionSide === 'LONG' ? mark - pos.entryPrice : pos.entryPrice - mark) * qty;
+    const projectedExitFee = mark * qty * FEE_RATE;
+    return sum + rawPnl - projectedExitFee;
+  }, 0);
+
+  // Total equity = available cash + locked margins + unrealized PnL
+  const openMarginSum = paper.positions.reduce((sum, pos) => sum + pos.isolatedMargin, 0);
+  const totalEquity = paper.balance + openMarginSum + unrealizedPnl;
   const pnlPct = paper.initialBalance > 0
-    ? ((paper.balance - paper.initialBalance) / paper.initialBalance) * 100
+    ? ((totalEquity - paper.initialBalance) / paper.initialBalance) * 100
     : 0;
   const extended = computeExtendedStats(history);
 
@@ -341,14 +472,18 @@ export function useLabExperiment(
     lastRunTime,
     nextRunTime,
     logs,
+    setMarkPrices,
+    markPrices: markPricesState,
     stats: {
-      balance: paper.balance,
+      balance: totalEquity,
+      availableBalance: paper.balance,
       initialBalance: paper.initialBalance,
       positionCount: paper.positions.length,
       historyCount: history.length,
       winCount: wins,
       winRate,
       totalPnl,
+      unrealizedPnl,
       pnlPct,
       ...extended,
     },

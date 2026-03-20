@@ -2668,7 +2668,7 @@ export function BottomPanel({
               성과분석
             </button>
             {strategyLab && (
-              <button style={{ ...s.tab, ...(tab === 'strategy-lab' ? s.tabActive : {}), color: tab === 'strategy-lab' ? '#c47cf7' : undefined }} onClick={() => setTab('strategy-lab')}>
+              <button style={{ ...s.tab, ...(tab === 'strategy-lab' ? s.tabActive : {}) }} onClick={() => setTab('strategy-lab')}>
                 전략 실험실
                 {strategyLab.activeCount > 0 && <span style={{ ...s.badge, background: 'rgba(155,89,182,0.18)', color: '#c47cf7' }}>{strategyLab.activeCount}</span>}
               </button>
@@ -2716,7 +2716,7 @@ export function BottomPanel({
               성과분석
             </button>
             {strategyLab && (
-              <button style={{ ...s.tab, ...(tab === 'strategy-lab' ? s.tabActive : {}), color: tab === 'strategy-lab' ? '#c47cf7' : undefined }} onClick={() => setTab('strategy-lab')}>
+              <button style={{ ...s.tab, ...(tab === 'strategy-lab' ? s.tabActive : {}) }} onClick={() => setTab('strategy-lab')}>
                 전략 실험실
                 {strategyLab.activeCount > 0 && <span style={{ ...s.badge, background: 'rgba(155,89,182,0.18)', color: '#c47cf7' }}>{strategyLab.activeCount}</span>}
               </button>
