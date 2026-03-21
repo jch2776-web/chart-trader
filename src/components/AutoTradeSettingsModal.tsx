@@ -121,7 +121,7 @@ export interface AutoTradeSettings {
   // Candidate score threshold for auto-entry (default 90; lower = more candidates qualify)
   minCandidateScore?: number;
   // Strategy selection (default 'breakout' — preserves existing behavior)
-  strategyId?: 'breakout' | 'leader-retest';
+  strategyId?: 'breakout' | 'leader-retest' | 'fvg-poc-ema72';
   // Leader-retest specific parameters (only used when strategyId === 'leader-retest')
   retestMinBars?: number;            // min bars since breakout (default 1)
   retestMaxBars?: number;            // max bars since breakout (default 8)
@@ -129,6 +129,17 @@ export interface AutoTradeSettings {
   retestMaxOvershootAtr?: number;    // max allowed overshoot beyond level in ATR multiples (default 1.0)
   retestAutoDirection?: 'long' | 'both'; // scan direction for unattended auto-trade (default 'long')
   retestRequire4hTrend?: boolean;    // require 4H EMA20 > EMA50 for LONG entry (default true)
+  // FVG POC + EMA72 specific (only used when strategyId === 'fvg-poc-ema72')
+  fvgPocLookbackBars?: number;
+  fvgPocBins?: number;
+  fvgEmaPeriod?: number;
+  fvgUniverseTopN?: number;
+  fvgAutoDirection?: 'long' | 'short' | 'both';
+  // Risk gates (lab-compatible)
+  timeStopBars?: number;             // N bars from entry → market close if TP/SL not hit (0 = use signal TTL, default 4)
+  cooldownBarsAfterLoss?: number;    // skip N bars of same TF after a losing trade (0 = disabled, default 0)
+  maxConcurrentCorrelated?: number;  // max same-direction open positions (0 = unlimited, default 0)
+  maxTotalPositions?: number;        // max total open positions (0 = unlimited, default 0)
 }
 
 const CADENCE_PRESETS = [15, 30, 60, 120, 240] as const;
@@ -173,6 +184,10 @@ export const DEFAULT_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
   maxSignalAgeSec: 120,
   maxEntryDriftPct: 1.0,
   maxBreakoutExtensionPct: 0.6,
+  timeStopBars: 4,
+  cooldownBarsAfterLoss: 0,
+  maxConcurrentCorrelated: 0,
+  maxTotalPositions: 0,
 };
 
 export const DEFAULT_LIVE_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
@@ -195,6 +210,10 @@ export const DEFAULT_LIVE_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
   maxSignalAgeSec: 120,
   maxEntryDriftPct: 1.0,
   maxBreakoutExtensionPct: 0.6,
+  timeStopBars: 4,
+  cooldownBarsAfterLoss: 0,
+  maxConcurrentCorrelated: 0,
+  maxTotalPositions: 0,
 };
 
 interface Props {
@@ -218,6 +237,7 @@ function SettingsEditor({
   const voiceAlertEnabled = normalizeVoiceAlertEnabled(draft.voiceAlertEnabled);
   const minTfMinutes = Math.min(...draft.scanIntervals.map(tfToMinutes));
   const cadenceFasterThanMinTf = cadence < minTfMinutes;
+  const isLeaderRetest = (draft.strategyId ?? 'breakout') === 'leader-retest';
   return (
     <>
       {/* Leverage */}
@@ -391,9 +411,16 @@ function SettingsEditor({
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
 
           {/* ① Signal age */}
-          <div style={{ background: 'rgba(14,203,129,0.04)', border: '1px solid rgba(14,203,129,0.12)', borderRadius: 6, padding: '8px 10px' }}>
+          <div style={{ background: 'rgba(14,203,129,0.04)', border: '1px solid rgba(14,203,129,0.12)', borderRadius: 6, padding: '8px 10px', opacity: isLeaderRetest ? 0.38 : 1 }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
-              <span style={{ fontSize: '0.76rem', color: '#9aa4b5', fontWeight: 700 }}>① 신호봉 경과 시간</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ fontSize: '0.76rem', color: '#9aa4b5', fontWeight: 700 }}>① 신호봉 경과 시간</span>
+                {isLeaderRetest && (
+                  <span style={{ fontSize: '0.66rem', color: '#5e6673', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 3, padding: '1px 5px' }}>
+                    리테스트 미적용
+                  </span>
+                )}
+              </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <input
                   type="number"
@@ -401,19 +428,21 @@ function SettingsEditor({
                   value={draft.maxSignalAgeSec ?? 120}
                   onChange={e => set('maxSignalAgeSec', Math.max(0, Math.min(600, parseInt(e.target.value) || 0)))}
                   style={s.numberInput}
+                  disabled={isLeaderRetest}
                 />
                 <span style={s.unit}>초</span>
               </div>
             </div>
             <SignalAgeDiagram value={draft.maxSignalAgeSec ?? 120} />
             <div style={s.hint}>
-              신호봉 확정 후 이 시간 안에 진입해야 함. 예) 120초 → 정각 스캔 후 2분 내 처리 안 되면 스킵.
+              {isLeaderRetest
+                ? '리더-리테스트 전략에서는 신호 경과 시간 필터가 자동으로 무시됩니다.'
+                : '신호봉 확정 후 이 시간 안에 진입해야 함. 예) 120초 → 정각 스캔 후 2분 내 처리 안 되면 스킵.'}
             </div>
           </div>
 
           {/* ② Breakout extension */}
           {(() => {
-            const isLeaderRetest = (draft.strategyId ?? 'breakout') === 'leader-retest';
             return (
               <div style={{ position: 'relative' as const, opacity: isLeaderRetest ? 0.38 : 1 }}>
                 <div style={{ background: 'rgba(240,185,11,0.04)', border: '1px solid rgba(240,185,11,0.12)', borderRadius: 6, padding: '8px 10px' }}>
@@ -450,9 +479,16 @@ function SettingsEditor({
           })()}
 
           {/* ③ Entry drift */}
-          <div style={{ background: 'rgba(59,139,235,0.04)', border: '1px solid rgba(59,139,235,0.12)', borderRadius: 6, padding: '8px 10px' }}>
+          <div style={{ background: 'rgba(59,139,235,0.04)', border: '1px solid rgba(59,139,235,0.12)', borderRadius: 6, padding: '8px 10px', opacity: isLeaderRetest ? 0.38 : 1 }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
-              <span style={{ fontSize: '0.76rem', color: '#9aa4b5', fontWeight: 700 }}>③ 주문 시점 추격 이탈폭</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ fontSize: '0.76rem', color: '#9aa4b5', fontWeight: 700 }}>③ 주문 시점 추격 이탈폭</span>
+                {isLeaderRetest && (
+                  <span style={{ fontSize: '0.66rem', color: '#5e6673', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 3, padding: '1px 5px' }}>
+                    리테스트 미적용
+                  </span>
+                )}
+              </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <input
                   type="number"
@@ -460,13 +496,16 @@ function SettingsEditor({
                   value={draft.maxEntryDriftPct ?? 1.0}
                   onChange={e => set('maxEntryDriftPct', Math.max(0, Math.min(10, parseFloat(e.target.value) || 0)))}
                   style={s.numberInput}
+                  disabled={isLeaderRetest}
                 />
                 <span style={s.unit}>%</span>
               </div>
             </div>
-            <EntryDriftDiagram value={draft.maxEntryDriftPct ?? 1.0} />
+            <EntryDriftDiagram value={isLeaderRetest ? 0 : (draft.maxEntryDriftPct ?? 1.0)} />
             <div style={s.hint}>
-              스캔 후 주문 시점 현재가가 계획 진입가 대비 이 % 이상 추격 방향으로 이탈하면 차단. 예) 1% → LONG 시 현재가가 진입가보다 1% 이상 높으면 스킵.
+              {isLeaderRetest
+                ? '리더-리테스트 전략에서는 추격 이탈폭 필터가 자동으로 무시됩니다.'
+                : '스캔 후 주문 시점 현재가가 계획 진입가 대비 이 % 이상 추격 방향으로 이탈하면 차단. 예) 1% → LONG 시 현재가가 진입가보다 1% 이상 높으면 스킵.'}
             </div>
           </div>
 
@@ -526,26 +565,24 @@ function SettingsEditor({
       <div style={s.fieldRow}>
         <label style={s.label}>스캔 전략</label>
         <div style={{ display: 'flex', gap: 6 }}>
-          {(['breakout', 'leader-retest'] as const).map(sid => (
+          {(['breakout', 'leader-retest', 'fvg-poc-ema72'] as const).map(sid => (
             <button
               key={sid}
               style={{ ...s.toggleChip, ...((draft.strategyId ?? 'breakout') === sid ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
               onClick={() => {
                 set('strategyId', sid);
-                // Auto-adjust minCandidateScore when switching strategies:
-                // leader-retest scores top out ~80 (formula: 40 + RR×15 + 10),
-                // so 90 default blocks everything. Switch to 70 automatically.
                 const cur = draft.minCandidateScore ?? 90;
                 if (sid === 'leader-retest' && cur >= 80) set('minCandidateScore', 70);
+                if (sid === 'fvg-poc-ema72' && cur >= 80) set('minCandidateScore', 60);
                 if (sid === 'breakout' && cur <= 70) set('minCandidateScore', 90);
               }}
             >
-              {sid === 'breakout' ? '기존 돌파' : '리더-리테스트'}
+              {sid === 'breakout' ? '기존 돌파' : sid === 'leader-retest' ? '리더-리테스트' : 'FVG POC+EMA72'}
             </button>
           ))}
         </div>
         <span style={s.hint}>
-          기존 돌파: 직전 확정봉 기준 추세선·수평·박스 돌파 감지. 리더-리테스트: 돌파 후 리테스트 구간 진입.
+          기존 돌파: 추세선·수평·박스 돌파 감지. 리더-리테스트: 돌파 후 리테스트 구간 진입. FVG POC+EMA72: 공정가격갭 중심가 크로스 + EMA72 추세 필터.
         </span>
       </div>
 
@@ -612,6 +649,59 @@ function SettingsEditor({
         </div>
       )}
 
+      {/* FVG POC + EMA72 options */}
+      {(draft.strategyId ?? 'breakout') === 'fvg-poc-ema72' && (
+        <div style={{ background: 'rgba(240,185,11,0.05)', border: '1px solid rgba(240,185,11,0.20)', borderRadius: 7, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ fontSize: '0.72rem', color: '#f0b90b', fontWeight: 700, marginBottom: 2 }}>FVG POC + EMA72 조건</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap' as const, gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>POC 조회봉수</span>
+              <input type="number" min={100} max={1500} step={50}
+                value={draft.fvgPocLookbackBars ?? 500}
+                onChange={e => set('fvgPocLookbackBars', Math.max(100, Math.min(1500, parseInt(e.target.value) || 500)))}
+                style={{ ...s.numberInput, width: 60 }} />
+              <span style={s.unit}>봉</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>히스토그램 구간</span>
+              <input type="number" min={10} max={200} step={5}
+                value={draft.fvgPocBins ?? 40}
+                onChange={e => set('fvgPocBins', Math.max(10, Math.min(200, parseInt(e.target.value) || 40)))}
+                style={{ ...s.numberInput, width: 52 }} />
+              <span style={s.unit}>bins</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>EMA 기간</span>
+              <input type="number" min={10} max={500} step={1}
+                value={draft.fvgEmaPeriod ?? 72}
+                onChange={e => set('fvgEmaPeriod', Math.max(10, Math.min(500, parseInt(e.target.value) || 72)))}
+                style={{ ...s.numberInput, width: 52 }} />
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>유니버스 상위</span>
+              <input type="number" min={10} max={300} step={10}
+                value={draft.fvgUniverseTopN ?? 100}
+                onChange={e => set('fvgUniverseTopN', Math.max(10, Math.min(300, parseInt(e.target.value) || 100)))}
+                style={{ ...s.numberInput, width: 52 }} />
+              <span style={s.unit}>개</span>
+            </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>방향</span>
+            {(['long', 'short', 'both'] as const).map(d => (
+              <button key={d}
+                style={{ ...s.toggleChip, ...((draft.fvgAutoDirection ?? 'both') === d ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
+                onClick={() => set('fvgAutoDirection', d)}>
+                {d === 'long' ? '롱만' : d === 'short' ? '숏만' : '양방향'}
+              </button>
+            ))}
+          </div>
+          <span style={s.hint}>
+            전일 거래대금 상위 N개 심볼만 스캔합니다(유니버스, 4시간 캐시). POC 조회봉수: FVG 수집 범위. EMA 기간: 추세 필터 기준.
+          </span>
+        </div>
+      )}
+
       {/* Min candidate score */}
       <div style={s.fieldRow}>
         <label style={s.label}>최소 진입 점수</label>
@@ -629,6 +719,8 @@ function SettingsEditor({
           이 점수 이상인 후보만 자동 진입합니다.{' '}
           {(draft.strategyId ?? 'breakout') === 'leader-retest'
             ? '리더-리테스트 스코어는 구조적으로 40~80점 범위 — 70점 내외 권장. 전략 전환 시 자동 조정됩니다.'
+            : (draft.strategyId ?? 'breakout') === 'fvg-poc-ema72'
+            ? 'FVG POC 스코어는 40~80점 범위 — 60점 내외 권장. 전략 전환 시 자동 조정됩니다.'
             : '기존 돌파 스코어는 0~100점 분포 — 기본 90점. 낮출수록 후보 증가, 높일수록 고품질 집중.'}
         </span>
       </div>
@@ -660,6 +752,20 @@ function SettingsEditor({
           ※ 설정은 저장 후 새로 진입하는 포지션부터 적용됩니다.
         </span>
       </div>
+
+      {/* timeStopBars — only shown when timeStopEnabled */}
+      {timeStopEnabled && (
+        <div style={s.fieldRow}>
+          <label style={s.label}>타임스탑 봉 수</label>
+          <input
+            style={{ ...s.numberInput, width: 70 }}
+            type="number" min={1} max={50}
+            value={draft.timeStopBars ?? 4}
+            onChange={e => set('timeStopBars', Math.max(1, Math.min(50, Number(e.target.value) || 4)))}
+          />
+          <span style={s.hint}>진입 후 N봉이 경과하면 TP/SL 미도달 시 시장가 청산. (스캔 TF 기준)</span>
+        </div>
+      )}
 
       {/* Live entry order type — only shown for live mode */}
       {isLive && (
@@ -766,6 +872,40 @@ function SettingsEditor({
             <span style={s.hint}>TP1 = 진입가 + (TP−진입가)×{(draft.tp1R ?? 0.30).toFixed(2)} 지점에서 {draft.tp1ClosePct ?? 50}% 익절{(draft.tp1MoveSL !== false) ? ' + SL → 진입가' : ''}</span>
           </div>
         )}
+      </div>
+
+      {/* Risk gates */}
+      <div style={s.fieldRow}>
+        <label style={s.label}>총 포지션 한도</label>
+        <input
+          style={{ ...s.numberInput, width: 70 }}
+          type="number" min={0} max={50}
+          value={draft.maxTotalPositions ?? 0}
+          onChange={e => set('maxTotalPositions', Math.max(0, Number(e.target.value) || 0))}
+        />
+        <span style={s.hint}>총 오픈 포지션 수가 N 이상이면 신규 진입 차단. (0 = 무제한)</span>
+      </div>
+
+      <div style={s.fieldRow}>
+        <label style={s.label}>동방향 포지션 한도</label>
+        <input
+          style={{ ...s.numberInput, width: 70 }}
+          type="number" min={0} max={20}
+          value={draft.maxConcurrentCorrelated ?? 0}
+          onChange={e => set('maxConcurrentCorrelated', Math.max(0, Number(e.target.value) || 0))}
+        />
+        <span style={s.hint}>같은 방향(LONG/SHORT) 포지션이 N 이상이면 차단. (0 = 무제한)</span>
+      </div>
+
+      <div style={s.fieldRow}>
+        <label style={s.label}>손실 후 쿨다운</label>
+        <input
+          style={{ ...s.numberInput, width: 70 }}
+          type="number" min={0} max={50}
+          value={draft.cooldownBarsAfterLoss ?? 0}
+          onChange={e => set('cooldownBarsAfterLoss', Math.max(0, Number(e.target.value) || 0))}
+        />
+        <span style={s.hint}>손실 청산 후 동일 TF에서 N봉 동안 신규 진입 차단. (0 = 없음)</span>
       </div>
 
       {/* Info */}

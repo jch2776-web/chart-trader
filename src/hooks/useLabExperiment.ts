@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { usePaperTrading } from './usePaperTrading';
 import { runBreakoutScan } from '../components/AltScanner/breakoutScanner';
 import { createLeaderRetestScan } from '../components/AltScanner/strategies/leaderRetest';
+import { createFvgPocEma72Scan } from '../components/AltScanner/strategies/fvgPocEma72';
 import type { ScanInterval, ScanCandidate } from '../components/AltScanner/breakoutScanner';
 import { getBinanceGovernorSnapshot } from '../lib/binanceRequestGovernor';
 import type { AltMeta } from '../types/paperTrading';
@@ -15,7 +16,7 @@ export interface LabExperimentConfig {
   id: string;
   name: string;
   enabled: boolean;
-  strategyId: 'breakout' | 'leader-retest';
+  strategyId: 'breakout' | 'leader-retest' | 'fvg-poc-ema72';
   scanIntervals: ScanInterval[];
   direction: 'long' | 'short' | 'both';
   minScore: number;
@@ -58,6 +59,13 @@ export interface LabExperimentConfig {
   require4hTrend?: boolean;
   cooldownBarsAfterLoss?: number;
   maxConcurrentCorrelatedPositions?: number;
+
+  // ── FVG POC + EMA72 specific ────────────────────────────────────────────
+  fvgPocLookbackBars?: number;
+  fvgPocBins?: number;
+  fvgEmaPeriod?: number;
+  fvgUniverseTopN?: number;
+  fvgDirection?: 'long' | 'short' | 'both';
 
   // ── Lab-only time-stop ──────────────────────────────────────────────────
   /** Enable lab-only time-stop (never affects main paper/live ledger) */
@@ -257,11 +265,21 @@ export function useLabExperiment(
           maxOvershootAtr: cfg.retestMaxOvershootAtr,
           require4hTrend: cfg.require4hTrend,
         })
+      : cfg.strategyId === 'fvg-poc-ema72'
+      ? createFvgPocEma72Scan({
+          fvgPocLookbackBars: cfg.fvgPocLookbackBars,
+          fvgPocBins: cfg.fvgPocBins,
+          fvgEmaPeriod: cfg.fvgEmaPeriod,
+          fvgUniverseTopN: cfg.fvgUniverseTopN,
+          fvgDirection: cfg.fvgDirection,
+        })
       : runBreakoutScan;
 
-    // Breakout uses its own direction override; retest uses retestAutoDirection
+    // Direction override per strategy
     const scanDirection = cfg.strategyId === 'leader-retest'
       ? (cfg.retestAutoDirection ?? cfg.direction as 'long' | 'both')
+      : cfg.strategyId === 'fvg-poc-ema72'
+      ? (cfg.fvgDirection ?? cfg.direction)
       : (cfg.breakoutDirection ?? cfg.direction);
 
     const entered = new Set<string>();
@@ -288,7 +306,7 @@ export function useLabExperiment(
             concurrency: LAB_CONCURRENCY,
             delayMs: LAB_DELAY_MS,
             scanTag: `lab:${cfg.id}:${interval}`,
-            busyPolicy: 'skip',
+            busyPolicy: 'queue',
           },
         );
       } catch (e) {
@@ -445,20 +463,28 @@ export function useLabExperiment(
   const winRate = history.length > 0 ? (wins / history.length) * 100 : 0;
   const totalPnl = history.reduce((sum, h) => sum + h.pnl, 0);
 
-  // Unrealized PnL from open positions using latest mark prices (exit fee projected)
+  // Unrealized PnL from open positions using latest mark prices
+  // - totalEquity uses (gross - exitFee) because balance already deducted entryFee
+  // - display uses (gross - entryFee - exitFee) so that:
+  //     초기잔고 + 실현손익 + 미실현PnL == 총자산  (no hidden gap)
   const FEE_RATE = 0.0004;
-  const unrealizedPnl = paper.positions.reduce((sum, pos) => {
+  const openMarginSum = paper.positions.reduce((sum, pos) => sum + pos.isolatedMargin, 0);
+  let unrealizedGrossMinusExit = 0;
+  let unrealizedPnl = 0;
+  for (const pos of paper.positions) {
     const mark = markPricesState[pos.symbol] ?? 0;
-    if (!mark) return sum;
+    if (!mark) continue;
     const qty = Math.abs(pos.positionAmt);
     const rawPnl = (pos.positionSide === 'LONG' ? mark - pos.entryPrice : pos.entryPrice - mark) * qty;
-    const projectedExitFee = mark * qty * FEE_RATE;
-    return sum + rawPnl - projectedExitFee;
-  }, 0);
+    const entryFee = pos.entryPrice * qty * FEE_RATE;
+    const exitFee  = mark * qty * FEE_RATE;
+    unrealizedGrossMinusExit += rawPnl - exitFee;
+    unrealizedPnl            += rawPnl - entryFee - exitFee;
+  }
 
-  // Total equity = available cash + locked margins + unrealized PnL
-  const openMarginSum = paper.positions.reduce((sum, pos) => sum + pos.isolatedMargin, 0);
-  const totalEquity = paper.balance + openMarginSum + unrealizedPnl;
+  // Total equity = available cash + locked margins + gross unrealized (exit fee only)
+  // This equals the liquidation value: what you'd receive if closing all positions at mark now.
+  const totalEquity = paper.balance + openMarginSum + unrealizedGrossMinusExit;
   const pnlPct = paper.initialBalance > 0
     ? ((totalEquity - paper.initialBalance) / paper.initialBalance) * 100
     : 0;

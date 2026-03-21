@@ -38,7 +38,7 @@ interface Preset {
   patch: Partial<Omit<LabExperimentConfig, 'id' | 'name' | 'enabled' | 'strategyId' | 'scanIntervals' | 'initialBalance'>>;
 }
 
-const PRESETS: Record<'breakout' | 'leader-retest', Preset[]> = {
+const PRESETS: Record<'breakout' | 'leader-retest' | 'fvg-poc-ema72', Preset[]> = {
   'breakout': [
     {
       label: '보수적',
@@ -79,6 +79,26 @@ const PRESETS: Record<'breakout' | 'leader-retest', Preset[]> = {
       patch: { direction: 'both', minScore: 70, leverage: 15, riskPct: 3, cadenceMinutes: 60, maxPositions: 8, require4hTrend: false, cooldownBarsAfterLoss: undefined, maxConcurrentCorrelatedPositions: undefined, retestAutoDirection: 'both', retestMinBars: 1, retestMaxBars: 10, retestToleranceAtr: 0.40, retestMaxOvershootAtr: 1.5 },
     },
   ],
+  'fvg-poc-ema72': [
+    {
+      label: '보수적',
+      tone: 'safe',
+      desc: 'LONG·유니버스100·POC500봉·EMA72',
+      patch: { direction: 'long', minScore: 60, leverage: 10, riskPct: 1.5, cadenceMinutes: 60, maxPositions: 3, cooldownBarsAfterLoss: 2, maxConcurrentCorrelatedPositions: 1 },
+    },
+    {
+      label: '균형형',
+      tone: 'balanced',
+      desc: '양방향·유니버스100·POC500봉·EMA72',
+      patch: { direction: 'both', minScore: 55, leverage: 10, riskPct: 2, cadenceMinutes: 60, maxPositions: 5, cooldownBarsAfterLoss: 1, maxConcurrentCorrelatedPositions: 2 },
+    },
+    {
+      label: '공격적',
+      tone: 'aggressive',
+      desc: '양방향·유니버스200·쿨다운없음·레버20',
+      patch: { direction: 'both', minScore: 45, leverage: 20, riskPct: 3, cadenceMinutes: 60, maxPositions: 8, cooldownBarsAfterLoss: undefined, maxConcurrentCorrelatedPositions: undefined },
+    },
+  ],
 };
 
 const TONE_COLORS = {
@@ -89,7 +109,7 @@ const TONE_COLORS = {
 
 // ── Warning detection ─────────────────────────────────────────────────────────
 function detectWarnings(
-  strategyId: 'breakout' | 'leader-retest',
+  strategyId: 'breakout' | 'leader-retest' | 'fvg-poc-ema72',
   direction: string,
   leverage: number,
   riskPct: number,
@@ -130,7 +150,7 @@ function TuningGuide() {
 
 // ── Preset cards ──────────────────────────────────────────────────────────────
 function PresetCards({ strategy, onApply }: {
-  strategy: 'breakout' | 'leader-retest';
+  strategy: 'breakout' | 'leader-retest' | 'fvg-poc-ema72';
   onApply: (patch: Preset['patch']) => void;
 }) {
   const presets = PRESETS[strategy];
@@ -172,7 +192,7 @@ function SectionHead({ title }: { title: string }) {
 // ── Add / Edit form ───────────────────────────────────────────────────────────
 interface FormState {
   name: string;
-  strategyId: 'breakout' | 'leader-retest';
+  strategyId: 'breakout' | 'leader-retest' | 'fvg-poc-ema72';
   direction: 'long' | 'short' | 'both';
   intervals: ScanInterval[];
   initBalance: number;
@@ -196,6 +216,12 @@ interface FormState {
   maxSignalAgeSec: number;        // 0 = disabled
   maxBreakoutExtensionPct: number; // 0 = disabled
   maxEntryDriftPct: number;       // 0 = disabled
+  // FVG POC + EMA72
+  fvgPocLookbackBars: number;
+  fvgPocBins: number;
+  fvgEmaPeriod: number;
+  fvgUniverseTopN: number;
+  fvgDirection: 'long' | 'short' | 'both';
   // Lab-only time-stop
   labTimeStopEnabled: boolean;
   labTimeStopBars: number;
@@ -208,6 +234,7 @@ const DEFAULT_FORM: FormState = {
   retestMinBars: 1, retestMaxBars: 8, retestToleranceAtr: 0.30, retestMaxOvershootAtr: 1.0, retestAutoDirection: 'long',
   require4hTrend: true, cooldownBarsAfterLoss: 0, maxConcurrentCorrelated: 0,
   breakoutDirection: 'both', maxSignalAgeSec: 0, maxBreakoutExtensionPct: 0, maxEntryDriftPct: 0,
+  fvgPocLookbackBars: 500, fvgPocBins: 40, fvgEmaPeriod: 72, fvgUniverseTopN: 100, fvgDirection: 'both',
   labTimeStopEnabled: false, labTimeStopBars: 4,
 };
 
@@ -236,6 +263,12 @@ function formToConfig(f: FormState): Omit<LabExperimentConfig, 'id'> {
     cfg.retestToleranceAtr = f.retestToleranceAtr;
     cfg.retestMaxOvershootAtr = f.retestMaxOvershootAtr;
     cfg.retestAutoDirection = f.retestAutoDirection;
+  } else if (f.strategyId === 'fvg-poc-ema72') {
+    cfg.fvgPocLookbackBars = f.fvgPocLookbackBars;
+    cfg.fvgPocBins = f.fvgPocBins;
+    cfg.fvgEmaPeriod = f.fvgEmaPeriod;
+    cfg.fvgUniverseTopN = f.fvgUniverseTopN;
+    cfg.fvgDirection = f.fvgDirection;
   } else {
     cfg.breakoutDirection = f.breakoutDirection;
     cfg.maxSignalAgeSec = f.maxSignalAgeSec > 0 ? f.maxSignalAgeSec : null;
@@ -269,6 +302,11 @@ function configToForm(cfg: LabExperimentConfig): FormState {
     maxSignalAgeSec: cfg.maxSignalAgeSec ?? 0,
     maxBreakoutExtensionPct: cfg.maxBreakoutExtensionPct ?? 0,
     maxEntryDriftPct: cfg.maxEntryDriftPct ?? 0,
+    fvgPocLookbackBars: cfg.fvgPocLookbackBars ?? 500,
+    fvgPocBins: cfg.fvgPocBins ?? 40,
+    fvgEmaPeriod: cfg.fvgEmaPeriod ?? 72,
+    fvgUniverseTopN: cfg.fvgUniverseTopN ?? 100,
+    fvgDirection: cfg.fvgDirection ?? 'both',
     labTimeStopEnabled: cfg.labTimeStopEnabled ?? false,
     labTimeStopBars: cfg.labTimeStopBars ?? 4,
   };
@@ -341,9 +379,10 @@ function AddExperimentForm({ onAdd, onCancel, initialForm, diffBase }: {
 
         <label style={S.formLabel}>전략</label>
         <select style={S.input} value={form.strategyId}
-          onChange={e => { set('strategyId', e.target.value as 'breakout' | 'leader-retest'); }}>
+          onChange={e => { set('strategyId', e.target.value as 'breakout' | 'leader-retest' | 'fvg-poc-ema72'); }}>
           <option value="breakout">돌파 (Breakout)</option>
           <option value="leader-retest">리더 리테스트</option>
+          <option value="fvg-poc-ema72">FVG POC + EMA72</option>
         </select>
 
         <label style={S.formLabel}>방향</label>
@@ -481,6 +520,46 @@ function AddExperimentForm({ onAdd, onCancel, initialForm, diffBase }: {
             </div>
           </>}
 
+          {form.strategyId === 'fvg-poc-ema72' && <>
+            <SectionHead title="FVG POC + EMA72 파라미터" />
+
+            <label style={S.formLabel}>방향 스캔</label>
+            <select style={S.input} value={form.fvgDirection}
+              onChange={e => set('fvgDirection', e.target.value as 'long' | 'short' | 'both')}>
+              <option value="both">양방향</option>
+              <option value="long">LONG만</option>
+              <option value="short">SHORT만</option>
+            </select>
+
+            <label style={S.formLabel}>POC 조회봉수</label>
+            <div>
+              <input style={S.input} type="number" min={100} max={1500} step={50} value={form.fvgPocLookbackBars}
+                onChange={e => set('fvgPocLookbackBars', Number(e.target.value))} />
+              <Helper text="FVG 수집 범위 (봉). 클수록 안정적인 POC, 느린 갱신 (기본 500)" />
+            </div>
+
+            <label style={S.formLabel}>히스토그램 구간</label>
+            <div>
+              <input style={S.input} type="number" min={10} max={200} step={5} value={form.fvgPocBins}
+                onChange={e => set('fvgPocBins', Number(e.target.value))} />
+              <Helper text="POC 히스토그램 bins 수. 많을수록 세밀한 POC (기본 40)" />
+            </div>
+
+            <label style={S.formLabel}>EMA 기간</label>
+            <div>
+              <input style={S.input} type="number" min={10} max={500} step={1} value={form.fvgEmaPeriod}
+                onChange={e => set('fvgEmaPeriod', Number(e.target.value))} />
+              <Helper text="추세 필터용 EMA 기간. LONG: close > EMA, SHORT: close < EMA (기본 72)" />
+            </div>
+
+            <label style={S.formLabel}>유니버스 상위</label>
+            <div>
+              <input style={S.input} type="number" min={10} max={300} step={10} value={form.fvgUniverseTopN}
+                onChange={e => set('fvgUniverseTopN', Number(e.target.value))} />
+              <Helper text="전일 거래대금 상위 N개 심볼만 스캔 (4h 캐시). 0이면 전체 (기본 100)" />
+            </div>
+          </>}
+
           <SectionHead title="진입 필터 (No-trade gate)" />
 
           <label style={S.formLabel}>4H 추세 필터</label>
@@ -489,7 +568,7 @@ function AddExperimentForm({ onAdd, onCancel, initialForm, diffBase }: {
               <input type="checkbox" checked={form.require4hTrend}
                 onChange={e => set('require4hTrend', e.target.checked)} />
               <span>LONG 진입 시 4H EMA20 {'>'} EMA50 필요
-                {form.strategyId === 'breakout' && <span style={{ color: '#5a7ba8' }}> (리테스트 전용)</span>}
+                {(form.strategyId === 'breakout' || form.strategyId === 'fvg-poc-ema72') && <span style={{ color: '#5a7ba8' }}> (리테스트 전용)</span>}
               </span>
             </label>
           </div>
@@ -715,9 +794,10 @@ function OperationSummary({ cfg, expanded, onToggle }: {
               <div>· TP 가격 도달 → 자동 익절</div>
               <div>· SL 가격 도달 → 자동 손절</div>
               <div>· 청산가 도달 → 강제청산</div>
-              <div style={{ color: '#8a6030', marginTop: 4 }}>
-                ⚠ 타임스탑 없음 — TP/SL 미도달 시 무기한 보유
-              </div>
+              {cfg.labTimeStopEnabled && cfg.labTimeStopBars && cfg.labTimeStopBars > 0
+                ? <div style={{ color: '#b0b070', marginTop: 4 }}>⏱ 타임스탑 {cfg.labTimeStopBars}봉 — TP/SL 미도달 시 시장가 청산</div>
+                : <div style={{ color: '#8a6030', marginTop: 4 }}>⚠ 타임스탑 없음 — TP/SL 미도달 시 무기한 보유</div>
+              }
             </div>
           </div>
           <div style={{ marginTop: 6, padding: '4px 6px', background: 'rgba(59,139,235,0.06)', borderRadius: 4, color: '#5a7ba8' }}>
@@ -854,7 +934,7 @@ function ExperimentCard({ exp, onToggle, onRemove, onResetBalance, onClearHistor
             const mark = exp.markPrices[pos.symbol] ?? 0;
             const qty = Math.abs(pos.positionAmt);
             const rawPnl = mark > 0
-              ? (pos.positionSide === 'LONG' ? mark - pos.entryPrice : pos.entryPrice - mark) * qty - mark * qty * 0.0004
+              ? (pos.positionSide === 'LONG' ? mark - pos.entryPrice : pos.entryPrice - mark) * qty - pos.entryPrice * qty * 0.0004 - mark * qty * 0.0004
               : null;
             const posColor = pos.positionSide === 'LONG' ? '#0ecb81' : '#f6465d';
             const pnlCol = rawPnl == null ? '#848e9c' : rawPnl >= 0 ? '#0ecb81' : '#f6465d';
@@ -1003,7 +1083,7 @@ function ComparisonTable({ experiments, baselineSlot }: { experiments: LabExperi
               return (
                 <tr key={exp.slotIndex} style={isBl ? { background: 'rgba(240,185,11,0.04)' } : undefined}>
                   <td style={S.td}>{isBl ? '★ ' : ''}{cfg.name}</td>
-                  <td style={S.td}>{cfg.strategyId === 'leader-retest' ? '리테스트' : '돌파'}</td>
+                  <td style={S.td}>{cfg.strategyId === 'leader-retest' ? '리테스트' : cfg.strategyId === 'fvg-poc-ema72' ? 'FVG POC' : '돌파'}</td>
                   <td style={{ ...S.td, color: pc }}>{s.pnlPct.toFixed(2)}%<Δ val={s.pnlPct} base={bs?.pnlPct} /></td>
                   <td style={{ ...S.td, color: pc }}>{pf(s.totalPnl)}<Δ val={s.totalPnl} base={bs?.totalPnl} fmt={v => v.toFixed(0)} /></td>
                   <td style={S.td}>{s.winRate.toFixed(1)}%<Δ val={s.winRate} base={bs?.winRate} /></td>

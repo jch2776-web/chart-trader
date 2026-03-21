@@ -6,6 +6,7 @@ import { CandleChart } from '../Chart/CandleChart';
 import { runBreakoutScan } from './breakoutScanner';
 import type { ScanCandidate, ScanInterval, ScanDirection, CandidateStatus } from './breakoutScanner';
 import { runLeaderRetestScan } from './strategies/leaderRetest';
+import { runFvgPocEma72Scan } from './strategies/fvgPocEma72';
 import { useBinanceWS } from '../../hooks/useBinanceWS';
 import { revalidateCandidate } from './validateSignal';
 import { fetchBinanceKlinesCached } from '../../lib/binanceKlineCache';
@@ -929,7 +930,9 @@ export function AltScannerModal({
     setCandidatesCache(prev => ({ ...prev, [scanInterval]: [] }));
     setSelected(null);
     setProgress({ done: 0, total: symbols.length });
-    const scanFn = strategy === 'leader-retest' ? runLeaderRetestScan : runBreakoutScan;
+    const scanFn = strategy === 'leader-retest' ? runLeaderRetestScan
+      : strategy === 'fvg-poc-ema72' ? runFvgPocEma72Scan
+      : runBreakoutScan;
     try {
       await scanFn(symbols, scanInterval, direction,
         (done, total) => setProgress({ done, total }),
@@ -1002,7 +1005,9 @@ export function AltScannerModal({
       setCandidatesCache(prev => ({ ...prev, [scanInterval]: [] }));
       setSelected(null);
       setProgress({ done: 0, total: symbols.length });
-      const autoScanFn = strategy === 'leader-retest' ? runLeaderRetestScan : runBreakoutScan;
+      const autoScanFn = strategy === 'leader-retest' ? runLeaderRetestScan
+        : strategy === 'fvg-poc-ema72' ? runFvgPocEma72Scan
+        : runBreakoutScan;
       try {
         await autoScanFn(
           symbols, scanInterval, direction,
@@ -1206,6 +1211,7 @@ export function AltScannerModal({
             {([
               { id: 'breakout', label: '기존 돌파' },
               { id: 'leader-retest', label: '리더-리테스트' },
+              { id: 'fvg-poc-ema72', label: 'FVG POC + EMA72' },
             ]).map(s => (
               <button key={s.id}
                 style={{ ...S.ctrlBtn, ...(strategy === s.id ? S.ctrlActive : {}) }}

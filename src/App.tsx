@@ -1704,12 +1704,18 @@ function AppInner() {
     const autoSettings = (autoTradeModeRef.current === 'live' ? liveAutoTradeSettingsRef : paperAutoTradeSettingsRef).current;
 
     // ── Chase-entry prevention filter (auto-trade only) ─────────────────────
+    // All three sub-filters below are breakout-specific and mirror the lab behavior:
+    // useLabExperiment applies them only under cfg.strategyId === 'breakout'.
+    // For leader-retest, the concept of "chasing a breakout" does not apply —
+    // the retest entry is by definition a pull-back, so we skip these filters.
+    const isRetest = c.strategyId === 'leader-retest' || c.strategyId === 'fvg-poc-ema72';
+
     // 1) Signal age: skip if signal was already stale when the scan started
     //    - For manual/immediate scans: skipped entirely (user explicitly requested entry now)
     //    - For scheduled scans: measure age at scan START time (not callback time) so slow
     //      multi-symbol scans don't unfairly penalise candidates processed later in the run
     const maxSignalAgeSec = autoSettings.maxSignalAgeSec ?? 120;
-    if (c.scanMode !== 'manual' && maxSignalAgeSec > 0) {
+    if (!isRetest && c.scanMode !== 'manual' && maxSignalAgeSec > 0) {
       const ageRef = c.scanStartTime ?? now;           // use scan-start epoch when available
       const signalAgeSec = (ageRef - c.asOfCloseTime) / 1000;
       if (signalAgeSec > maxSignalAgeSec) {
@@ -1722,7 +1728,7 @@ function AppInner() {
     // 2) Breakout extension: skip if confirmed candle close is too far beyond the trigger line
     //    Not applicable for leader-retest (retest entry has no "breakout extension" concept)
     const maxBreakoutExtensionPct = autoSettings.maxBreakoutExtensionPct ?? 0.6;
-    if (maxBreakoutExtensionPct > 0 && c.strategyId !== 'leader-retest' && c.triggerSpec && c.entryPrice > 0) {
+    if (!isRetest && maxBreakoutExtensionPct > 0 && c.triggerSpec && c.entryPrice > 0) {
       const tPrice = triggerPrice(c.triggerSpec, c.asOfCloseTime);
       if (tPrice > 0) {
         const ext = c.direction === 'long'
@@ -1739,7 +1745,7 @@ function AppInner() {
     // 3) Price drift: skip if current price has moved too far from plannedEntry in the chase direction
     const maxEntryDriftPct = autoSettings.maxEntryDriftPct ?? 1.0;
     let entryDriftPct: number | null = null;
-    if (maxEntryDriftPct > 0 && mark > 0 && c.entryPrice > 0) {
+    if (!isRetest && maxEntryDriftPct > 0 && mark > 0 && c.entryPrice > 0) {
       const rawDrift = (mark - c.entryPrice) / c.entryPrice * 100;
       entryDriftPct = parseFloat(rawDrift.toFixed(3));
       const isChasing = c.direction === 'long' ? rawDrift > 0 : rawDrift < 0;
@@ -1757,6 +1763,48 @@ function AppInner() {
     if (!allowedEntryIntervals.includes(c.interval)) {
       addLog('warn', `[자동매매] ⛔ ${c.symbol} ${c.direction.toUpperCase()} [${c.interval}] — 자동진입 비허용 TF (허용: ${allowedEntryIntervals.join(',')}), 스캔만 유지`);
       return;
+    }
+
+    // ── Risk gate: 총 포지션 한도 ──────────────────────────────────────────────
+    const maxTotalPos = autoSettings.maxTotalPositions ?? 0;
+    if (maxTotalPos > 0) {
+      const currentCount = autoTradeModeRef.current === 'live'
+        ? futuresAllPositionsRef.current.filter(p => Math.abs(p.positionAmt ?? 0) > 0).length
+        : paperTradingRef.current.positions.length;
+      if (currentCount >= maxTotalPos) {
+        addLog('warn', `[자동매매] ⛔ ${c.symbol} — 총 포지션 한도(${maxTotalPos}개) 도달 (현재 ${currentCount}개), 건너뜀`);
+        return;
+      }
+    }
+
+    // ── Risk gate: 동방향 포지션 한도 ────────────────────────────────────────
+    const maxCorrPos = autoSettings.maxConcurrentCorrelated ?? 0;
+    if (maxCorrPos > 0) {
+      const side = c.direction === 'long' ? 'LONG' : 'SHORT';
+      const corrCount = autoTradeModeRef.current === 'live'
+        ? futuresAllPositionsRef.current.filter(p => p.positionSide === side && Math.abs(p.positionAmt ?? 0) > 0).length
+        : paperTradingRef.current.positions.filter(p => p.positionSide === side).length;
+      if (corrCount >= maxCorrPos) {
+        addLog('warn', `[자동매매] ⛔ ${c.symbol} ${c.direction.toUpperCase()} — 동방향 한도(${maxCorrPos}개) 도달 (현재 ${corrCount}개), 건너뜀`);
+        return;
+      }
+    }
+
+    // ── Risk gate: 손실 후 쿨다운 ────────────────────────────────────────────
+    const cooldownBars = autoSettings.cooldownBarsAfterLoss ?? 0;
+    if (cooldownBars > 0) {
+      const cooldownMs = cooldownBars * intervalMs;
+      const recentLoss = autoTradeModeRef.current === 'live'
+        ? liveHistoryRef.current.find(h => h.interval === c.interval && (h.pnl ?? 0) < 0 && now - h.exitTime < cooldownMs)
+        : paperTradingRef.current.history.find(h => h.interval === c.interval && h.pnl < 0 && now - h.exitTime < cooldownMs);
+      if (recentLoss) {
+        const elapsed = autoTradeModeRef.current === 'live'
+          ? (recentLoss as typeof liveHistoryRef.current[0]).exitTime
+          : (recentLoss as typeof paperTradingRef.current.history[0]).exitTime;
+        const remainMin = Math.ceil((cooldownMs - (now - elapsed)) / 60_000);
+        addLog('warn', `[자동매매] ⛔ ${c.symbol} [${c.interval}] — 손실 후 쿨다운 중 (${remainMin}분 남음), 건너뜀`);
+        return;
+      }
     }
 
     const drawingsSnapshot = [
@@ -1781,14 +1829,18 @@ function AppInner() {
       plannedTP: c.tpPrice ?? null,
       plannedSL: c.slPrice ?? null,
       scanInterval: c.interval,
-      validUntilTime: c.validUntilTime,
+      validUntilTime: normalizeAutoTradeTimeStop(autoSettings.timeStopEnabled) && (autoSettings.timeStopBars ?? 0) > 0
+        ? now + autoSettings.timeStopBars! * intervalMs
+        : c.validUntilTime,
       signalCloseTime: c.asOfCloseTime,
       monitorStartTime: now,
       drawingsSnapshot,
       entrySource: 'auto',
       timeStopEnabled: normalizeAutoTradeTimeStop(autoSettings.timeStopEnabled),
       timeStopEnabledAtEntry: normalizeAutoTradeTimeStop(autoSettings.timeStopEnabled),
-      validUntilTimeAtEntry: c.validUntilTime,
+      validUntilTimeAtEntry: normalizeAutoTradeTimeStop(autoSettings.timeStopEnabled) && (autoSettings.timeStopBars ?? 0) > 0
+        ? now + autoSettings.timeStopBars! * intervalMs
+        : c.validUntilTime,
       scanCadenceMinutesAtEntry: autoSettings.scanCadenceMinutes,
       breakoutType:    c.breakoutType,
       candidateStatus: c.status,
@@ -1875,6 +1927,13 @@ function AppInner() {
       require4hTrend: activeAutoTradeSettings.retestRequire4hTrend,
     },
     retestAutoDirection: activeAutoTradeSettings.retestAutoDirection ?? 'long',
+    fvgOptions: {
+      fvgPocLookbackBars: activeAutoTradeSettings.fvgPocLookbackBars,
+      fvgPocBins: activeAutoTradeSettings.fvgPocBins,
+      fvgEmaPeriod: activeAutoTradeSettings.fvgEmaPeriod,
+      fvgUniverseTopN: activeAutoTradeSettings.fvgUniverseTopN,
+      fvgDirection: activeAutoTradeSettings.fvgAutoDirection,
+    },
     minCandidateScore: activeAutoTradeSettings.minCandidateScore ?? 90,
   });
   altAutoTradeSetActiveRef.current = altAutoTrade.setActive;

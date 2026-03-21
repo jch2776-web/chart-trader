@@ -3,6 +3,8 @@ import { runBreakoutScan } from '../components/AltScanner/breakoutScanner';
 import type { ScanCandidate, ScanInterval } from '../components/AltScanner/breakoutScanner';
 import { createLeaderRetestScan } from '../components/AltScanner/strategies/leaderRetest';
 import type { RetestOptions } from '../components/AltScanner/strategies/leaderRetest';
+import { createFvgPocEma72Scan } from '../components/AltScanner/strategies/fvgPocEma72';
+import type { FvgPocOptions } from '../components/AltScanner/strategies/fvgPocEma72';
 import type { ScanFn } from '../components/AltScanner/strategyTypes';
 import { getBinanceGovernorSnapshot } from '../lib/binanceRequestGovernor';
 
@@ -90,6 +92,7 @@ export function useAltAutoTrade({
   strategyId,
   retestOptions,
   retestAutoDirection,
+  fvgOptions,
   minCandidateScore,
 }: {
   symbols: string[];
@@ -106,6 +109,8 @@ export function useAltAutoTrade({
   retestOptions?: RetestOptions;
   /** Scan direction override for leader-retest auto-trade (default 'long') */
   retestAutoDirection?: 'long' | 'both';
+  /** FVG POC options — only used when strategyId === 'fvg-poc-ema72' */
+  fvgOptions?: FvgPocOptions;
   /** Minimum candidate score to qualify for auto-entry (default 90) */
   minCandidateScore?: number;
 }) {
@@ -133,6 +138,7 @@ export function useAltAutoTrade({
   const strategyIdRef             = useRef(strategyId ?? 'breakout');
   const retestOptionsRef          = useRef(retestOptions);
   const retestAutoDirectionRef    = useRef<'long' | 'both'>(retestAutoDirection ?? 'long');
+  const fvgOptionsRef             = useRef(fvgOptions);
   const scoreThresholdRef         = useRef(minCandidateScore ?? 90);
   isActiveRef.current             = isActive;
   symbolsRef.current              = symbols;
@@ -146,6 +152,7 @@ export function useAltAutoTrade({
   strategyIdRef.current           = strategyId ?? 'breakout';
   retestOptionsRef.current        = retestOptions;
   retestAutoDirectionRef.current  = retestAutoDirection ?? 'long';
+  fvgOptionsRef.current           = fvgOptions;
   scoreThresholdRef.current       = minCandidateScore ?? 90;
 
   const addLog = useCallback((msg: string, type: AutoTradeLog['type'] = 'info') => {
@@ -247,9 +254,13 @@ export function useAltAutoTrade({
       // Resolve scan function based on strategy selection
       const activeScanFn: ScanFn = strategyIdRef.current === 'leader-retest'
         ? createLeaderRetestScan(retestOptionsRef.current)
+        : strategyIdRef.current === 'fvg-poc-ema72'
+        ? createFvgPocEma72Scan(fvgOptionsRef.current)
         : runBreakoutScan;
       const scanDirection = strategyIdRef.current === 'leader-retest'
         ? retestAutoDirectionRef.current
+        : strategyIdRef.current === 'fvg-poc-ema72'
+        ? (fvgOptionsRef.current?.fvgDirection ?? 'both')
         : 'both' as const;
       try {
         await activeScanFn(
