@@ -1704,11 +1704,12 @@ function AppInner() {
     const autoSettings = (autoTradeModeRef.current === 'live' ? liveAutoTradeSettingsRef : paperAutoTradeSettingsRef).current;
 
     // ── Chase-entry prevention filter (auto-trade only) ─────────────────────
-    // All three sub-filters below are breakout-specific and mirror the lab behavior:
-    // useLabExperiment applies them only under cfg.strategyId === 'breakout'.
-    // For leader-retest, the concept of "chasing a breakout" does not apply —
-    // the retest entry is by definition a pull-back, so we skip these filters.
-    const isRetest = c.strategyId === 'leader-retest' || c.strategyId === 'fvg-poc-ema72';
+    // Applied to breakout-type strategies (breakout, fvg-poc-ema72).
+    // leader-retest is a pull-back by definition (no "chasing"), so it skips all three.
+    // fvg-poc-ema72 is a POC breakout — filters apply.
+    //   Extension calc: (entryPrice - poc) / poc * 100  (poc = triggerSpec.fixedPrice)
+    //   Drift calc:     (mark - entryPrice) / entryPrice * 100
+    const isRetest = c.strategyId === 'leader-retest';
 
     // 1) Signal age: skip if signal was already stale when the scan started
     //    - For manual/immediate scans: skipped entirely (user explicitly requested entry now)

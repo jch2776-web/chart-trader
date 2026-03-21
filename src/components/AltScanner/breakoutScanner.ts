@@ -67,6 +67,16 @@ export interface ScanCandidate {
   scanMode?: 'scheduled' | 'manual';
   /** ms epoch — when the scan run started; used to measure signal age at scan-start, not at callback time */
   scanStartTime?: number;
+
+  // ── FVG POC + EMA72 strategy metadata (optional, analysis only) ───────────
+  /** Rolling FVG-based POC price at scan time */
+  pocPrice?: number;
+  /** EMA value (period = fvgEmaPeriod) at scan time */
+  fvgEma?: number;
+  /** How far the confirmed bar closed beyond POC, in % — LONG: (close-poc)/poc*100, SHORT: (poc-close)/poc*100 */
+  fvgBreakoutExtensionPct?: number;
+  /** True = passed top-N universe filter; false = universe fetch failed (all symbols used) */
+  fvgPassedUniverseFilter?: boolean;
 }
 
 // ── Utilities ──────────────────────────────────────────────────────────────

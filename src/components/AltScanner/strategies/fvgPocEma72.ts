@@ -4,7 +4,11 @@
  * Entry signal: last closed bar crosses a rolling FVG-based Point of Control (POC)
  * in the direction confirmed by EMA72 trend.
  *
- * Universe filter: top N futures symbols by prior-day quoteVolume (cached 4 h).
+ * Universe filter: top N futures symbols by rolling-24h quoteVolume (Binance /fapi/v1/ticker/24hr,
+ * cached 4 h).  This is a rolling 24h window, not strictly yesterday's daily candle.
+ * A strict "prior-day" filter would require per-symbol 1d kline fetches (prohibitive cost),
+ * so rolling-24h is used as the practical approximation.  The cache TTL of 4 h means the
+ * ranking refreshes at most 6 times per day, which is sufficient for this purpose.
  *
  * FVG (Fair Value Gap):
  *   Bullish: high[i-2] < low[i]  → midpoint = (high[i-2] + low[i]) / 2
@@ -57,6 +61,8 @@ const DEFAULT_FVG_OPTIONS: Required<FvgPocOptions> = {
 };
 
 // ── Universe cache ─────────────────────────────────────────────────────────
+// Source: /fapi/v1/ticker/24hr  quoteVolume = rolling 24h USDT turnover.
+// NOT strictly prior-day.  Per-symbol 1d klines would be exact but cost is prohibitive.
 
 interface UniverseEntry {
   symbol: string;
@@ -237,6 +243,7 @@ async function scanSymbolFvg(
   interval: ScanInterval,
   direction: ScanDirection,
   opts: Required<FvgPocOptions>,
+  passedUniverseFilter: boolean,
   signal?: AbortSignal,
 ): Promise<ScanCandidate | null> {
   const iMs = intervalToMs(interval);
@@ -327,6 +334,13 @@ async function scanSymbolFvg(
   const rr = R > 0 ? Math.abs(tp2 - lastClose) / R : 0;
   const score = Math.round(Math.min(100, 40 + rr * 15 + Math.min(fvgs.length, 20)));
 
+  // FVG metadata: how far the confirmed bar closed beyond the POC
+  // LONG: positive means close > poc (bar extended above poc)
+  // SHORT: positive means poc > close (bar extended below poc)
+  const fvgBreakoutExtensionPct = isLong
+    ? (lastClose - poc) / poc * 100
+    : (poc - lastClose) / poc * 100;
+
   const drawingGroups = buildFvgDrawings(symbol, foundDir, poc, lastClose, sl, tp2);
 
   return {
@@ -355,6 +369,11 @@ async function scanSymbolFvg(
     triggeredAt: status === 'TRIGGERED' ? lastCloseTime : undefined,
     distanceNowPct,
     strategyId: 'fvg-poc-ema72',
+    // FVG analysis metadata
+    pocPrice: poc,
+    fvgEma: ema,
+    fvgBreakoutExtensionPct,
+    fvgPassedUniverseFilter: passedUniverseFilter,
   };
 }
 
@@ -377,8 +396,10 @@ async function runFvgPocEma72ScanInternal(
     return;
   }
 
-  // Apply universe filter: intersect provided symbols with top-N by volume
+  // Apply universe filter: intersect provided symbols with top-N by rolling-24h quoteVolume.
+  // (Not strictly prior-day — see file header comment for rationale.)
   let filteredSymbols = symbols;
+  let passedUniverseFilter = false; // true = filter was active AND fetch succeeded
   if (opts.fvgUniverseTopN > 0) {
     try {
       const universe = await fetchTopNByVolume(opts.fvgUniverseTopN, signal);
@@ -388,9 +409,11 @@ async function runFvgPocEma72ScanInternal(
         options?.onStatus?.('FVG 유니버스 필터 후 심볼 없음', 'warn');
         return;
       }
+      passedUniverseFilter = true;
     } catch {
-      options?.onStatus?.('유니버스 로드 실패 — 필터 없이 진행', 'warn');
+      options?.onStatus?.('유니버스 로드 실패 — 필터 없이 진행 (passedUniverseFilter=false)', 'warn');
       filteredSymbols = symbols;
+      passedUniverseFilter = false;
     }
   }
 
@@ -421,7 +444,7 @@ async function runFvgPocEma72ScanInternal(
       const sym = queue.shift();
       if (!sym) return;
       try {
-        const result = await scanSymbolFvg(sym, interval, direction, opts, signal);
+        const result = await scanSymbolFvg(sym, interval, direction, opts, passedUniverseFilter, signal);
         if (result) onResult(result);
       } catch { /* swallow per-symbol errors */ } finally {
         done++;
