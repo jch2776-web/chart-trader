@@ -81,22 +81,43 @@ const PRESETS: Record<'breakout' | 'leader-retest' | 'fvg-poc-ema72', Preset[]> 
   ],
   'fvg-poc-ema72': [
     {
-      label: '보수적',
+      label: 'FVG 검증-보수',
       tone: 'safe',
-      desc: 'LONG·유니버스100·POC500봉·EMA72',
-      patch: { direction: 'long', minScore: 60, leverage: 10, riskPct: 1.5, cadenceMinutes: 60, maxPositions: 3, cooldownBarsAfterLoss: 2, maxConcurrentCorrelatedPositions: 1 },
+      desc: 'LONG·레버5·Age90s·Ext0.45%·Drift0.55%·TS6봉',
+      patch: {
+        direction: 'long', minScore: 80, leverage: 5, riskPct: 1.0, cadenceMinutes: 60,
+        maxPositions: 2, cooldownBarsAfterLoss: 2, maxConcurrentCorrelatedPositions: 1,
+        fvgPocLookbackBars: 500, fvgPocBins: 40, fvgEmaPeriod: 72,
+        fvgUniverseTopN: 100, fvgDirection: 'long',
+        maxSignalAgeSec: 90, maxBreakoutExtensionPct: 0.45, maxEntryDriftPct: 0.55,
+        labTimeStopEnabled: true, labTimeStopBars: 6,
+      },
     },
     {
-      label: '균형형',
+      label: 'FVG 검증-균형',
       tone: 'balanced',
-      desc: '양방향·유니버스100·POC500봉·EMA72',
-      patch: { direction: 'both', minScore: 55, leverage: 10, riskPct: 2, cadenceMinutes: 60, maxPositions: 5, cooldownBarsAfterLoss: 1, maxConcurrentCorrelatedPositions: 2 },
+      desc: 'LONG·레버5·Age120s·Ext0.60%·Drift0.75%·TS8봉',
+      patch: {
+        direction: 'long', minScore: 75, leverage: 5, riskPct: 1.5, cadenceMinutes: 60,
+        maxPositions: 3, cooldownBarsAfterLoss: 1, maxConcurrentCorrelatedPositions: 1,
+        fvgPocLookbackBars: 500, fvgPocBins: 40, fvgEmaPeriod: 72,
+        fvgUniverseTopN: 100, fvgDirection: 'long',
+        maxSignalAgeSec: 120, maxBreakoutExtensionPct: 0.60, maxEntryDriftPct: 0.75,
+        labTimeStopEnabled: true, labTimeStopBars: 8,
+      },
     },
     {
-      label: '공격적',
+      label: 'FVG 방향비교',
       tone: 'aggressive',
-      desc: '양방향·유니버스200·쿨다운없음·레버20',
-      patch: { direction: 'both', minScore: 45, leverage: 20, riskPct: 3, cadenceMinutes: 60, maxPositions: 8, cooldownBarsAfterLoss: undefined, maxConcurrentCorrelatedPositions: undefined },
+      desc: '양방향·레버3·Age90s·Ext0.45%·Drift0.55%·TS6봉',
+      patch: {
+        direction: 'both', minScore: 80, leverage: 3, riskPct: 0.75, cadenceMinutes: 60,
+        maxPositions: 2, cooldownBarsAfterLoss: 2, maxConcurrentCorrelatedPositions: 1,
+        fvgPocLookbackBars: 500, fvgPocBins: 40, fvgEmaPeriod: 72,
+        fvgUniverseTopN: 100, fvgDirection: 'both',
+        maxSignalAgeSec: 90, maxBreakoutExtensionPct: 0.45, maxEntryDriftPct: 0.55,
+        labTimeStopEnabled: true, labTimeStopBars: 6,
+      },
     },
   ],
 };
@@ -346,6 +367,19 @@ function AddExperimentForm({ onAdd, onCancel, initialForm, diffBase }: {
       retestMaxBars: patch.retestMaxBars ?? p.retestMaxBars,
       retestToleranceAtr: patch.retestToleranceAtr ?? p.retestToleranceAtr,
       retestMaxOvershootAtr: patch.retestMaxOvershootAtr ?? p.retestMaxOvershootAtr,
+      // FVG-specific fields
+      ...(patch.fvgPocLookbackBars !== undefined ? { fvgPocLookbackBars: patch.fvgPocLookbackBars } : {}),
+      ...(patch.fvgPocBins !== undefined ? { fvgPocBins: patch.fvgPocBins } : {}),
+      ...(patch.fvgEmaPeriod !== undefined ? { fvgEmaPeriod: patch.fvgEmaPeriod } : {}),
+      ...(patch.fvgUniverseTopN !== undefined ? { fvgUniverseTopN: patch.fvgUniverseTopN } : {}),
+      ...(patch.fvgDirection !== undefined ? { fvgDirection: patch.fvgDirection } : {}),
+      // Late-entry filter fields (shared by breakout + fvg); null → 0 (disabled)
+      ...(patch.maxSignalAgeSec !== undefined ? { maxSignalAgeSec: patch.maxSignalAgeSec ?? 0 } : {}),
+      ...(patch.maxBreakoutExtensionPct !== undefined ? { maxBreakoutExtensionPct: patch.maxBreakoutExtensionPct ?? 0 } : {}),
+      ...(patch.maxEntryDriftPct !== undefined ? { maxEntryDriftPct: patch.maxEntryDriftPct ?? 0 } : {}),
+      // Lab timestop fields
+      ...(patch.labTimeStopEnabled !== undefined ? { labTimeStopEnabled: patch.labTimeStopEnabled } : {}),
+      ...(patch.labTimeStopBars !== undefined ? { labTimeStopBars: patch.labTimeStopBars } : {}),
     }));
   };
 
@@ -523,6 +557,12 @@ function AddExperimentForm({ onAdd, onCancel, initialForm, diffBase }: {
           {form.strategyId === 'fvg-poc-ema72' && <>
             <SectionHead title="FVG POC + EMA72 파라미터" />
 
+            <div style={{ gridColumn: '1 / -1', fontSize: '0.70rem', color: '#c47cf7', background: 'rgba(196,124,247,0.06)', border: '1px solid rgba(196,124,247,0.18)', borderRadius: 5, padding: '6px 8px', lineHeight: 1.6 }}>
+              💡 첫 검증은 <b>FVG 검증-보수</b> 프리셋부터 시작하세요.
+              LONG only → 결과 안정 확인 후 <b>FVG 검증-균형</b>과 비교.
+              LONG 성과가 일관될 때만 <b>FVG 방향비교</b>(양방향) 사용.
+            </div>
+
             <label style={S.formLabel}>방향 스캔</label>
             <select style={S.input} value={form.fvgDirection}
               onChange={e => set('fvgDirection', e.target.value as 'long' | 'short' | 'both')}>
@@ -531,32 +571,55 @@ function AddExperimentForm({ onAdd, onCancel, initialForm, diffBase }: {
               <option value="short">SHORT만</option>
             </select>
 
-            <label style={S.formLabel}>POC 조회봉수</label>
+            <label style={S.formLabel}>POC 조회봉수<DiffDot cur={form.fvgPocLookbackBars} base={diffBase?.fvgPocLookbackBars} /></label>
             <div>
               <input style={S.input} type="number" min={100} max={1500} step={50} value={form.fvgPocLookbackBars}
                 onChange={e => set('fvgPocLookbackBars', Number(e.target.value))} />
-              <Helper text="FVG 수집 범위 (봉). 클수록 안정적인 POC, 느린 갱신 (기본 500)" />
+              <Helper text="길수록 더 안정적이고 느린 POC 갱신. 짧을수록 최근 가격에 민감 (기본 500)" />
             </div>
 
-            <label style={S.formLabel}>히스토그램 구간</label>
+            <label style={S.formLabel}>히스토그램 구간<DiffDot cur={form.fvgPocBins} base={diffBase?.fvgPocBins} /></label>
             <div>
               <input style={S.input} type="number" min={10} max={200} step={5} value={form.fvgPocBins}
                 onChange={e => set('fvgPocBins', Number(e.target.value))} />
-              <Helper text="POC 히스토그램 bins 수. 많을수록 세밀한 POC (기본 40)" />
+              <Helper text="POC 해상도. 많을수록 세밀하나 과민해질 수 있음 (기본 40)" />
             </div>
 
-            <label style={S.formLabel}>EMA 기간</label>
+            <label style={S.formLabel}>EMA 기간<DiffDot cur={form.fvgEmaPeriod} base={diffBase?.fvgEmaPeriod} /></label>
             <div>
               <input style={S.input} type="number" min={10} max={500} step={1} value={form.fvgEmaPeriod}
                 onChange={e => set('fvgEmaPeriod', Number(e.target.value))} />
-              <Helper text="추세 필터용 EMA 기간. LONG: close > EMA, SHORT: close < EMA (기본 72)" />
+              <Helper text="추세 필터 EMA 기간. 길수록 보수적 추세 확인 (기본 72, LONG: close>EMA)" />
             </div>
 
-            <label style={S.formLabel}>유니버스 상위</label>
+            <label style={S.formLabel}>유니버스 상위<DiffDot cur={form.fvgUniverseTopN} base={diffBase?.fvgUniverseTopN} /></label>
             <div>
               <input style={S.input} type="number" min={10} max={300} step={10} value={form.fvgUniverseTopN}
                 onChange={e => set('fvgUniverseTopN', Number(e.target.value))} />
-              <Helper text="전일 거래대금 상위 N개 심볼만 스캔 (4h 캐시). 0이면 전체 (기본 100)" />
+              <Helper text="24h 거래대금 상위 N개 심볼만 스캔 (4h 캐시). 유동성 낮은 종목 제외 (기본 100)" />
+            </div>
+
+            <SectionHead title="FVG 진입 품질 필터 (POC 기준)" />
+
+            <label style={S.formLabel}>신호 유효시간(초)<DiffDot cur={form.maxSignalAgeSec} base={diffBase?.maxSignalAgeSec} /></label>
+            <div>
+              <input style={S.input} type="number" min={0} step={30} value={form.maxSignalAgeSec}
+                onChange={e => set('maxSignalAgeSec', Number(e.target.value))} />
+              <Helper text="스캔 지연이 N초 초과하면 해당 봉 진입 스킵. 0=비활성 (추천: 90~120)" />
+            </div>
+
+            <label style={S.formLabel}>이탈폭 한도(%)<DiffDot cur={form.maxBreakoutExtensionPct} base={diffBase?.maxBreakoutExtensionPct} /></label>
+            <div>
+              <input style={S.input} type="number" min={0} max={10} step={0.05} value={form.maxBreakoutExtensionPct}
+                onChange={e => set('maxBreakoutExtensionPct', Number(e.target.value))} />
+              <Helper text="확정봉 종가가 POC 대비 N% 초과하면 스킵. 낮을수록 과열 확정봉 차단 (추천: 0.45~0.60)" />
+            </div>
+
+            <label style={S.formLabel}>추격진입 한도(%)<DiffDot cur={form.maxEntryDriftPct} base={diffBase?.maxEntryDriftPct} /></label>
+            <div>
+              <input style={S.input} type="number" min={0} max={5} step={0.05} value={form.maxEntryDriftPct}
+                onChange={e => set('maxEntryDriftPct', Number(e.target.value))} />
+              <Helper text="주문 시점 현재가가 진입가 대비 N% 이상 추격 시 스킵. 낮을수록 주문 시점 추격 차단 (추천: 0.55~0.75)" />
             </div>
           </>}
 
@@ -829,10 +892,11 @@ function ExperimentCard({ exp, onToggle, onRemove, onResetBalance, onClearHistor
   const s = exp.stats;
   const pnlColor = s.totalPnl >= 0 ? '#0ecb81' : '#f6465d';
   const isRetest = cfg.strategyId === 'leader-retest';
+  const isFvg = cfg.strategyId === 'fvg-poc-ema72';
   const configDiffs = baseline && !isBaseline ? getConfigDiffs(cfg, baseline.config!) : [];
   const diagnosis = baseline && !isBaseline ? getDiagnosis(exp, baseline) : '';
-  const accentColor = isRetest ? '#c47cf7' : '#3b8beb';
-  const accentRgb = isRetest ? '196,124,247' : '59,139,235';
+  const accentColor = isRetest ? '#c47cf7' : isFvg ? '#f0b90b' : '#3b8beb';
+  const accentRgb = isRetest ? '196,124,247' : isFvg ? '240,185,11' : '59,139,235';
 
   const cardWarnings = detectWarnings(
     cfg.strategyId, cfg.direction, cfg.leverage, cfg.riskPct,
@@ -872,8 +936,28 @@ function ExperimentCard({ exp, onToggle, onRemove, onResetBalance, onClearHistor
           }} />
           <span style={S.cardName}>{cfg.name}</span>
           <span style={{ ...S.badge, color: accentColor, borderColor: `rgba(${accentRgb},0.35)`, background: `rgba(${accentRgb},0.08)` }}>
-            {isRetest ? '리테스트' : '돌파'}
+            {isRetest ? '리테스트' : isFvg ? 'FVG POC' : '돌파'}
           </span>
+          {isFvg && (cfg.maxSignalAgeSec ?? 0) > 0 && (
+            <span style={{ ...S.badge, color: '#8aa8cc', borderColor: 'rgba(138,168,204,0.25)', fontSize: '0.60rem' }}>
+              Age {cfg.maxSignalAgeSec}s
+            </span>
+          )}
+          {isFvg && (cfg.maxBreakoutExtensionPct ?? 0) > 0 && (
+            <span style={{ ...S.badge, color: '#8aa8cc', borderColor: 'rgba(138,168,204,0.25)', fontSize: '0.60rem' }}>
+              Ext {cfg.maxBreakoutExtensionPct}%
+            </span>
+          )}
+          {isFvg && (cfg.maxEntryDriftPct ?? 0) > 0 && (
+            <span style={{ ...S.badge, color: '#8aa8cc', borderColor: 'rgba(138,168,204,0.25)', fontSize: '0.60rem' }}>
+              Drift {cfg.maxEntryDriftPct}%
+            </span>
+          )}
+          {isFvg && cfg.labTimeStopEnabled && cfg.labTimeStopBars && (
+            <span style={{ ...S.badge, color: '#b0b070', borderColor: 'rgba(176,176,112,0.25)', fontSize: '0.60rem' }}>
+              TS {cfg.labTimeStopBars}봉
+            </span>
+          )}
           {isBaseline && <span style={{ ...S.badge, color: '#f0b90b', borderColor: 'rgba(240,185,11,0.4)', background: 'rgba(240,185,11,0.08)' }}>★ 기준</span>}
           {exp.scanning && <span className="lab-scanning-badge" style={{ ...S.badge, color: '#f0b90b', borderColor: 'rgba(240,185,11,0.3)', background: 'rgba(240,185,11,0.08)' }}>스캔중</span>}
           {cardWarnings.length > 0 && <span style={{ ...S.badge, color: '#c8a640', borderColor: 'rgba(200,166,64,0.3)' }}>주의</span>}
@@ -1120,6 +1204,13 @@ function getConfigDiffs(cfg: LabExperimentConfig, baseline: LabExperimentConfig)
     if ((cfg.maxBreakoutExtensionPct ?? 0) !== (baseline.maxBreakoutExtensionPct ?? 0)) d.push(`이탈폭≤${cfg.maxBreakoutExtensionPct ?? '∞'}%`);
     if ((cfg.maxEntryDriftPct ?? 0) !== (baseline.maxEntryDriftPct ?? 0)) d.push(`추격≤${cfg.maxEntryDriftPct ?? '∞'}%`);
     if ((cfg.breakoutDirection ?? 'both') !== (baseline.breakoutDirection ?? 'both')) d.push(`방향:${cfg.breakoutDirection ?? 'both'}`);
+  }
+  if (cfg.strategyId === 'fvg-poc-ema72') {
+    if ((cfg.maxSignalAgeSec ?? 0) !== (baseline.maxSignalAgeSec ?? 0)) d.push(`Age:${cfg.maxSignalAgeSec ?? 0}s`);
+    if ((cfg.maxBreakoutExtensionPct ?? 0) !== (baseline.maxBreakoutExtensionPct ?? 0)) d.push(`Ext:${cfg.maxBreakoutExtensionPct ?? 0}%`);
+    if ((cfg.maxEntryDriftPct ?? 0) !== (baseline.maxEntryDriftPct ?? 0)) d.push(`Drift:${cfg.maxEntryDriftPct ?? 0}%`);
+    if ((cfg.fvgDirection ?? 'both') !== (baseline.fvgDirection ?? 'both')) d.push(`FVG방향:${cfg.fvgDirection ?? 'both'}`);
+    if ((cfg.fvgEmaPeriod ?? 72) !== (baseline.fvgEmaPeriod ?? 72)) d.push(`EMA:${cfg.fvgEmaPeriod ?? 72}`);
   }
   return d;
 }

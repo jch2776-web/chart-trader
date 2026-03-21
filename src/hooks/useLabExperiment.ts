@@ -285,8 +285,10 @@ export function useLabExperiment(
     const entered = new Set<string>();
 
     for (const interval of dueIntervals) {
-      // ── Breakout: max signal age guard ────────────────────────────────────
-      if (cfg.strategyId === 'breakout' && cfg.maxSignalAgeSec != null && cfg.maxSignalAgeSec > 0) {
+      // ── Breakout / FVG: max signal age guard ──────────────────────────────
+      // Applied to breakout-type strategies (breakout, fvg-poc-ema72).
+      // leader-retest is a pull-back entry — signal age concept does not apply.
+      if ((cfg.strategyId === 'breakout' || cfg.strategyId === 'fvg-poc-ema72') && cfg.maxSignalAgeSec != null && cfg.maxSignalAgeSec > 0) {
         const elapsedSec = (Date.now() - boundaryTime) / 1000;
         if (elapsedSec > cfg.maxSignalAgeSec) {
           continue;
@@ -338,7 +340,7 @@ export function useLabExperiment(
           }
         }
 
-        // ── Breakout-specific candidate filters ───────────────────────────
+        // ── Breakout candidate filters (entry-to-SL based) ────────────────
         if (cfg.strategyId === 'breakout') {
           if (cfg.maxBreakoutExtensionPct != null && cfg.maxBreakoutExtensionPct > 0) {
             const extPct = Math.abs(c.entryPrice - c.slPrice) / c.entryPrice * 100;
@@ -351,6 +353,33 @@ export function useLabExperiment(
             if (mark && mark > 0) {
               const driftPct = Math.abs(mark - c.entryPrice) / c.entryPrice * 100;
               if (driftPct > cfg.maxEntryDriftPct) {
+                continue;
+              }
+            }
+          }
+        }
+
+        // ── FVG POC-based candidate filters ───────────────────────────────
+        // Extension: how far the confirmed bar closed beyond the rolling POC.
+        // Drift: directional check (only block if chasing, not fading).
+        if (cfg.strategyId === 'fvg-poc-ema72') {
+          if (cfg.maxBreakoutExtensionPct != null && cfg.maxBreakoutExtensionPct > 0) {
+            // Prefer pre-computed POC-based extension; fall back to triggerSpec.fixedPrice (= poc)
+            const extPct = c.fvgBreakoutExtensionPct != null
+              ? c.fvgBreakoutExtensionPct
+              : c.direction === 'long'
+                ? (c.entryPrice - c.triggerSpec.fixedPrice) / c.triggerSpec.fixedPrice * 100
+                : (c.triggerSpec.fixedPrice - c.entryPrice) / c.triggerSpec.fixedPrice * 100;
+            if (extPct > cfg.maxBreakoutExtensionPct) {
+              continue;
+            }
+          }
+          if (cfg.maxEntryDriftPct != null && cfg.maxEntryDriftPct > 0) {
+            const mark = markPricesRef.current[c.symbol];
+            if (mark && mark > 0) {
+              const rawDrift = (mark - c.entryPrice) / c.entryPrice * 100;
+              const isChasing = c.direction === 'long' ? rawDrift > 0 : rawDrift < 0;
+              if (isChasing && Math.abs(rawDrift) > cfg.maxEntryDriftPct) {
                 continue;
               }
             }
