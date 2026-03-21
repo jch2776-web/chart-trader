@@ -290,6 +290,9 @@ function formToConfig(f: FormState): Omit<LabExperimentConfig, 'id'> {
     cfg.fvgEmaPeriod = f.fvgEmaPeriod;
     cfg.fvgUniverseTopN = f.fvgUniverseTopN;
     cfg.fvgDirection = f.fvgDirection;
+    cfg.maxSignalAgeSec = f.maxSignalAgeSec > 0 ? f.maxSignalAgeSec : null;
+    cfg.maxBreakoutExtensionPct = f.maxBreakoutExtensionPct > 0 ? f.maxBreakoutExtensionPct : null;
+    cfg.maxEntryDriftPct = f.maxEntryDriftPct > 0 ? f.maxEntryDriftPct : null;
   } else {
     cfg.breakoutDirection = f.breakoutDirection;
     cfg.maxSignalAgeSec = f.maxSignalAgeSec > 0 ? f.maxSignalAgeSec : null;

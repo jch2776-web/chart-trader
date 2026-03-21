@@ -2902,15 +2902,15 @@ export function BottomPanel({
                                 <button
                                   style={{
                                     fontSize: '0.58rem',
-                                    background: altMeta.strategyId === 'leader-retest' ? 'rgba(155,89,182,0.18)' : 'rgba(59,139,235,0.18)',
-                                    color: altMeta.strategyId === 'leader-retest' ? '#9b59b6' : '#3b8beb',
+                                    background: altMeta.strategyId === 'fvg-poc-ema72' ? 'rgba(240,185,11,0.18)' : altMeta.strategyId === 'leader-retest' ? 'rgba(155,89,182,0.18)' : 'rgba(59,139,235,0.18)',
+                                    color: altMeta.strategyId === 'fvg-poc-ema72' ? '#f0b90b' : altMeta.strategyId === 'leader-retest' ? '#9b59b6' : '#3b8beb',
                                     borderRadius: 3, padding: '1px 5px', fontWeight: 700,
-                                    border: `1px solid ${altMeta.strategyId === 'leader-retest' ? 'rgba(155,89,182,0.4)' : 'rgba(59,139,235,0.4)'}`,
+                                    border: `1px solid ${altMeta.strategyId === 'fvg-poc-ema72' ? 'rgba(240,185,11,0.4)' : altMeta.strategyId === 'leader-retest' ? 'rgba(155,89,182,0.4)' : 'rgba(59,139,235,0.4)'}`,
                                     cursor: 'pointer', lineHeight: 1.3, marginLeft: 4,
                                   }}
                                   onClick={() => onOpenAltPosition?.(altMeta)}
                                   title="ALT추천 스냅샷 보기"
-                                >{altMeta.strategyId === 'leader-retest' ? 'ALT+리테스트' : 'ALT+돌파'}</button>
+                                >{altMeta.strategyId === 'fvg-poc-ema72' ? 'FVG POC' : altMeta.strategyId === 'leader-retest' ? '리더-리테스트' : '기존 돌파'}</button>
                                 {altMeta.candidateScore != null && (
                                   <span style={{ fontSize: '0.58rem', background: 'rgba(240,185,11,0.1)', color: '#f0b90b', borderRadius: 3, padding: '1px 4px', fontWeight: 700, marginLeft: 2 }}>{altMeta.candidateScore}점</span>
                                 )}
@@ -3052,15 +3052,15 @@ export function BottomPanel({
                                 <button
                                   style={{
                                     fontSize: '0.58rem',
-                                    background: liveMeta.strategyId === 'leader-retest' ? 'rgba(155,89,182,0.18)' : 'rgba(59,139,235,0.18)',
-                                    color: liveMeta.strategyId === 'leader-retest' ? '#9b59b6' : '#3b8beb',
+                                    background: liveMeta.strategyId === 'fvg-poc-ema72' ? 'rgba(240,185,11,0.18)' : liveMeta.strategyId === 'leader-retest' ? 'rgba(155,89,182,0.18)' : 'rgba(59,139,235,0.18)',
+                                    color: liveMeta.strategyId === 'fvg-poc-ema72' ? '#f0b90b' : liveMeta.strategyId === 'leader-retest' ? '#9b59b6' : '#3b8beb',
                                     borderRadius: 3, padding: '1px 5px', fontWeight: 700,
-                                    border: `1px solid ${liveMeta.strategyId === 'leader-retest' ? 'rgba(155,89,182,0.4)' : 'rgba(59,139,235,0.4)'}`,
+                                    border: `1px solid ${liveMeta.strategyId === 'fvg-poc-ema72' ? 'rgba(240,185,11,0.4)' : liveMeta.strategyId === 'leader-retest' ? 'rgba(155,89,182,0.4)' : 'rgba(59,139,235,0.4)'}`,
                                     cursor: 'pointer', lineHeight: 1.3, marginLeft: 4,
                                   }}
                                   onClick={() => onOpenAltPosition?.(liveMeta)}
                                   title="ALT추천 스냅샷 보기"
-                                >{liveMeta.strategyId === 'leader-retest' ? 'ALT+리테스트' : 'ALT+돌파'}</button>
+                                >{liveMeta.strategyId === 'fvg-poc-ema72' ? 'FVG POC' : liveMeta.strategyId === 'leader-retest' ? '리더-리테스트' : '기존 돌파'}</button>
                                 {liveMeta.candidateScore != null && (
                                   <span style={{ fontSize: '0.58rem', background: 'rgba(240,185,11,0.1)', color: '#f0b90b', borderRadius: 3, padding: '1px 4px', fontWeight: 700, marginLeft: 2 }}>{liveMeta.candidateScore}점</span>
                                 )}

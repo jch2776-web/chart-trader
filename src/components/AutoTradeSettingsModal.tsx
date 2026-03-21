@@ -238,6 +238,7 @@ function SettingsEditor({
   const minTfMinutes = Math.min(...draft.scanIntervals.map(tfToMinutes));
   const cadenceFasterThanMinTf = cadence < minTfMinutes;
   const isLeaderRetest = (draft.strategyId ?? 'breakout') === 'leader-retest';
+  const isFvg = (draft.strategyId ?? 'breakout') === 'fvg-poc-ema72';
   return (
     <>
       {/* Leverage */}
@@ -405,22 +406,16 @@ function SettingsEditor({
         <span style={s.hint}>한 번의 스캔 사이클에서 자동 진입 허용 수 (전체 TF 합산, 기본 1)</span>
       </div>
 
-      {/* Chase-entry prevention */}
+      {/* Chase-entry prevention — shown for breakout & FVG; hidden for leader-retest (not applicable) */}
+      {!isLeaderRetest && (
       <div style={s.fieldRow}>
         <label style={s.label}>추격 진입 방지</label>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
 
           {/* ① Signal age */}
-          <div style={{ background: 'rgba(14,203,129,0.04)', border: '1px solid rgba(14,203,129,0.12)', borderRadius: 6, padding: '8px 10px', opacity: isLeaderRetest ? 0.38 : 1 }}>
+          <div style={{ background: 'rgba(14,203,129,0.04)', border: '1px solid rgba(14,203,129,0.12)', borderRadius: 6, padding: '8px 10px' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ fontSize: '0.76rem', color: '#9aa4b5', fontWeight: 700 }}>① 신호봉 경과 시간</span>
-                {isLeaderRetest && (
-                  <span style={{ fontSize: '0.66rem', color: '#5e6673', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 3, padding: '1px 5px' }}>
-                    리테스트 미적용
-                  </span>
-                )}
-              </div>
+              <span style={{ fontSize: '0.76rem', color: '#9aa4b5', fontWeight: 700 }}>① 신호봉 경과 시간</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <input
                   type="number"
@@ -428,67 +423,47 @@ function SettingsEditor({
                   value={draft.maxSignalAgeSec ?? 120}
                   onChange={e => set('maxSignalAgeSec', Math.max(0, Math.min(600, parseInt(e.target.value) || 0)))}
                   style={s.numberInput}
-                  disabled={isLeaderRetest}
                 />
                 <span style={s.unit}>초</span>
               </div>
             </div>
             <SignalAgeDiagram value={draft.maxSignalAgeSec ?? 120} />
             <div style={s.hint}>
-              {isLeaderRetest
-                ? '리더-리테스트 전략에서는 신호 경과 시간 필터가 자동으로 무시됩니다.'
+              {isFvg
+                ? 'POC 확정봉 이후 이 시간 안에 진입해야 함. 예) 90초 → FVG 신호봉 확정 후 90초 내 처리 안 되면 스킵.'
                 : '신호봉 확정 후 이 시간 안에 진입해야 함. 예) 120초 → 정각 스캔 후 2분 내 처리 안 되면 스킵.'}
             </div>
           </div>
 
-          {/* ② Breakout extension */}
-          {(() => {
-            return (
-              <div style={{ position: 'relative' as const, opacity: isLeaderRetest ? 0.38 : 1 }}>
-                <div style={{ background: 'rgba(240,185,11,0.04)', border: '1px solid rgba(240,185,11,0.12)', borderRadius: 6, padding: '8px 10px' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <span style={{ fontSize: '0.76rem', color: '#9aa4b5', fontWeight: 700 }}>② 신호봉 돌파선 이탈폭</span>
-                      {isLeaderRetest && (
-                        <span style={{ fontSize: '0.66rem', color: '#5e6673', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 3, padding: '1px 5px' }}>
-                          리테스트 미적용
-                        </span>
-                      )}
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                      <input
-                        type="number"
-                        min={0} max={10} step={0.1}
-                        value={draft.maxBreakoutExtensionPct ?? 0.6}
-                        onChange={e => set('maxBreakoutExtensionPct', Math.max(0, Math.min(10, parseFloat(e.target.value) || 0)))}
-                        style={s.numberInput}
-                        disabled={isLeaderRetest}
-                      />
-                      <span style={s.unit}>%</span>
-                    </div>
-                  </div>
-                  <BreakoutExtDiagram value={isLeaderRetest ? 0 : (draft.maxBreakoutExtensionPct ?? 0.6)} />
-                  <div style={s.hint}>
-                    {isLeaderRetest
-                      ? '리더-리테스트 전략에서는 돌파선 이탈폭 개념이 없으므로 이 필터는 자동으로 무시됩니다.'
-                      : '신호봉 종가가 돌파선(트리거)에서 너무 멀리 닫히면 과열 신호로 차단. 예) 0.6% → 돌파선 100 기준 종가 100.6 이상이면 스킵.'}
-                  </div>
-                </div>
+          {/* ② Extension — POC-based for FVG, breakout-line for breakout */}
+          <div style={{ background: 'rgba(240,185,11,0.04)', border: '1px solid rgba(240,185,11,0.12)', borderRadius: 6, padding: '8px 10px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
+              <span style={{ fontSize: '0.76rem', color: '#9aa4b5', fontWeight: 700 }}>
+                {isFvg ? '② POC 이탈폭' : '② 신호봉 돌파선 이탈폭'}
+              </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <input
+                  type="number"
+                  min={0} max={10} step={0.1}
+                  value={draft.maxBreakoutExtensionPct ?? 0.6}
+                  onChange={e => set('maxBreakoutExtensionPct', Math.max(0, Math.min(10, parseFloat(e.target.value) || 0)))}
+                  style={s.numberInput}
+                />
+                <span style={s.unit}>%</span>
               </div>
-            );
-          })()}
+            </div>
+            <BreakoutExtDiagram value={draft.maxBreakoutExtensionPct ?? 0.6} />
+            <div style={s.hint}>
+              {isFvg
+                ? 'POC 돌파 확정봉 종가가 POC 대비 이 % 이상 벌어지면 과열로 차단. 예) 0.45% → POC 100 기준 종가 100.45 이상이면 스킵.'
+                : '신호봉 종가가 돌파선(트리거)에서 너무 멀리 닫히면 과열 신호로 차단. 예) 0.6% → 돌파선 100 기준 종가 100.6 이상이면 스킵.'}
+            </div>
+          </div>
 
           {/* ③ Entry drift */}
-          <div style={{ background: 'rgba(59,139,235,0.04)', border: '1px solid rgba(59,139,235,0.12)', borderRadius: 6, padding: '8px 10px', opacity: isLeaderRetest ? 0.38 : 1 }}>
+          <div style={{ background: 'rgba(59,139,235,0.04)', border: '1px solid rgba(59,139,235,0.12)', borderRadius: 6, padding: '8px 10px' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 2 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ fontSize: '0.76rem', color: '#9aa4b5', fontWeight: 700 }}>③ 주문 시점 추격 이탈폭</span>
-                {isLeaderRetest && (
-                  <span style={{ fontSize: '0.66rem', color: '#5e6673', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 3, padding: '1px 5px' }}>
-                    리테스트 미적용
-                  </span>
-                )}
-              </div>
+              <span style={{ fontSize: '0.76rem', color: '#9aa4b5', fontWeight: 700 }}>③ 주문 시점 추격 이탈폭</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <input
                   type="number"
@@ -496,21 +471,21 @@ function SettingsEditor({
                   value={draft.maxEntryDriftPct ?? 1.0}
                   onChange={e => set('maxEntryDriftPct', Math.max(0, Math.min(10, parseFloat(e.target.value) || 0)))}
                   style={s.numberInput}
-                  disabled={isLeaderRetest}
                 />
                 <span style={s.unit}>%</span>
               </div>
             </div>
-            <EntryDriftDiagram value={isLeaderRetest ? 0 : (draft.maxEntryDriftPct ?? 1.0)} />
+            <EntryDriftDiagram value={draft.maxEntryDriftPct ?? 1.0} />
             <div style={s.hint}>
-              {isLeaderRetest
-                ? '리더-리테스트 전략에서는 추격 이탈폭 필터가 자동으로 무시됩니다.'
+              {isFvg
+                ? '주문 시점 현재가가 계획 진입가 대비 추격 방향으로 이 % 이상 이탈하면 차단. LONG: 현재가 > 진입가 + N%. SHORT: 현재가 < 진입가 − N%.'
                 : '스캔 후 주문 시점 현재가가 계획 진입가 대비 이 % 이상 추격 방향으로 이탈하면 차단. 예) 1% → LONG 시 현재가가 진입가보다 1% 이상 높으면 스킵.'}
             </div>
           </div>
 
         </div>
       </div>
+      )}
 
       {/* Unattended cadence */}
       <div style={s.fieldRow}>
