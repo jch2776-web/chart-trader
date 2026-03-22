@@ -2564,7 +2564,11 @@ export function BottomPanel({
                       <span style={s.symbolFull}>{h.symbol}</span>
                     </div>
                     {h.isAltTrade && (
-                      h.strategyId === 'leader-retest' ? (
+                      h.strategyId === 'fvg-poc-ema72' ? (
+                        <span style={{ fontSize: '0.58rem', background: 'rgba(240,185,11,0.18)', color: '#f0b90b', borderRadius: 3, padding: '1px 5px', fontWeight: 700, border: '1px solid rgba(240,185,11,0.4)', marginLeft: 4 }}>
+                          FVG POC + EMA72
+                        </span>
+                      ) : h.strategyId === 'leader-retest' ? (
                         <span style={{ fontSize: '0.58rem', background: 'rgba(155,89,182,0.18)', color: '#9b59b6', borderRadius: 3, padding: '1px 5px', fontWeight: 700, border: '1px solid rgba(155,89,182,0.4)', marginLeft: 4 }}>
                           ALT추천 + 리테스트
                         </span>
@@ -2910,7 +2914,7 @@ export function BottomPanel({
                                   }}
                                   onClick={() => onOpenAltPosition?.(altMeta)}
                                   title="ALT추천 스냅샷 보기"
-                                >{altMeta.strategyId === 'fvg-poc-ema72' ? 'FVG POC' : altMeta.strategyId === 'leader-retest' ? '리더-리테스트' : '기존 돌파'}</button>
+                                >{altMeta.strategyId === 'fvg-poc-ema72' ? 'FVG POC + EMA72' : altMeta.strategyId === 'leader-retest' ? '리더-리테스트' : '기존 돌파'}</button>
                                 {altMeta.candidateScore != null && (
                                   <span style={{ fontSize: '0.58rem', background: 'rgba(240,185,11,0.1)', color: '#f0b90b', borderRadius: 3, padding: '1px 4px', fontWeight: 700, marginLeft: 2 }}>{altMeta.candidateScore}점</span>
                                 )}
@@ -3060,7 +3064,7 @@ export function BottomPanel({
                                   }}
                                   onClick={() => onOpenAltPosition?.(liveMeta)}
                                   title="ALT추천 스냅샷 보기"
-                                >{liveMeta.strategyId === 'fvg-poc-ema72' ? 'FVG POC' : liveMeta.strategyId === 'leader-retest' ? '리더-리테스트' : '기존 돌파'}</button>
+                                >{liveMeta.strategyId === 'fvg-poc-ema72' ? 'FVG POC + EMA72' : liveMeta.strategyId === 'leader-retest' ? '리더-리테스트' : '기존 돌파'}</button>
                                 {liveMeta.candidateScore != null && (
                                   <span style={{ fontSize: '0.58rem', background: 'rgba(240,185,11,0.1)', color: '#f0b90b', borderRadius: 3, padding: '1px 4px', fontWeight: 700, marginLeft: 2 }}>{liveMeta.candidateScore}점</span>
                                 )}

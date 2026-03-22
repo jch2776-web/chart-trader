@@ -416,7 +416,14 @@ function AddExperimentForm({ onAdd, onCancel, initialForm, diffBase }: {
 
         <label style={S.formLabel}>전략</label>
         <select style={S.input} value={form.strategyId}
-          onChange={e => { set('strategyId', e.target.value as 'breakout' | 'leader-retest' | 'fvg-poc-ema72'); }}>
+          onChange={e => {
+            const sid = e.target.value as 'breakout' | 'leader-retest' | 'fvg-poc-ema72';
+            set('strategyId', sid);
+            // Auto-adjust minScore to a sensible default for each strategy's scoring range
+            if (sid === 'fvg-poc-ema72') set('minScore', 75);
+            else if (sid === 'leader-retest') set('minScore', 80);
+            else set('minScore', 90);
+          }}>
           <option value="breakout">돌파 (Breakout)</option>
           <option value="leader-retest">리더 리테스트</option>
           <option value="fvg-poc-ema72">FVG POC + EMA72</option>
@@ -458,7 +465,13 @@ function AddExperimentForm({ onAdd, onCancel, initialForm, diffBase }: {
           <div>
             <input style={S.input} type="number" min={0} max={120} value={form.minScore}
               onChange={e => set('minScore', Number(e.target.value))} />
-            <Helper text="높을수록 거래 수↓ · 품질 기대↑ (기본 90)" />
+            <Helper text={
+              form.strategyId === 'fvg-poc-ema72'
+                ? 'FVG 점수 범위 40~80 · 75점 내외 권장 (90 이상이면 진입 없음)'
+                : form.strategyId === 'leader-retest'
+                ? '리테스트 점수 범위 40~80 · 80점 내외 권장'
+                : '높을수록 거래 수↓ · 품질 기대↑ (기본 90)'
+            } />
           </div>
 
           <label style={S.formLabel}>스캔주기(분)</label>

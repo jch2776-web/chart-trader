@@ -547,9 +547,9 @@ function SettingsEditor({
               onClick={() => {
                 set('strategyId', sid);
                 const cur = draft.minCandidateScore ?? 90;
-                if (sid === 'leader-retest' && cur >= 80) set('minCandidateScore', 70);
-                if (sid === 'fvg-poc-ema72' && cur >= 80) set('minCandidateScore', 60);
-                if (sid === 'breakout' && cur <= 70) set('minCandidateScore', 90);
+                if (sid === 'leader-retest') set('minCandidateScore', 70);
+                if (sid === 'fvg-poc-ema72') set('minCandidateScore', 75);
+                if (sid === 'breakout') set('minCandidateScore', 90);
               }}
             >
               {sid === 'breakout' ? '기존 돌파' : sid === 'leader-retest' ? '리더-리테스트' : 'FVG POC+EMA72'}
@@ -696,7 +696,7 @@ function SettingsEditor({
           {(draft.strategyId ?? 'breakout') === 'leader-retest'
             ? '리더-리테스트 스코어는 구조적으로 40~80점 범위 — 70점 내외 권장. 전략 전환 시 자동 조정됩니다.'
             : (draft.strategyId ?? 'breakout') === 'fvg-poc-ema72'
-            ? 'FVG POC 스코어는 40~80점 범위 — 60점 내외 권장. 전략 전환 시 자동 조정됩니다.'
+            ? 'FVG POC 스코어는 40~80점 범위 — 75점 내외 권장. 전략 전환 시 자동 조정됩니다.'
             : '기존 돌파 스코어는 0~100점 분포 — 기본 90점. 낮출수록 후보 증가, 높일수록 고품질 집중.'}
         </span>
       </div>
