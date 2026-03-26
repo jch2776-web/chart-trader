@@ -94,6 +94,7 @@ export function useAltAutoTrade({
   fvgOptions,
   breakoutDirection,
   minCandidateScore,
+  breakoutMaxBarsAfterTrigger,
 }: {
   symbols: string[];
   onEnterTrade: (candidate: ScanCandidate) => void;
@@ -115,7 +116,7 @@ export function useAltAutoTrade({
   breakoutDirection?: 'long' | 'short' | 'both';
   /** Minimum candidate score to qualify for auto-entry (default 90) */
   minCandidateScore?: number;
-  /** Breakout only: skip if (now - triggeredAt) > N × intervalMs (default 1) */
+  /** Breakout only: 0 = same bar only, 1 = next bar too, N = N bars later allowed (default 0) */
   breakoutMaxBarsAfterTrigger?: number;
 }) {
   const [isActive, setIsActiveState] = useState<boolean>(() => {
@@ -145,7 +146,7 @@ export function useAltAutoTrade({
   const fvgOptionsRef             = useRef(fvgOptions);
   const breakoutDirectionRef      = useRef<'long' | 'short' | 'both'>(breakoutDirection ?? 'both');
   const scoreThresholdRef         = useRef(minCandidateScore ?? 90);
-  const maxBarsAfterTriggerRef    = useRef(breakoutMaxBarsAfterTrigger ?? 1);
+  const maxBarsAfterTriggerRef    = useRef(breakoutMaxBarsAfterTrigger ?? 0);
   isActiveRef.current             = isActive;
   symbolsRef.current              = symbols;
   onEnterRef.current              = onEnterTrade;
@@ -161,7 +162,7 @@ export function useAltAutoTrade({
   fvgOptionsRef.current           = fvgOptions;
   breakoutDirectionRef.current    = breakoutDirection ?? 'both';
   scoreThresholdRef.current       = minCandidateScore ?? 90;
-  maxBarsAfterTriggerRef.current  = breakoutMaxBarsAfterTrigger ?? 1;
+  maxBarsAfterTriggerRef.current  = breakoutMaxBarsAfterTrigger ?? 0;
 
   const addLog = useCallback((msg: string, type: AutoTradeLog['type'] = 'info') => {
     setLogs(prev => [{ id: ++logSeq, time: Date.now(), msg, type }, ...prev].slice(0, 200));
@@ -327,12 +328,21 @@ export function useAltAutoTrade({
             continue;
           }
           // Gate 2: skip if too many bars have elapsed since trigger
+          // Use bar-index arithmetic to avoid float boundary errors:
+          //   0 = same bar only, 1 = one bar later allowed, N = N bars later allowed
           const triggerTime = c.triggeredAt ?? c.asOfCloseTime;
           const ivMs = intervalToMs(interval);
-          const barsElapsed = (Date.now() - triggerTime) / ivMs;
-          const maxBars = maxBarsAfterTriggerRef.current;
+          const triggerBarIdx = Math.floor(triggerTime / ivMs);
+          const nowBarIdx     = Math.floor(Date.now() / ivMs);
+          const barsElapsed   = nowBarIdx - triggerBarIdx;
+          const maxBars       = maxBarsAfterTriggerRef.current;
           if (barsElapsed > maxBars) {
-            addLog(`⏭ [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — breakout 트리거 후 ${barsElapsed.toFixed(2)}봉 경과 > 허용 ${maxBars}봉 → 진입 스킵`, 'warn');
+            addLog(
+              `⏭ [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — late-after-trigger: ` +
+              `triggeredAt=${new Date(triggerTime).toLocaleTimeString('ko-KR')} ` +
+              `barsElapsed=${barsElapsed} > maxBars=${maxBars} → 진입 스킵`,
+              'warn',
+            );
             continue;
           }
         }

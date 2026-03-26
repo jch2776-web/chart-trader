@@ -1959,7 +1959,7 @@ function AppInner() {
     },
     breakoutDirection: activeAutoTradeSettings.breakoutDirection ?? 'both',
     minCandidateScore: activeAutoTradeSettings.minCandidateScore ?? 90,
-    breakoutMaxBarsAfterTrigger: activeAutoTradeSettings.breakoutMaxBarsAfterTrigger ?? 1,
+    breakoutMaxBarsAfterTrigger: activeAutoTradeSettings.breakoutMaxBarsAfterTrigger ?? 0,
   });
   altAutoTradeSetActiveRef.current = altAutoTrade.setActive;
 

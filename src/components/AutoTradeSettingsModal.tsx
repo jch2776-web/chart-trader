@@ -142,7 +142,7 @@ export interface AutoTradeSettings {
   // Breakout live entry precision controls (only used when strategyId === 'breakout' AND mode === 'live')
   breakoutMarketNearPct?: number;      // drift from trigger line ≤ this → MARKET (default 0.20)
   breakoutLimitIocFarPct?: number;     // drift from trigger line ≤ this → LIMIT_IOC (default 0.50); > this → SKIP
-  breakoutMaxBarsAfterTrigger?: number; // skip entry if (now - triggeredAt) > N × intervalMs (default 1)
+  breakoutMaxBarsAfterTrigger?: number; // 0=same bar only, 1=next bar too, N=N bars later allowed (default 0)
   // FVG POC + EMA72 specific (only used when strategyId === 'fvg-poc-ema72')
   fvgPocLookbackBars?: number;
   fvgPocBins?: number;
@@ -622,16 +622,16 @@ function SettingsEditor({
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                   <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>트리거 후 최대 진입 봉 수</span>
-                  <input type="number" min={1} max={10} step={1}
-                    value={draft.breakoutMaxBarsAfterTrigger ?? 1}
-                    onChange={e => set('breakoutMaxBarsAfterTrigger', Math.max(1, Math.min(10, parseInt(e.target.value) || 1)))}
+                  <input type="number" min={0} max={10} step={1}
+                    value={draft.breakoutMaxBarsAfterTrigger ?? 0}
+                    onChange={e => set('breakoutMaxBarsAfterTrigger', Math.max(0, Math.min(10, parseInt(e.target.value) || 0)))}
                     style={{ ...s.numberInput, width: 60 }} />
                   <span style={s.unit}>봉</span>
                 </div>
               </div>
               <span style={s.hint}>
                 현재가가 돌파 라인에서 ≤ 시장가폭%이면 MARKET, ≤ IOC폭%이면 지정가 IOC @ 라인가격, 초과 시 진입 스킵.
-                트리거 후 최대 봉수 이내인 경우만 진입합니다.
+                트리거 후 최대 봉 수: 0 = 같은 봉만 진입, 1 = 다음 봉까지 허용, 2 = 그 다음 봉까지 허용.
               </span>
             </div>
           )}
