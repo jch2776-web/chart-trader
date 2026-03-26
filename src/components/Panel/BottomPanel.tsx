@@ -69,6 +69,7 @@ interface Props {
     limitPrice: number,
   ) => Promise<void>;
   strategyLab?: StrategyLab;
+  onSaveLabAsPreset?: (preset: import('../AutoTradeSettingsModal').LabAutoPreset) => void;
 }
 
 type Tab = 'positions' | 'orders' | 'paper-orders' | 'paper-history' | 'paper-asset' | 'paper-performance' | 'live-history' | 'live-asset' | 'live-performance' | 'strategy-lab';
@@ -2194,7 +2195,7 @@ export function BottomPanel({
   onPaperClosePosition, onPaperSetTPSL, onPaperResetBalance,
   onPaperCancelOrder, onPaperClearHistory, onLiveClearHistory, onOpenAltPosition, onOpenAltInMain, liveAltMetaMap,
   liveAltOrderTagMap, liveAltEntryOrderTagMap, liveHistory, liveBalanceHistory, onLiveCloseMarket, onLiveCloseCurrentPrice,
-  strategyLab,
+  strategyLab, onSaveLabAsPreset,
 }: Props) {
   const [tab, setTab] = useState<Tab>('positions');
 
@@ -2570,11 +2571,11 @@ export function BottomPanel({
                         </span>
                       ) : h.strategyId === 'leader-retest' ? (
                         <span style={{ fontSize: '0.58rem', background: 'rgba(155,89,182,0.18)', color: '#9b59b6', borderRadius: 3, padding: '1px 5px', fontWeight: 700, border: '1px solid rgba(155,89,182,0.4)', marginLeft: 4 }}>
-                          ALT추천 + 리테스트
+                          리더-리테스트
                         </span>
                       ) : (
                         <span style={{ fontSize: '0.58rem', background: 'rgba(59,139,235,0.18)', color: '#3b8beb', borderRadius: 3, padding: '1px 5px', fontWeight: 700, border: '1px solid rgba(59,139,235,0.4)', marginLeft: 4 }}>
-                          ALT추천 + 돌파
+                          기존 돌파
                         </span>
                       )
                     )}
@@ -2846,7 +2847,10 @@ export function BottomPanel({
 
         {/* Strategy Lab tab */}
         {tab === 'strategy-lab' && strategyLab && (
-          <StrategyLabPanel lab={strategyLab} />
+          <StrategyLabPanel
+            lab={strategyLab}
+            onSaveAsPreset={onSaveLabAsPreset}
+          />
         )}
 
         {/* Positions tab */}

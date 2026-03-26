@@ -4,8 +4,61 @@ import type { LabExperimentConfig, LabExperiment } from '../../hooks/useLabExper
 import { LAB_MAX_SLOTS } from '../../hooks/useStrategyLab';
 import type { ScanInterval } from '../AltScanner/breakoutScanner';
 import type { PaperHistoryEntry } from '../../types/paperTrading';
+import type { AutoTradeSettings, LabAutoPreset } from '../AutoTradeSettingsModal';
 
-interface Props { lab: StrategyLab; }
+// ── Lab → AutoTradeSettings 변환 ─────────────────────────────────────────────
+export function labConfigToAutoSettings(
+  cfg: LabExperimentConfig,
+  base: AutoTradeSettings,
+): AutoTradeSettings {
+  return {
+    ...base,
+    // 사이즈: 실험실은 항상 리스크% 방식
+    sizeMode: 'risk',
+    riskPct: cfg.riskPct,
+    leverage: cfg.leverage,
+    marginType: 'ISOLATED',
+    // 스캔
+    scanIntervals: cfg.scanIntervals as AutoTradeSettings['scanIntervals'],
+    autoEntryIntervals: cfg.scanIntervals as AutoTradeSettings['scanIntervals'],
+    scanCadenceMinutes: Math.max(15, Math.round(cfg.cadenceMinutes)),
+    // 전략
+    strategyId: cfg.strategyId,
+    minCandidateScore: cfg.minScore,
+    // 포지션 한도
+    maxTotalPositions: cfg.maxPositions,      // 0 = 무제한 (실험실과 동일)
+    maxAutoPositionsPerScan: 0,               // 실험실은 스캔당 한도 없음 → 무제한
+    cooldownBarsAfterLoss: cfg.cooldownBarsAfterLoss ?? 0,
+    maxConcurrentCorrelated: cfg.maxConcurrentCorrelatedPositions ?? 0,
+    // 타임스탑
+    timeStopEnabled: cfg.labTimeStopEnabled ?? false,
+    timeStopBars: cfg.labTimeStopBars ?? 4,
+    // 추격 방지 필터 (실험실 값 그대로, null/0 = 비활성)
+    maxSignalAgeSec: cfg.maxSignalAgeSec ?? 0,
+    maxBreakoutExtensionPct: cfg.maxBreakoutExtensionPct ?? 0,
+    maxEntryDriftPct: cfg.maxEntryDriftPct ?? 0,
+    // 돌파 방향
+    breakoutDirection: cfg.breakoutDirection ?? 'both',
+    // 리더-리테스트 파라미터
+    retestMinBars: cfg.retestMinBars,
+    retestMaxBars: cfg.retestMaxBars,
+    retestToleranceAtr: cfg.retestToleranceAtr,
+    retestMaxOvershootAtr: cfg.retestMaxOvershootAtr,
+    retestAutoDirection: cfg.retestAutoDirection ?? 'long',
+    retestRequire4hTrend: cfg.require4hTrend ?? true,
+    // FVG POC + EMA72 파라미터
+    fvgPocLookbackBars: cfg.fvgPocLookbackBars,
+    fvgPocBins: cfg.fvgPocBins,
+    fvgEmaPeriod: cfg.fvgEmaPeriod,
+    fvgUniverseTopN: cfg.fvgUniverseTopN,
+    fvgAutoDirection: cfg.fvgDirection ?? 'both',
+  };
+}
+
+interface Props {
+  lab: StrategyLab;
+  onSaveAsPreset?: (preset: LabAutoPreset) => void;
+}
 
 // ── Formatters ────────────────────────────────────────────────────────────────
 function pf(v: number) { return v >= 0 ? `+${v.toFixed(2)}` : v.toFixed(2); }
@@ -888,8 +941,32 @@ function OperationSummary({ cfg, expanded, onToggle }: {
   );
 }
 
+// ── 자동설정 프리셋 저장 버튼 ───────────────────────────────────────────────────
+function SaveAsAutoBtn({ onSave }: { onSave: () => void }) {
+  const [saved, setSaved] = useState(false);
+
+  const handle = () => {
+    onSave();
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2500);
+  };
+
+  if (saved) return (
+    <span style={{ fontSize: '0.72rem', color: '#0ecb81', padding: '3px 8px', border: '1px solid rgba(14,203,129,0.3)', borderRadius: 4 }}>
+      ✓ 프리셋 저장됨
+    </span>
+  );
+
+  return (
+    <button style={{ ...S.ghostBtn, color: '#f0b90b', borderColor: 'rgba(240,185,11,0.35)', background: 'rgba(240,185,11,0.06)' }}
+      onClick={handle}>
+      📥 자동설정 저장
+    </button>
+  );
+}
+
 // ── Experiment card ───────────────────────────────────────────────────────────
-function ExperimentCard({ exp, onToggle, onRemove, onResetBalance, onClearHistory, onClone, baseline, isBaseline, onSetBaseline, isBest }: {
+function ExperimentCard({ exp, onToggle, onRemove, onResetBalance, onClearHistory, onClone, baseline, isBaseline, onSetBaseline, isBest, onSaveAsAutoSettings }: {
   exp: LabExperiment;
   onToggle: (enabled: boolean) => void;
   onRemove: () => void;
@@ -900,6 +977,7 @@ function ExperimentCard({ exp, onToggle, onRemove, onResetBalance, onClearHistor
   isBaseline: boolean;
   onSetBaseline: () => void;
   isBest: boolean;
+  onSaveAsAutoSettings?: () => void;
 }) {
   const [showLogs, setShowLogs] = useState(false);
   const [showOps, setShowOps] = useState(false);
@@ -1131,6 +1209,8 @@ function ExperimentCard({ exp, onToggle, onRemove, onResetBalance, onClearHistor
         </button>
         <button style={S.ghostBtn} onClick={onResetBalance}>잔고초기화</button>
         <button style={S.ghostBtn} onClick={onClearHistory}>히스토리삭제</button>
+        {onSaveAsAutoSettings && <SaveAsAutoBtn onSave={onSaveAsAutoSettings} />}
+
       </div>
 
       {showLogs && (
@@ -1247,7 +1327,7 @@ function getDiagnosis(exp: LabExperiment, baseline: LabExperiment): string {
   return parts.length > 0 ? parts.join(' · ') : '기준 대비 유의미한 차이 없음';
 }
 
-export function StrategyLabPanel({ lab }: Props) {
+export function StrategyLabPanel({ lab, onSaveAsPreset }: Props) {
   const [showAddForm, setShowAddForm] = useState(false);
   const [cloneBase, setCloneBase] = useState<Partial<FormState> | undefined>(undefined);
   const [cloneDiffBase, setCloneDiffBase] = useState<FormState | undefined>(undefined);
@@ -1363,6 +1443,24 @@ export function StrategyLabPanel({ lab }: Props) {
                   isBaseline={exp.slotIndex === baselineSlot}
                   onSetBaseline={() => setBaselineSlot(prev => prev === exp.slotIndex ? null : exp.slotIndex)}
                   isBest={exp.slotIndex === bestSlot}
+                  onSaveAsAutoSettings={onSaveAsPreset ? () => {
+                    const base: AutoTradeSettings = {
+                      sizeMode: 'risk', marginUsdt: 100, riskPct: 2, leverage: 10,
+                      marginType: 'ISOLATED', scanIntervals: ['1h'], autoEntryIntervals: ['1h'],
+                      scanCadenceMinutes: 60, timeStopEnabled: false, voiceAlertEnabled: true,
+                      tp1Enabled: false, tp1R: 0.30, tp1ClosePct: 50, tp1MoveSL: true,
+                      maxAutoPositionsPerScan: 0, maxSignalAgeSec: 0, maxEntryDriftPct: 0,
+                      maxBreakoutExtensionPct: 0, timeStopBars: 4, cooldownBarsAfterLoss: 0,
+                      maxConcurrentCorrelated: 0, maxTotalPositions: 0,
+                    };
+                    onSaveAsPreset({
+                      id: `lab-${exp.config!.id}-${Date.now()}`,
+                      name: exp.config!.name,
+                      strategyId: exp.config!.strategyId,
+                      savedAt: Date.now(),
+                      settings: labConfigToAutoSettings(exp.config!, base),
+                    });
+                  } : undefined}
                 />
               );
             })}

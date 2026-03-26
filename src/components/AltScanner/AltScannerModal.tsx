@@ -56,6 +56,14 @@ export interface AltTradeParams {
   strategyId?: string;
 }
 
+interface AutoEntryHints {
+  tp1Enabled: boolean;
+  tp1R: number;
+  tp1ClosePct: number;
+  tp1MoveSL: boolean;
+  timeStopEnabled: boolean;
+}
+
 interface Props {
   symbols: string[];
   initialCandidates: ScanCandidate[];
@@ -66,6 +74,8 @@ interface Props {
   onLiveTrade?: (params: AltTradeParams) => void;
   snapshotMeta?: AltMeta;
   paperBalance?: number;
+  paperAutoSettings?: AutoEntryHints;
+  liveAutoSettings?: AutoEntryHints;
 }
 
 type LevelMode = 'core' | 'all';
@@ -145,7 +155,9 @@ function buildOpinion(c: ScanCandidate): { text: string; stars: number; color: s
     else                     { pts += 5; }
   }
   if (nearHVN > 0) { pts += 10; notes.push('HVN 매물대 근접'); }
-  pts += c.breakoutType === 'trendline' ? 10 : c.breakoutType === 'hline' ? 7 : 5;
+  if (!c.strategyId || c.strategyId === 'breakout') {
+    pts += c.breakoutType === 'trendline' ? 10 : c.breakoutType === 'hline' ? 7 : 5;
+  }
 
   const stars  = pts >= 80 ? 5 : pts >= 65 ? 4 : pts >= 50 ? 3 : pts >= 35 ? 2 : 1;
   const dirKo  = c.direction === 'long' ? '▲ 롱' : '▼ 숏';
@@ -217,7 +229,7 @@ function TradingInfoPanel({
   paperSizeMode, setPaperSizeMode, paperMarginUsdt, setPaperMarginUsdt,
   liveLeverage, setLiveLeverage, liveMarginType, setLiveMarginType, liveRiskPct, setLiveRiskPct,
   liveSizeMode, setLiveSizeMode, liveMarginUsdt, setLiveMarginUsdt,
-  paperBalance,
+  paperBalance, paperAutoSettings, liveAutoSettings,
 }: {
   c: ScanCandidate;
   onPaperTrade?: (p: AltTradeParams) => void;
@@ -233,11 +245,19 @@ function TradingInfoPanel({
   liveSizeMode: 'risk' | 'margin'; setLiveSizeMode: (v: 'risk' | 'margin') => void;
   liveMarginUsdt: number; setLiveMarginUsdt: (v: number) => void;
   paperBalance?: number;
+  paperAutoSettings?: AutoEntryHints;
+  liveAutoSettings?: AutoEntryHints;
 }) {
   const [showGlossary, setShowGlossary] = useState(false);
   const [showLiveTip, setShowLiveTip] = useState(false);
   const [showPaperSettings, setShowPaperSettings] = useState(false);
   const [showLiveSettings, setShowLiveSettings] = useState(false);
+  const [manualPaperTimeStop, setManualPaperTimeStop] = useState<boolean>(
+    () => paperAutoSettings?.timeStopEnabled ?? true,
+  );
+  const [manualLiveTimeStop, setManualLiveTimeStop] = useState<boolean>(
+    () => liveAutoSettings?.timeStopEnabled ?? true,
+  );
   const isLong = c.direction === 'long';
   const slPct  = (c.slPrice  - c.entryPrice) / c.entryPrice * 100;
   const tpPct  = (c.tpPrice  - c.entryPrice) / c.entryPrice * 100;
@@ -287,7 +307,6 @@ function TradingInfoPanel({
     signalCloseTime: c.asOfCloseTime,
     monitorStartTime: Date.now(),
     drawingsSnapshot,
-    timeStopEnabledAtEntry: true,
     validUntilTimeAtEntry: c.validUntilTime,
     breakoutType: c.breakoutType,
     candidateStatus: c.status,
@@ -301,6 +320,8 @@ function TradingInfoPanel({
     riskPct: paperRiskPct,
     sizeMode: paperSizeMode,
     marginUsdt: paperSizeMode === 'margin' ? paperMarginUsdt : undefined,
+    timeStopEnabled: manualPaperTimeStop,
+    timeStopEnabledAtEntry: manualPaperTimeStop,
   };
   const liveTradeParams: AltTradeParams = {
     ...baseParams,
@@ -309,6 +330,8 @@ function TradingInfoPanel({
     riskPct: liveRiskPct,
     sizeMode: liveSizeMode,
     marginUsdt: liveSizeMode === 'margin' ? liveMarginUsdt : undefined,
+    timeStopEnabled: manualLiveTimeStop,
+    timeStopEnabledAtEntry: manualLiveTimeStop,
   };
 
   return (
@@ -503,6 +526,36 @@ function TradingInfoPanel({
               <> · 투입마진 <b style={{ color: '#0ecb81' }}>${paperMarginUsdt}</b></>
             )}
           </span>
+          {/* ── 포지션 관리 옵션 표시 행 ── */}
+          <div style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 12, marginTop: 6, paddingTop: 6, borderTop: '1px solid rgba(255,255,255,0.06)', flexWrap: 'wrap' as const }}>
+            {/* 타임스탑 토글 */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <span style={{ color: '#5e6673', fontSize: '0.73rem', whiteSpace: 'nowrap' as const }}>타임스탑</span>
+              {([true, false] as const).map(v => (
+                <button key={String(v)}
+                  style={{ ...S.glossaryBtn, padding: '2px 9px', fontSize: '0.75rem',
+                    ...(manualPaperTimeStop === v ? { borderColor: v ? '#0ecb81' : '#848e9c', color: v ? '#0ecb81' : '#848e9c', background: v ? 'rgba(14,203,129,0.12)' : 'rgba(132,142,156,0.12)' } : {}),
+                  }}
+                  onClick={() => setManualPaperTimeStop(v)}>
+                  {v ? 'ON' : 'OFF'}
+                </button>
+              ))}
+              <span style={{ color: '#4a5568', fontSize: '0.7rem' }}>신호 만료 시 청산 모달</span>
+            </div>
+            <div style={{ width: 1, height: 18, background: '#2a2e39', flexShrink: 0 }} />
+            {/* TP1 상태 표시 (자동설정 상속, 읽기 전용) */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <span style={{ color: '#5e6673', fontSize: '0.73rem', whiteSpace: 'nowrap' as const }}>TP1 부분익절</span>
+              {paperAutoSettings?.tp1Enabled ? (
+                <span style={{ fontSize: '0.72rem', color: '#9b59b6', background: 'rgba(155,89,182,0.12)', border: '1px solid rgba(155,89,182,0.35)', borderRadius: 3, padding: '1px 6px', fontWeight: 600 }}>
+                  ON · {Math.round((paperAutoSettings.tp1R ?? 0.3) * 100)}% 지점, {paperAutoSettings.tp1ClosePct ?? 50}% 익절{paperAutoSettings.tp1MoveSL ? ' + 본절이동' : ''}
+                </span>
+              ) : (
+                <span style={{ fontSize: '0.72rem', color: '#5e6673', background: 'rgba(94,102,115,0.10)', border: '1px solid rgba(94,102,115,0.3)', borderRadius: 3, padding: '1px 6px' }}>OFF</span>
+              )}
+              <span style={{ color: '#4a5568', fontSize: '0.7rem' }}>자동설정 상속</span>
+            </div>
+          </div>
         </div>
       )}
 
@@ -592,6 +645,36 @@ function TradingInfoPanel({
               : <> · 투입마진 <b style={{ color: '#f6465d' }}>${liveMarginUsdt}</b></>
             }
           </span>
+          {/* ── 포지션 관리 옵션 표시 행 ── */}
+          <div style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 12, marginTop: 6, paddingTop: 6, borderTop: '1px solid rgba(255,255,255,0.06)', flexWrap: 'wrap' as const }}>
+            {/* 타임스탑 토글 */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <span style={{ color: '#5e6673', fontSize: '0.73rem', whiteSpace: 'nowrap' as const }}>타임스탑</span>
+              {([true, false] as const).map(v => (
+                <button key={String(v)}
+                  style={{ ...S.glossaryBtn, padding: '2px 9px', fontSize: '0.75rem',
+                    ...(manualLiveTimeStop === v ? { borderColor: v ? '#0ecb81' : '#848e9c', color: v ? '#0ecb81' : '#848e9c', background: v ? 'rgba(14,203,129,0.12)' : 'rgba(132,142,156,0.12)' } : {}),
+                  }}
+                  onClick={() => setManualLiveTimeStop(v)}>
+                  {v ? 'ON' : 'OFF'}
+                </button>
+              ))}
+              <span style={{ color: '#4a5568', fontSize: '0.7rem' }}>신호 만료 시 청산 모달</span>
+            </div>
+            <div style={{ width: 1, height: 18, background: '#2a2e39', flexShrink: 0 }} />
+            {/* TP1 상태 표시 (자동설정 상속, 읽기 전용) */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <span style={{ color: '#5e6673', fontSize: '0.73rem', whiteSpace: 'nowrap' as const }}>TP1 부분익절</span>
+              {liveAutoSettings?.tp1Enabled ? (
+                <span style={{ fontSize: '0.72rem', color: '#9b59b6', background: 'rgba(155,89,182,0.12)', border: '1px solid rgba(155,89,182,0.35)', borderRadius: 3, padding: '1px 6px', fontWeight: 600 }}>
+                  ON · {Math.round((liveAutoSettings.tp1R ?? 0.3) * 100)}% 지점, {liveAutoSettings.tp1ClosePct ?? 50}% 익절{liveAutoSettings.tp1MoveSL ? ' + 본절이동' : ''}
+                </span>
+              ) : (
+                <span style={{ fontSize: '0.72rem', color: '#5e6673', background: 'rgba(94,102,115,0.10)', border: '1px solid rgba(94,102,115,0.3)', borderRadius: 3, padding: '1px 6px' }}>OFF</span>
+              )}
+              <span style={{ color: '#4a5568', fontSize: '0.7rem' }}>자동설정 상속</span>
+            </div>
+          </div>
         </div>
       )}
 
@@ -631,18 +714,57 @@ function TradingInfoPanel({
       {/* Row 2: 4 explanation blocks */}
       <div style={S.blockRow}>
         <InfoBlock icon="📌" title="진입 조건">
-          <div>종가 기준 <b>{breakoutKo}</b> 확인 후 진입</div>
-          <div>거래량 ≥ SMA20(20봉) × <b>{volFactor}배</b> 이상</div>
+          {c.strategyId === 'fvg-poc-ema72' ? (
+            <>
+              <div>FVG POC × EMA72 수렴 진입</div>
+              <div>EMA72 방향 추세 필터 적용</div>
+            </>
+          ) : c.strategyId === 'leader-retest' ? (
+            <>
+              <div>SR 리테스트 확인봉 완성 후 진입</div>
+              <div>돌파봉 B → 확인봉 C 패턴</div>
+            </>
+          ) : (
+            <>
+              <div>종가 기준 <b>{breakoutKo}</b> 확인 후 진입</div>
+              <div>거래량 ≥ SMA20(20봉) × <b>{volFactor}배</b> 이상</div>
+            </>
+          )}
         </InfoBlock>
         <InfoBlock icon="🛡" title="손절 기준">
-          <div><b>{slBasisText}</b></div>
-          <div>진입 전 손절가 설정 필수</div>
+          {c.strategyId === 'fvg-poc-ema72' ? (
+            <>
+              <div><b>ATR×1.5 기반 구조적 손절</b></div>
+              <div>FVG 구간 이탈 시 손절 강화</div>
+            </>
+          ) : c.strategyId === 'leader-retest' ? (
+            <>
+              <div><b>리테스트 레벨 기준 ATR×1.5</b></div>
+              <div>확인봉 저점 하단 손절</div>
+            </>
+          ) : (
+            <>
+              <div><b>{slBasisText}</b></div>
+              <div>진입 전 손절가 설정 필수</div>
+            </>
+          )}
         </InfoBlock>
         <InfoBlock icon="🔍" title="분석 근거">
-          <div>SR 레벨 <b>{c.srLevels.length}개</b> · HVN <b>{c.hvnZones.length}개</b></div>
-          {topLevel && (
-            <div>{topLevel.horizon} {topLevel.kind === 'support' ? '지지' : '저항'} ·&nbsp;
-              <b>{topLevel.touches}회 터치</b> · score {topLevel.score}</div>
+          {c.strategyId === 'fvg-poc-ema72' ? (
+            <>
+              <div>SR 레벨 <b>{c.srLevels.length}개</b> · HVN <b>{c.hvnZones.length}개</b></div>
+              {(c as any).pocPrice != null && (
+                <div>POC <b>{pf((c as any).pocPrice)}</b>{(c as any).fvgEma != null ? ` · EMA72 ${pf((c as any).fvgEma)}` : ''}</div>
+              )}
+            </>
+          ) : (
+            <>
+              <div>SR 레벨 <b>{c.srLevels.length}개</b> · HVN <b>{c.hvnZones.length}개</b></div>
+              {topLevel && (
+                <div>{topLevel.horizon} {topLevel.kind === 'support' ? '지지' : '저항'} ·&nbsp;
+                  <b>{topLevel.touches}회 터치</b> · score {topLevel.score}</div>
+              )}
+            </>
           )}
         </InfoBlock>
         <InfoBlock icon="⭐" title="종합 의견">
@@ -737,6 +859,7 @@ function InfoBlock({ icon, title, children }: { icon: string; title: string; chi
 export function AltScannerModal({
   symbols, initialCandidates, onCandidatesChange, onClose, onOpenInMain,
   onPaperTrade, onLiveTrade, snapshotMeta, paperBalance,
+  paperAutoSettings, liveAutoSettings,
 }: Props) {
   const [showFAQ, setShowFAQ]           = useState(false);
   const [scanInterval, setScanInterval] = useState<ScanInterval>('1h');
@@ -1464,7 +1587,9 @@ export function AltScannerModal({
                   liveRiskPct={liveRiskPct} setLiveRiskPct={setLiveRiskPct}
                   liveSizeMode={liveSizeMode} setLiveSizeMode={setLiveSizeMode}
                   liveMarginUsdt={liveMarginUsdt} setLiveMarginUsdt={setLiveMarginUsdt}
-                  paperBalance={paperBalance} />
+                  paperBalance={paperBalance}
+                  paperAutoSettings={paperAutoSettings}
+                  liveAutoSettings={liveAutoSettings} />
               </>
             ) : (
               <div style={S.chartPlaceholder}>

@@ -420,9 +420,9 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
         : mark >= order.limitPrice;
       if (!triggered) continue;
       // Safety guard: reject fill prices that are wildly out of range of the limit price.
-      // Ratio >100× or <0.01× indicates a corrupted price (e.g. BTC price written to an alt key).
+      // Ratio >5× or <0.2× indicates stale/corrupted scan data (e.g. wrong candle cache or BTC price in alt key).
       const ratio = mark / order.limitPrice;
-      if (ratio > 100 || ratio < 0.01) continue;
+      if (ratio > 5 || ratio < 0.2) continue;
       triggeredIds.push(order.id);
       // Fill at the current mark price (price improvement over limitPrice)
       const fillPrice = order.side === 'BUY'

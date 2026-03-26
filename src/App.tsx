@@ -53,7 +53,7 @@ import { useStrategyLab } from './hooks/useStrategyLab';
 import { useSoundPlayer } from './hooks/useSoundPlayer';
 import { SoundSettingsModal } from './components/SoundSettingsModal';
 import { AutoTradeSettingsModal, DEFAULT_AUTO_TRADE_SETTINGS, DEFAULT_LIVE_AUTO_TRADE_SETTINGS } from './components/AutoTradeSettingsModal';
-import type { AutoTradeSettings } from './components/AutoTradeSettingsModal';
+import type { AutoTradeSettings, LabAutoPreset } from './components/AutoTradeSettingsModal';
 import { db, isFirebaseConfigured } from './lib/firebase';
 import { doc, onSnapshot, runTransaction } from 'firebase/firestore';
 
@@ -86,8 +86,8 @@ function leverageSpeech(leverage: number): string {
 const LIVE_MARGIN_BAL_HISTORY_KEY = 'live-futures-margin-balance-history';
 const ALT_LIFECYCLE_DEBUG_KEY = 'alt-lifecycle-debug';
 const AUTO_TRADE_LEADER_LOCK_COLLECTION = 'auto_trade_leader_locks';
-const AUTO_TRADE_LEADER_LEASE_MS = 35_000;
-const AUTO_TRADE_LEADER_HEARTBEAT_MS = 10_000;
+const AUTO_TRADE_LEADER_LEASE_MS = 120_000;
+const AUTO_TRADE_LEADER_HEARTBEAT_MS = 30_000;
 
 const DEFAULT_TELEGRAM: TelegramSettings = {
   enabled: false,
@@ -464,6 +464,14 @@ function AppInner() {
   }, [liveAutoTradeSettings]);
 
   const [showAutoTradeSettings, setShowAutoTradeSettings] = useState(false);
+
+  // ── 실험실 자동설정 프리셋 ────────────────────────────────────────────────
+  const [labAutoPresets, setLabAutoPresets] = useState<LabAutoPreset[]>(() => {
+    try { return JSON.parse(localStorage.getItem(uk('lab_auto_presets')) ?? '[]'); } catch { return []; }
+  });
+  React.useEffect(() => {
+    try { localStorage.setItem(uk('lab_auto_presets'), JSON.stringify(labAutoPresets)); } catch {}
+  }, [labAutoPresets]);
 
   // ── Auto trade mode (paper / live) ──────────────────────────────────
   const [autoTradeMode, setAutoTradeMode] = useState<'paper' | 'live'>(() => {
@@ -1564,6 +1572,19 @@ function AppInner() {
     }
     // Reject if current mark price has already blown past the SL (setup invalidated)
     const mark = markPricesMapRef.current[params.symbol] ?? 0;
+    // For auto entries: require known mark price and reject if it deviates >3× from planned entry.
+    // Prevents bad fills when scan candle data is stale or wrong (e.g. wrong OHLC from exchange).
+    if (params.entrySource === 'auto') {
+      if (mark <= 0) {
+        addLog('error', `[ALT모의] ${params.symbol} 현재가 미확인 (구독 전) — 자동진입 불가`);
+        return;
+      }
+      const priceRatio = mark / params.entryPrice;
+      if (priceRatio > 3 || priceRatio < 0.33) {
+        addLog('error', `[ALT모의] ${params.symbol} 가격 이상 감지 — 자동진입 불가 (계획진입=${params.entryPrice.toFixed(6)} 현재가=${mark.toFixed(6)} 비율=${priceRatio.toFixed(1)}×)`);
+        return;
+      }
+    }
     if (mark > 0) {
       const isLong = params.direction === 'long';
       if (isLong && mark <= params.slPrice) {
@@ -1935,6 +1956,7 @@ function AppInner() {
       fvgUniverseTopN: activeAutoTradeSettings.fvgUniverseTopN,
       fvgDirection: activeAutoTradeSettings.fvgAutoDirection,
     },
+    breakoutDirection: activeAutoTradeSettings.breakoutDirection ?? 'both',
     minCandidateScore: activeAutoTradeSettings.minCandidateScore ?? 90,
   });
   altAutoTradeSetActiveRef.current = altAutoTrade.setActive;
@@ -2586,11 +2608,15 @@ function AppInner() {
     if (meta.direction === 'long') {
       if (meta.plannedTP != null && exitPrice >= meta.plannedTP) return 'tp';
       if (meta.plannedSL != null && exitPrice <= meta.plannedSL) return 'sl';
-      return 'unknown';
+      // Fallback: infer from entry price direction
+      if (meta.plannedEntry > 0) return exitPrice < meta.plannedEntry ? 'sl' : 'tp';
+      return 'sl';
     }
     if (meta.plannedTP != null && exitPrice <= meta.plannedTP) return 'tp';
     if (meta.plannedSL != null && exitPrice >= meta.plannedSL) return 'sl';
-    return 'unknown';
+    // Fallback: infer from entry price direction
+    if (meta.plannedEntry > 0) return exitPrice > meta.plannedEntry ? 'sl' : 'tp';
+    return 'sl';
   }, []);
 
   const inferLiveCloseReasonFromOrderEvidence = useCallback((liveKey: string): LiveCloseReason | null => {
@@ -3963,6 +3989,15 @@ function AppInner() {
               const aliasKey = `${meta.symbol}_${meta.direction}`;
               const prevHint = liveCloseReasonHintRef.current[key];
               const prevAliasHint = liveCloseReasonHintRef.current[aliasKey];
+              // If Binance SL order is registered, it already handles the close — skip software market close
+              const registry = liveAltOrderRegistryRef.current[key];
+              const hasBinanceSL = registry?.orders.some(o => o.kind === 'SL') ?? false;
+              if (hasBinanceSL) {
+                liveCloseReasonHintRef.current[key] = 'sl';
+                liveCloseReasonHintRef.current[aliasKey] = 'sl';
+                addLog('info', `[ALT실전] ${symbol} 구조적 SL 감지 — 바이낸스 SL 주문 처리 중 (소프트웨어 청산 스킵)`);
+                return;
+              }
               liveCloseReasonHintRef.current[key] = 'invalid';
               liveCloseReasonHintRef.current[aliasKey] = 'invalid';
               addLog('info', `[ALT실전] ${symbol} 자동청산 (구조적 무효화) — MARKET ${closeSide} ${qty}`);
@@ -4219,6 +4254,8 @@ function AppInner() {
           }}
           onClose={() => setShowAutoTradeSettings(false)}
           initialTab={autoTradeMode}
+          labAutoPresets={labAutoPresets}
+          onDeletePreset={(id) => setLabAutoPresets(prev => prev.filter(p => p.id !== id))}
         />
       )}
 
@@ -4280,6 +4317,20 @@ function AppInner() {
           onLiveTrade={handleAltLiveTrade}
           snapshotMeta={altScannerSnapshotMeta}
           paperBalance={paperTrading.balance}
+          paperAutoSettings={{
+            tp1Enabled: paperAutoTradeSettings.tp1Enabled ?? false,
+            tp1R: paperAutoTradeSettings.tp1R ?? 0.30,
+            tp1ClosePct: paperAutoTradeSettings.tp1ClosePct ?? 50,
+            tp1MoveSL: paperAutoTradeSettings.tp1MoveSL !== false,
+            timeStopEnabled: (paperAutoTradeSettings.timeStopEnabled ?? true) !== false,
+          }}
+          liveAutoSettings={{
+            tp1Enabled: liveAutoTradeSettings.tp1Enabled ?? false,
+            tp1R: liveAutoTradeSettings.tp1R ?? 0.30,
+            tp1ClosePct: liveAutoTradeSettings.tp1ClosePct ?? 50,
+            tp1MoveSL: liveAutoTradeSettings.tp1MoveSL !== false,
+            timeStopEnabled: (liveAutoTradeSettings.timeStopEnabled ?? true) !== false,
+          }}
         />
       )}
 
@@ -4463,6 +4514,12 @@ function AppInner() {
           onLiveCloseMarket={handleLiveCloseMarket}
           onLiveCloseCurrentPrice={handleLiveCloseCurrentPrice}
           strategyLab={strategyLab}
+          onSaveLabAsPreset={(preset) => setLabAutoPresets(prev => {
+            // 동일 실험 id 기준 최신 1개만 유지 (중복 저장 방지)
+            const baseId = preset.id.split('-').slice(0, 3).join('-');
+            const filtered = prev.filter(p => !p.id.startsWith(baseId));
+            return [preset, ...filtered].slice(0, 10); // 최대 10개
+          })}
         />
       )}
     </div>

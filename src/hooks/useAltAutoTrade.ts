@@ -9,7 +9,6 @@ import type { ScanFn } from '../components/AltScanner/strategyTypes';
 import { getBinanceGovernorSnapshot } from '../lib/binanceRequestGovernor';
 
 const AUTO_TRADE_KEY   = 'alt_auto_trade_active';
-const TOP_N_PER_TF     = 2;
 const DEFAULT_SCAN_INTERVALS: ScanInterval[] = ['1h', '4h', '1d'];
 const DEFAULT_CADENCE_MINUTES = 60;
 // Rate-limit settings for automated (unattended) scanning.
@@ -93,6 +92,7 @@ export function useAltAutoTrade({
   retestOptions,
   retestAutoDirection,
   fvgOptions,
+  breakoutDirection,
   minCandidateScore,
 }: {
   symbols: string[];
@@ -111,6 +111,8 @@ export function useAltAutoTrade({
   retestAutoDirection?: 'long' | 'both';
   /** FVG POC options — only used when strategyId === 'fvg-poc-ema72' */
   fvgOptions?: FvgPocOptions;
+  /** Scan direction override for breakout auto-trade (default 'both') */
+  breakoutDirection?: 'long' | 'short' | 'both';
   /** Minimum candidate score to qualify for auto-entry (default 90) */
   minCandidateScore?: number;
 }) {
@@ -139,6 +141,7 @@ export function useAltAutoTrade({
   const retestOptionsRef          = useRef(retestOptions);
   const retestAutoDirectionRef    = useRef<'long' | 'both'>(retestAutoDirection ?? 'long');
   const fvgOptionsRef             = useRef(fvgOptions);
+  const breakoutDirectionRef      = useRef<'long' | 'short' | 'both'>(breakoutDirection ?? 'both');
   const scoreThresholdRef         = useRef(minCandidateScore ?? 90);
   isActiveRef.current             = isActive;
   symbolsRef.current              = symbols;
@@ -153,6 +156,7 @@ export function useAltAutoTrade({
   retestOptionsRef.current        = retestOptions;
   retestAutoDirectionRef.current  = retestAutoDirection ?? 'long';
   fvgOptionsRef.current           = fvgOptions;
+  breakoutDirectionRef.current    = breakoutDirection ?? 'both';
   scoreThresholdRef.current       = minCandidateScore ?? 90;
 
   const addLog = useCallback((msg: string, type: AutoTradeLog['type'] = 'info') => {
@@ -261,7 +265,7 @@ export function useAltAutoTrade({
         ? retestAutoDirectionRef.current
         : strategyIdRef.current === 'fvg-poc-ema72'
         ? (fvgOptionsRef.current?.fvgDirection ?? 'both')
-        : 'both' as const;
+        : breakoutDirectionRef.current;
       try {
         await activeScanFn(
           syms,
@@ -279,7 +283,7 @@ export function useAltAutoTrade({
             concurrency: AUTO_CONCURRENCY,
             delayMs: AUTO_DELAY_MS,
             scanTag: `${mode === 'scheduled' ? 'auto-trade' : 'auto-manual'}:${interval}`,
-            busyPolicy: mode === 'scheduled' ? 'skip' : 'queue',
+            busyPolicy: 'queue',
             onStatus: (message, level) => {
               addLog(`[${interval}] ${message}`, level === 'error' ? 'error' : (level === 'warn' ? 'warn' : 'info'));
             },
@@ -294,16 +298,14 @@ export function useAltAutoTrade({
       const qualified = candidates
         .filter(c => c.score >= scoreThreshold)
         .sort((a, b) => b.score - a.score);
-      const top = qualified.slice(0, TOP_N_PER_TF);
-
       addLog(
-        `[${interval}] 완료 — 전체 ${candidates.length}개 · ${scoreThreshold}점+ ${qualified.length}개 · 진입대상 ${top.length}개`,
-        top.length > 0 ? 'success' : (candidates.length > 0 ? 'warn' : 'info'),
+        `[${interval}] 완료 — 전체 ${candidates.length}개 · ${scoreThreshold}점+ ${qualified.length}개 · 진입대상 ${qualified.length}개`,
+        qualified.length > 0 ? 'success' : (candidates.length > 0 ? 'warn' : 'info'),
       );
-      onScanEventRef.current?.({ type: 'interval_done', interval, total: candidates.length, qualified: qualified.length, entered: top.length });
+      onScanEventRef.current?.({ type: 'interval_done', interval, total: candidates.length, qualified: qualified.length, entered: qualified.length });
 
       const maxPositions = maxAutoPositionsRef.current;
-      for (const c of top) {
+      for (const c of qualified) {
         if (maxPositions > 0 && totalEntered >= maxPositions) {
           addLog(`⛔ [${interval}] 최대 진입 수(${maxPositions}) 도달 — ${c.symbol} 건너뜀`, 'warn');
           continue;

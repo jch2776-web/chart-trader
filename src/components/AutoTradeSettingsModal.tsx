@@ -97,6 +97,14 @@ function EntryDriftDiagram({ value }: { value: number }) {
 export type ScanTF = '15m' | '1h' | '4h' | '1d';
 export const ALL_SCAN_TFS: ScanTF[] = ['15m', '1h', '4h', '1d'];
 
+export interface LabAutoPreset {
+  id: string;
+  name: string;
+  strategyId: string;
+  savedAt: number;
+  settings: AutoTradeSettings;
+}
+
 export interface AutoTradeSettings {
   sizeMode: 'margin' | 'risk';
   marginUsdt: number;
@@ -129,6 +137,8 @@ export interface AutoTradeSettings {
   retestMaxOvershootAtr?: number;    // max allowed overshoot beyond level in ATR multiples (default 1.0)
   retestAutoDirection?: 'long' | 'both'; // scan direction for unattended auto-trade (default 'long')
   retestRequire4hTrend?: boolean;    // require 4H EMA20 > EMA50 for LONG entry (default true)
+  // Breakout-specific direction override (default 'both')
+  breakoutDirection?: 'long' | 'short' | 'both';
   // FVG POC + EMA72 specific (only used when strategyId === 'fvg-poc-ema72')
   fvgPocLookbackBars?: number;
   fvgPocBins?: number;
@@ -222,6 +232,8 @@ interface Props {
   onSave: (paper: AutoTradeSettings, live: AutoTradeSettings) => void;
   onClose: () => void;
   initialTab?: 'paper' | 'live';
+  labAutoPresets?: LabAutoPreset[];
+  onDeletePreset?: (id: string) => void;
 }
 
 // ── Single-mode settings editor ─────────────────────────────────────────────
@@ -546,10 +558,15 @@ function SettingsEditor({
               style={{ ...s.toggleChip, ...((draft.strategyId ?? 'breakout') === sid ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
               onClick={() => {
                 set('strategyId', sid);
-                const cur = draft.minCandidateScore ?? 90;
                 if (sid === 'leader-retest') set('minCandidateScore', 70);
                 if (sid === 'fvg-poc-ema72') set('minCandidateScore', 75);
-                if (sid === 'breakout') set('minCandidateScore', 90);
+                if (sid === 'breakout') {
+                  set('minCandidateScore', 90);
+                  // 실험실 기본값과 동일하게 맞춤 (0 = 비활성)
+                  set('maxSignalAgeSec', 0);
+                  set('maxBreakoutExtensionPct', 0);
+                  set('maxEntryDriftPct', 0);
+                }
               }}
             >
               {sid === 'breakout' ? '기존 돌파' : sid === 'leader-retest' ? '리더-리테스트' : 'FVG POC+EMA72'}
@@ -560,6 +577,26 @@ function SettingsEditor({
           기존 돌파: 추세선·수평·박스 돌파 감지. 리더-리테스트: 돌파 후 리테스트 구간 진입. FVG POC+EMA72: 공정가격갭 중심가 크로스 + EMA72 추세 필터.
         </span>
       </div>
+
+      {/* Breakout options (only shown when breakout is selected) */}
+      {(draft.strategyId ?? 'breakout') === 'breakout' && (
+        <div style={{ background: 'rgba(59,139,235,0.05)', border: '1px solid rgba(59,139,235,0.18)', borderRadius: 7, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ fontSize: '0.72rem', color: '#3b8beb', fontWeight: 700, marginBottom: 2 }}>기존 돌파 옵션</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>스캔 방향</span>
+            {(['both', 'long', 'short'] as const).map(d => (
+              <button key={d}
+                style={{ ...s.toggleChip, ...((draft.breakoutDirection ?? 'both') === d ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
+                onClick={() => set('breakoutDirection', d)}>
+                {d === 'long' ? 'LONG만' : d === 'short' ? 'SHORT만' : '양방향'}
+              </button>
+            ))}
+          </div>
+          <span style={s.hint}>
+            자동매매에서 진입할 방향. 실험실의 "스캔 방향"과 동일. LONG만 권장(추세 방향).
+          </span>
+        </div>
+      )}
 
       {/* Leader-retest options (only shown when leader-retest is selected) */}
       {(draft.strategyId ?? 'breakout') === 'leader-retest' && (
@@ -902,7 +939,7 @@ function SettingsEditor({
 }
 
 // ── Main modal ───────────────────────────────────────────────────────────────
-export function AutoTradeSettingsModal({ paperSettings, liveSettings, onSave, onClose, initialTab = 'paper' }: Props) {
+export function AutoTradeSettingsModal({ paperSettings, liveSettings, onSave, onClose, initialTab = 'paper', labAutoPresets, onDeletePreset }: Props) {
   const [tab, setTab] = useState<'paper' | 'live'>(initialTab);
   const [paperDraft, setPaperDraft] = useState<AutoTradeSettings>({
     ...paperSettings,
@@ -917,10 +954,19 @@ export function AutoTradeSettingsModal({ paperSettings, liveSettings, onSave, on
     voiceAlertEnabled: normalizeVoiceAlertEnabled(liveSettings.voiceAlertEnabled),
   });
 
+  const [appliedPresetId, setAppliedPresetId] = useState<string | null>(null);
+
   const setP = <K extends keyof AutoTradeSettings>(k: K, v: AutoTradeSettings[K]) =>
     setPaperDraft(prev => ({ ...prev, [k]: v }));
   const setL = <K extends keyof AutoTradeSettings>(k: K, v: AutoTradeSettings[K]) =>
     setLiveDraft(prev => ({ ...prev, [k]: v }));
+
+  const applyPreset = (preset: LabAutoPreset) => {
+    if (tab === 'paper') setPaperDraft(prev => ({ ...prev, ...preset.settings }));
+    else setLiveDraft(prev => ({ ...prev, ...preset.settings }));
+    setAppliedPresetId(preset.id);
+    setTimeout(() => setAppliedPresetId(null), 2000);
+  };
 
   const handleSave = () => {
     onSave(
@@ -980,6 +1026,52 @@ export function AutoTradeSettingsModal({ paperSettings, liveSettings, onSave, on
 
         {/* Body */}
         <div style={s.body}>
+          {/* 실험실 저장 프리셋 */}
+          {labAutoPresets && labAutoPresets.length > 0 && (
+            <div style={{ marginBottom: 14, background: 'rgba(240,185,11,0.04)', border: '1px solid rgba(240,185,11,0.2)', borderRadius: 8, padding: '10px 12px' }}>
+              <div style={{ fontSize: '0.72rem', color: '#f0b90b', fontWeight: 700, marginBottom: 8, letterSpacing: '0.04em' }}>
+                📥 실험실 저장 프리셋
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {labAutoPresets.map(preset => {
+                  const sid = preset.strategyId;
+                  const badgeColor = sid === 'fvg-poc-ema72' ? '#f0b90b' : sid === 'leader-retest' ? '#9b59b6' : '#3b8beb';
+                  const badgeBg = sid === 'fvg-poc-ema72' ? 'rgba(240,185,11,0.12)' : sid === 'leader-retest' ? 'rgba(155,89,182,0.12)' : 'rgba(59,139,235,0.12)';
+                  const stratLabel = sid === 'fvg-poc-ema72' ? 'FVG POC+EMA72' : sid === 'leader-retest' ? '리더-리테스트' : '기존 돌파';
+                  const savedDate = new Date(preset.savedAt).toLocaleDateString('ko-KR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                  return (
+                    <div key={preset.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', background: 'rgba(255,255,255,0.03)', borderRadius: 5, border: '1px solid rgba(255,255,255,0.06)' }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+                          <span style={{ fontSize: '0.78rem', color: '#d1d4dc', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{preset.name}</span>
+                          <span style={{ fontSize: '0.62rem', color: badgeColor, background: badgeBg, border: `1px solid ${badgeColor}44`, borderRadius: 3, padding: '1px 5px', flexShrink: 0 }}>{stratLabel}</span>
+                        </div>
+                        <div style={{ fontSize: '0.65rem', color: '#5e6673' }}>{savedDate} 저장 · {preset.settings.leverage}x · 리스크 {preset.settings.riskPct}% · 최소 {preset.settings.minCandidateScore ?? 90}점</div>
+                      </div>
+                      {appliedPresetId === preset.id ? (
+                        <span style={{ fontSize: '0.72rem', padding: '3px 10px', border: '1px solid rgba(14,203,129,0.5)', borderRadius: 4, background: 'rgba(14,203,129,0.12)', color: '#0ecb81', flexShrink: 0, fontWeight: 700 }}>
+                          ✓ 적용됨
+                        </span>
+                      ) : (
+                        <button
+                          style={{ fontSize: '0.72rem', padding: '3px 10px', border: `1px solid ${isLive ? 'rgba(246,70,93,0.4)' : 'rgba(14,203,129,0.4)'}`, borderRadius: 4, background: isLive ? 'rgba(246,70,93,0.08)' : 'rgba(14,203,129,0.08)', color: isLive ? '#f6465d' : '#0ecb81', cursor: 'pointer', flexShrink: 0 }}
+                          onClick={() => applyPreset(preset)}
+                        >
+                          {tab === 'paper' ? '모의에 적용' : '실전에 적용'}
+                        </button>
+                      )}
+                      {onDeletePreset && (
+                        <button
+                          style={{ fontSize: '0.72rem', padding: '3px 6px', border: '1px solid rgba(246,70,93,0.25)', borderRadius: 4, background: 'transparent', color: '#f6465d', cursor: 'pointer', flexShrink: 0, opacity: 0.7 }}
+                          onClick={() => onDeletePreset(preset.id)}
+                        >✕</button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           {tab === 'paper'
             ? <SettingsEditor draft={paperDraft} set={setP} isLive={false} />
             : <SettingsEditor draft={liveDraft}  set={setL} isLive={true}  />

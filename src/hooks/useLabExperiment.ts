@@ -416,6 +416,23 @@ export function useLabExperiment(
           strategyId: cfg.strategyId,
         };
 
+        // Guard: skip if current mark price has already breached the SL.
+        // The main paper ledger uses limit orders (no fill below entry), but the lab
+        // opens positions directly at the scan price — so we replicate the SL-breach
+        // rejection that the main system would apply.
+        const currentMark = markPricesRef.current[c.symbol] ?? 0;
+        if (currentMark > 0) {
+          const isLong = c.direction === 'long';
+          if (isLong && currentMark <= c.slPrice) {
+            addLog(`⚠ ${c.symbol} SL 이탈 — 현재가 ${currentMark.toFixed(4)} ≤ SL ${c.slPrice.toFixed(4)} — 진입 건너뜀`);
+            continue;
+          }
+          if (!isLong && currentMark >= c.slPrice) {
+            addLog(`⚠ ${c.symbol} SL 이탈 — 현재가 ${currentMark.toFixed(4)} ≥ SL ${c.slPrice.toFixed(4)} — 진입 건너뜀`);
+            continue;
+          }
+        }
+
         const side: 'LONG' | 'SHORT' = c.direction === 'long' ? 'LONG' : 'SHORT';
         paperRef.current.openPosition(
           c.symbol, side, qty, c.entryPrice, cfg.leverage, 'isolated',
