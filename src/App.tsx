@@ -1871,6 +1871,7 @@ function AppInner() {
       marginUsdt: autoSettings.marginUsdt,
       entryDriftPct,
       strategyId: c.strategyId,
+      triggerLinePrice: c.triggerSpec ? triggerPrice(c.triggerSpec, c.asOfCloseTime) : undefined,
     };
     // All filters passed — log confirmed entry attempt and record for scan-done voice
     addLog('order',
@@ -1958,6 +1959,7 @@ function AppInner() {
     },
     breakoutDirection: activeAutoTradeSettings.breakoutDirection ?? 'both',
     minCandidateScore: activeAutoTradeSettings.minCandidateScore ?? 90,
+    breakoutMaxBarsAfterTrigger: activeAutoTradeSettings.breakoutMaxBarsAfterTrigger ?? 1,
   });
   altAutoTradeSetActiveRef.current = altAutoTrade.setActive;
 
@@ -2308,14 +2310,45 @@ function AppInner() {
       validUntilTime: params.validUntilTime,
       requestAt: requestStartedAt,
     });
-    const liveOrderType = liveAutoTradeSettingsRef.current.liveEntryOrderType ?? 'MARKET';
+    // ── Breakout live entry: MARKET / LIMIT_IOC / SKIP based on distance from trigger line ──
+    let liveOrderType: 'MARKET' | 'LIMIT_IOC';
+    let finalEntryPrice = effectiveEntryPrice;
+    const isBreakoutLive = params.strategyId === 'breakout' && params.entrySource === 'auto';
+    if (isBreakoutLive && params.triggerLinePrice && params.triggerLinePrice > 0) {
+      const liveSettings = liveAutoTradeSettingsRef.current;
+      const nearPct = liveSettings.breakoutMarketNearPct ?? 0.20;
+      const farPct  = liveSettings.breakoutLimitIocFarPct ?? 0.50;
+      const trigLine = params.triggerLinePrice;
+      const markNow  = markPricesMapRef.current[params.symbol] ?? 0;
+      const driftPct = markNow > 0
+        ? Math.abs(markNow - trigLine) / trigLine * 100
+        : 0;
+      addLog('info',
+        `[ALT실전/breakout] ${params.symbol} ${params.direction.toUpperCase()} — 트리거라인=${trigLine.toFixed(4)} 종가=${effectiveEntryPrice.toFixed(4)} 현재가=${markNow > 0 ? markNow.toFixed(4) : 'N/A'} 거리=${driftPct.toFixed(3)}% (근처폭=${nearPct}% IOC폭=${farPct}%)`,
+      );
+      if (driftPct <= nearPct) {
+        liveOrderType = 'MARKET';
+        addLog('info', `[ALT실전/breakout] ${params.symbol} → 시장가(MARKET) 진입 (거리 ${driftPct.toFixed(3)}% ≤ ${nearPct}%)`);
+      } else if (driftPct <= farPct) {
+        liveOrderType = 'LIMIT_IOC';
+        finalEntryPrice = trigLine;
+        addLog('info', `[ALT실전/breakout] ${params.symbol} → 지정가 IOC @ ${trigLine.toFixed(4)} (거리 ${driftPct.toFixed(3)}% ≤ ${farPct}%)`);
+      } else {
+        addLog('warn',
+          `[ALT실전/breakout] ⛔ ${params.symbol} ${params.direction.toUpperCase()} — 거리 ${driftPct.toFixed(3)}% > 허용폭 ${farPct}% → 진입 스킵`,
+        );
+        return;
+      }
+    } else {
+      liveOrderType = liveAutoTradeSettingsRef.current.liveEntryOrderType ?? 'MARKET';
+    }
     const isLimitIoc = liveOrderType === 'LIMIT_IOC';
-    addLog('info', `[ALT실전] 진입 요청 시작 — ${side} ${qty} ${params.symbol} (${isLimitIoc ? `지정가 IOC @ ${effectiveEntryPrice}` : '시장가 MARKET'})`);
+    addLog('info', `[ALT실전] 진입 요청 시작 — ${side} ${qty} ${params.symbol} (${isLimitIoc ? `지정가 IOC @ ${finalEntryPrice}` : '시장가 MARKET'})`);
 
     try {
       await futuresPlaceOrder(
         side,
-        effectiveEntryPrice,
+        finalEntryPrice,
         qty,
         leverage,
         liveMarginType,

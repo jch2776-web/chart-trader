@@ -54,6 +54,8 @@ export interface AltTradeParams {
   entryDriftPct?: number | null;
   // Strategy that produced this candidate (undefined = legacy breakout)
   strategyId?: string;
+  // Breakout live entry: trigger line price at signal close time (for MARKET/IOC/SKIP decision)
+  triggerLinePrice?: number;
 }
 
 interface AutoEntryHints {

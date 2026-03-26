@@ -115,6 +115,8 @@ export function useAltAutoTrade({
   breakoutDirection?: 'long' | 'short' | 'both';
   /** Minimum candidate score to qualify for auto-entry (default 90) */
   minCandidateScore?: number;
+  /** Breakout only: skip if (now - triggeredAt) > N × intervalMs (default 1) */
+  breakoutMaxBarsAfterTrigger?: number;
 }) {
   const [isActive, setIsActiveState] = useState<boolean>(() => {
     try { return localStorage.getItem(AUTO_TRADE_KEY) === 'true'; } catch { return false; }
@@ -143,6 +145,7 @@ export function useAltAutoTrade({
   const fvgOptionsRef             = useRef(fvgOptions);
   const breakoutDirectionRef      = useRef<'long' | 'short' | 'both'>(breakoutDirection ?? 'both');
   const scoreThresholdRef         = useRef(minCandidateScore ?? 90);
+  const maxBarsAfterTriggerRef    = useRef(breakoutMaxBarsAfterTrigger ?? 1);
   isActiveRef.current             = isActive;
   symbolsRef.current              = symbols;
   onEnterRef.current              = onEnterTrade;
@@ -158,6 +161,7 @@ export function useAltAutoTrade({
   fvgOptionsRef.current           = fvgOptions;
   breakoutDirectionRef.current    = breakoutDirection ?? 'both';
   scoreThresholdRef.current       = minCandidateScore ?? 90;
+  maxBarsAfterTriggerRef.current  = breakoutMaxBarsAfterTrigger ?? 1;
 
   const addLog = useCallback((msg: string, type: AutoTradeLog['type'] = 'info') => {
     setLogs(prev => [{ id: ++logSeq, time: Date.now(), msg, type }, ...prev].slice(0, 200));
@@ -315,6 +319,25 @@ export function useAltAutoTrade({
           addLog(`⏭ [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — 이미 이번 실행에서 진입됨 (중복 건너뜀)`, 'info');
           continue;
         }
+        // ── Breakout-specific pre-entry gates ───────────────────────────────
+        if (strategyIdRef.current === 'breakout') {
+          // Gate 1: require TRIGGERED status — PENDING candidates have not confirmed the breakout level yet
+          if (c.status !== 'TRIGGERED') {
+            addLog(`⏭ [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — breakout 상태 ${c.status ?? 'undefined'} → 진입 스킵 (TRIGGERED만 허용)`, 'warn');
+            continue;
+          }
+          // Gate 2: skip if too many bars have elapsed since trigger
+          const triggerTime = c.triggeredAt ?? c.asOfCloseTime;
+          const ivMs = intervalToMs(interval);
+          const barsElapsed = (Date.now() - triggerTime) / ivMs;
+          const maxBars = maxBarsAfterTriggerRef.current;
+          if (barsElapsed > maxBars) {
+            addLog(`⏭ [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — breakout 트리거 후 ${barsElapsed.toFixed(2)}봉 경과 > 허용 ${maxBars}봉 → 진입 스킵`, 'warn');
+            continue;
+          }
+        }
+        // ────────────────────────────────────────────────────────────────────
+
         // Log at info level only — actual entry confirmation is emitted by the callback after passing all filters
         addLog(
           `🔍 [${interval}] 후보 전달: ${c.symbol} ${c.direction.toUpperCase()} 점수${c.score} 진입${c.entryPrice.toFixed(4)} SL${c.slPrice.toFixed(4)} TP${c.tpPrice.toFixed(4)}`,

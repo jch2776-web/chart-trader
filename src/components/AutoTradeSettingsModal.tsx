@@ -139,6 +139,10 @@ export interface AutoTradeSettings {
   retestRequire4hTrend?: boolean;    // require 4H EMA20 > EMA50 for LONG entry (default true)
   // Breakout-specific direction override (default 'both')
   breakoutDirection?: 'long' | 'short' | 'both';
+  // Breakout live entry precision controls (only used when strategyId === 'breakout' AND mode === 'live')
+  breakoutMarketNearPct?: number;      // drift from trigger line ≤ this → MARKET (default 0.20)
+  breakoutLimitIocFarPct?: number;     // drift from trigger line ≤ this → LIMIT_IOC (default 0.50); > this → SKIP
+  breakoutMaxBarsAfterTrigger?: number; // skip entry if (now - triggeredAt) > N × intervalMs (default 1)
   // FVG POC + EMA72 specific (only used when strategyId === 'fvg-poc-ema72')
   fvgPocLookbackBars?: number;
   fvgPocBins?: number;
@@ -595,6 +599,42 @@ function SettingsEditor({
           <span style={s.hint}>
             자동매매에서 진입할 방향. 실험실의 "스캔 방향"과 동일. LONG만 권장(추세 방향).
           </span>
+          {/* Breakout live entry precision (only meaningful in live mode) */}
+          {isLive && (
+            <div style={{ borderTop: '1px solid rgba(59,139,235,0.15)', paddingTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ fontSize: '0.72rem', color: '#3b8beb', fontWeight: 700, marginBottom: 2 }}>실전 진입 정밀도 (라인 대비 현재가 거리)</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap' as const, gap: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>라인 근처 시장가 허용폭</span>
+                  <input type="number" min={0} max={5} step={0.05}
+                    value={draft.breakoutMarketNearPct ?? 0.20}
+                    onChange={e => set('breakoutMarketNearPct', Math.max(0, Math.min(5, parseFloat(e.target.value) || 0.20)))}
+                    style={{ ...s.numberInput, width: 60 }} />
+                  <span style={s.unit}>%</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>라인 기준 IOC 허용폭</span>
+                  <input type="number" min={0} max={5} step={0.05}
+                    value={draft.breakoutLimitIocFarPct ?? 0.50}
+                    onChange={e => set('breakoutLimitIocFarPct', Math.max(0, Math.min(5, parseFloat(e.target.value) || 0.50)))}
+                    style={{ ...s.numberInput, width: 60 }} />
+                  <span style={s.unit}>%</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>트리거 후 최대 진입 봉 수</span>
+                  <input type="number" min={1} max={10} step={1}
+                    value={draft.breakoutMaxBarsAfterTrigger ?? 1}
+                    onChange={e => set('breakoutMaxBarsAfterTrigger', Math.max(1, Math.min(10, parseInt(e.target.value) || 1)))}
+                    style={{ ...s.numberInput, width: 60 }} />
+                  <span style={s.unit}>봉</span>
+                </div>
+              </div>
+              <span style={s.hint}>
+                현재가가 돌파 라인에서 ≤ 시장가폭%이면 MARKET, ≤ IOC폭%이면 지정가 IOC @ 라인가격, 초과 시 진입 스킵.
+                트리거 후 최대 봉수 이내인 경우만 진입합니다.
+              </span>
+            </div>
+          )}
         </div>
       )}
 
