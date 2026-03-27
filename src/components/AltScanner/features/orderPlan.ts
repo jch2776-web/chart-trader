@@ -108,16 +108,19 @@ export interface OrderPlan {
 /**
  * Builds an OrderPlan from a scored RetestCandidate.
  *
+ * All levels are derived from structural inputs — the flip level, AVWAP, and
+ * wick extremes of the retest-reclaim window.  Current close price is NOT
+ * an input here; it is a state-determination input used by the caller to
+ * classify the signal as PENDING / TRIGGERED / INVALID after the plan is built.
+ *
  * @param candidate  The picked RetestCandidate (has retestIndex, reclaimIndex, etc.)
  * @param candles    Closed candles used during the scan (same array as candidate was built from)
  * @param srLevels   SR levels for locating the nearest structural TP1 target
- * @param entryPrice Current close price (lastClosed.close) at scan time
  */
 export function buildLeaderRetestOrderPlan(
   candidate: RetestCandidate,
   candles: Candle[],
   srLevels: LevelZone[],
-  entryPrice: number,
 ): OrderPlan {
   const { level, direction, retestIndex, reclaimIndex, breakoutIndex, atr } = candidate;
   const isLong = direction === 'long';
@@ -153,11 +156,12 @@ export function buildLeaderRetestOrderPlan(
     // ── Failed auction: close back below flip level (with tolerance) ──────
     const failedAuctionExitLevel = level - atr * ENTRY_TOLERANCE_ATR;
 
-    // ── TP1: nearest resistance clearly above entry ───────────────────────
+    // ── TP1: nearest resistance clearly above the flip level ─────────────
+    // Anchored to `level` (= idealEntry), not to current close price.
     const nearestRes = srLevels
-      .filter(z => z.kind === 'resistance' && z.centerPrice > entryPrice + atr * 0.10)
+      .filter(z => z.kind === 'resistance' && z.centerPrice > level + atr * 0.10)
       .sort((a, b) => a.centerPrice - b.centerPrice)[0];
-    const tp1 = nearestRes ? nearestRes.centerPrice : entryPrice + atr * TP_FALLBACK_ATR;
+    const tp1 = nearestRes ? nearestRes.centerPrice : level + atr * TP_FALLBACK_ATR;
 
     return {
       entryZoneLow,
@@ -198,11 +202,12 @@ export function buildLeaderRetestOrderPlan(
     // ── Failed auction: close back above flip level (with tolerance) ──────
     const failedAuctionExitLevel = level + atr * ENTRY_TOLERANCE_ATR;
 
-    // ── TP1: nearest support clearly below entry ──────────────────────────
+    // ── TP1: nearest support clearly below the flip level ────────────────
+    // Anchored to `level` (= idealEntry), not to current close price.
     const nearestSup = srLevels
-      .filter(z => z.kind === 'support' && z.centerPrice < entryPrice - atr * 0.10)
+      .filter(z => z.kind === 'support' && z.centerPrice < level - atr * 0.10)
       .sort((a, b) => b.centerPrice - a.centerPrice)[0];
-    const tp1 = nearestSup ? nearestSup.centerPrice : entryPrice - atr * TP_FALLBACK_ATR;
+    const tp1 = nearestSup ? nearestSup.centerPrice : level - atr * TP_FALLBACK_ATR;
 
     return {
       entryZoneLow,

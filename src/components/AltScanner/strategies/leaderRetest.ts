@@ -264,10 +264,9 @@ function buildRetestDrawings(
   symbol: string,
   direction: 'long' | 'short',
   level: number,
-  entryPrice: number,
+  idealEntry: number,
   sl: number,
-  tp1: number | undefined,
-  tp2: number,
+  tp1: number,
   srLevels: LevelZone[],
   hvnZones: HVNZone[],
   candles: Candle[],
@@ -312,7 +311,7 @@ function buildRetestDrawings(
   ];
 
   const hvn: Drawing[] = hvnZones
-    .filter(z => Math.abs(z.centerPrice - entryPrice) / entryPrice <= 0.03)
+    .filter(z => Math.abs(z.centerPrice - idealEntry) / idealEntry <= 0.03)
     .slice(0, 3)
     .map(z => ({
       id: uid(), type: 'box' as const, ticker: symbol,
@@ -323,8 +322,9 @@ function buildRetestDrawings(
       memo: `⑧ HVN 매물대 · ${fmt(z.priceLow)}~${fmt(z.priceHigh)}`,
     } satisfies BoxDrawing));
 
-  const R = Math.abs(entryPrice - sl);
-  const rr = R > 0 ? Math.abs(tp2 - entryPrice) / R : 0;
+  // RR based on idealEntry → TP1 / idealEntry → hardStop
+  const R = Math.abs(idealEntry - sl);
+  const rr = R > 0 ? Math.abs(tp1 - idealEntry) / R : 0;
 
   const retestLine: HlineDrawing = {
     id: uid(), type: 'hline', ticker: symbol, price: level,
@@ -334,24 +334,19 @@ function buildRetestDrawings(
 
   const entryLines: Drawing[] = [
     {
-      id: uid(), type: 'hline', ticker: symbol, price: entryPrice,
+      id: uid(), type: 'hline', ticker: symbol, price: idealEntry,
       color: '#f0b90b',
-      memo: `① ${isLong ? '▲ 롱' : '▼ 숏'} 리테스트 진입 · RR≈${rr.toFixed(1)}`,
+      memo: `① ${isLong ? '▲ 롱' : '▼ 숏'} 이상적 진입 (flip level) · RR≈${rr.toFixed(1)}`,
     } satisfies HlineDrawing,
     {
       id: uid(), type: 'hline', ticker: symbol, price: sl,
       color: '#f6465d',
-      memo: `④ SL ${fmt(sl)} · 리테스트 레벨 하단 기준`,
+      memo: `④ SL ${fmt(sl)} · wick-based hardStop`,
     } satisfies HlineDrawing,
-    ...(tp1 !== undefined ? [{
-      id: uid(), type: 'hline' as const, ticker: symbol, price: tp1,
-      color: 'rgba(14,203,129,0.65)',
-      memo: `③ TP1 ${fmt(tp1)} · 1차 목표`,
-    } satisfies HlineDrawing] : []),
     {
-      id: uid(), type: 'hline', ticker: symbol, price: tp2,
+      id: uid(), type: 'hline' as const, ticker: symbol, price: tp1,
       color: '#0ecb81',
-      memo: `② TP2 ${fmt(tp2)} · 최종 목표 RR=2`,
+      memo: `② TP1 ${fmt(tp1)} · 구조적 1차 목표`,
     } satisfies HlineDrawing,
   ];
 
@@ -536,14 +531,26 @@ async function scanSymbolRetest(
   const { level, direction: foundDir } = best;
   const isLong = foundDir === 'long';
 
-  // ── OrderPlan — execution blueprint (replaces fixed ATR SL/TP) ───────────
-  const orderPlan = buildLeaderRetestOrderPlan(best, closed, srLevels, entryPrice);
+  // ── Current close — state-determination only ─────────────────────────────
+  // Used to classify this signal as PENDING / TRIGGERED / INVALID.
+  // NOT used as the entry price or as input to the orderPlan calculation.
+  const currentClose = lastClosed.close;
 
-  // Legacy scalar fields derived from the plan (used by auto-trade hook and drawings)
-  const sl  = orderPlan.hardStop;                               // wick-based stop
-  const tp1 = orderPlan.tp1;                                    // nearest structure
-  const R   = Math.abs(entryPrice - sl);
-  const tp2 = isLong ? entryPrice + 2 * R : entryPrice - 2 * R; // 2R runner
+  // ── OrderPlan — structural execution blueprint ────────────────────────────
+  // All levels derived from candidate.level, AVWAP, and wick extremes.
+  // current close is deliberately excluded from orderPlan inputs.
+  const orderPlan = buildLeaderRetestOrderPlan(best, closed, srLevels);
+
+  // ── Legacy scalar fields derived from the plan ────────────────────────────
+  // These exist for ScanCandidate / auto-trade hook compatibility only.
+  // The orderPlan is the authoritative source; consume from there where possible.
+  const sl = orderPlan.hardStop;   // wick-based stop (replaces fixed ATR)
+  const tp1 = orderPlan.tp1;       // nearest structure target
+
+  // entryPrice — legacy reference field; equals orderPlan.idealEntry (= flip level).
+  // Not current close price. Used by drawings and ScanCandidate.entryPrice for
+  // distance display; the auto-trade hook should use orderPlan.entryZone for fills.
+  const entryPrice = orderPlan.idealEntry;
 
   const topLevels = [
     ...srLevels.filter(z => z.kind === 'support').sort((a, b) => b.score - a.score).slice(0, 1),
@@ -558,7 +565,7 @@ async function scanSymbolRetest(
   const triggerAtNextClose = triggerPrice(triggerSpec, nextCandleCloseTime);
 
   const drawingGroups = buildRetestDrawings(
-    symbol, foundDir, level, entryPrice, sl, tp1, tp2,
+    symbol, foundDir, level, entryPrice, sl, tp1,
     srLevels, hvnZones, closed,
   );
 
@@ -567,20 +574,31 @@ async function scanSymbolRetest(
   // mapped to 0-100 for the ScanCandidate score field.
   const score = Math.round(bestBreakdown.total * 100);
 
-  // Distance to retest level
-  const distanceNowPct = isLong
-    ? ((level - entryPrice) / level) * 100
-    : ((entryPrice - level) / level) * 100;
+  // ── Status determination using current close vs orderPlan entry zone ─────
+  // currentClose is the state input; orderPlan defines the valid entry bounds.
+  //   TRIGGERED  — currentClose is within the entry zone (ready to fill)
+  //   INVALID    — currentClose is beyond lateAbove (chasing — skip)
+  //   PENDING    — currentClose is approaching but not yet in zone
+  const inEntryZone = currentClose >= orderPlan.entryZoneLow && currentClose <= orderPlan.entryZoneHigh;
+  const isTooLate   = isLong
+    ? currentClose > orderPlan.lateAbove
+    : currentClose < orderPlan.lateAbove;
+  const status: CandidateStatus = isTooLate ? 'INVALID' : inEntryZone ? 'TRIGGERED' : 'PENDING';
 
-  const status: CandidateStatus = Math.abs(distanceNowPct) <= 0.5 ? 'TRIGGERED' : 'PENDING';
+  // Distance from current close to the flip level (for display / sorting)
+  const distanceNowPct = isLong
+    ? ((level - currentClose) / level) * 100
+    : ((currentClose - level) / level) * 100;
 
   return {
     symbol, direction: foundDir,
     score,
+    // entryPrice — legacy reference field; = orderPlan.idealEntry (flip level).
+    // The auto-trade hook should use orderPlan.entryZone for actual fill logic.
     entryPrice,
-    slPrice: sl,    // orderPlan.hardStop — wick-based; legacy field for auto-trade hook
-    tpPrice: tp2,   // 2R runner from wick-based SL; legacy runner field
-    tp1Price: tp1,  // orderPlan.tp1 — nearest structure
+    slPrice: sl,       // orderPlan.hardStop — wick-based stop; legacy field
+    tpPrice: tp1,      // orderPlan.tp1 — structural target; legacy runner reference (no fixed 2R)
+    tp1Price: tp1,     // orderPlan.tp1 — nearest structure
     atr,
     breakoutType: 'hline',
     srLevels, hvnZones, topLevels, drawingGroups,
@@ -597,7 +615,7 @@ async function scanSymbolRetest(
     triggeredAt: status === 'TRIGGERED' ? lastClosedCloseTime : undefined,
     distanceNowPct,
     strategyId: 'leader-retest',
-    orderPlan,      // full execution blueprint for entry zone / hard stop / TP1 / runner
+    orderPlan,         // authoritative execution blueprint: entry zone, hardStop, tp1, runnerMode
   };
 }
 
