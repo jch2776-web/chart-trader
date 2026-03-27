@@ -8,6 +8,11 @@ import type { FvgPocOptions } from '../components/AltScanner/strategies/fvgPocEm
 import type { ScanFn } from '../components/AltScanner/strategyTypes';
 import { getBinanceGovernorSnapshot } from '../lib/binanceRequestGovernor';
 
+/** Price formatter: ≥1 uses 2dp, otherwise 6dp (handles small-cap crypto). */
+function fmtPrice(p: number): string {
+  return p >= 1 ? p.toFixed(2) : p.toFixed(6);
+}
+
 const AUTO_TRADE_KEY   = 'alt_auto_trade_active';
 const DEFAULT_SCAN_INTERVALS: ScanInterval[] = ['1h', '4h', '1d'];
 const DEFAULT_CADENCE_MINUTES = 60;
@@ -300,11 +305,25 @@ export function useAltAutoTrade({
       }
 
       const scoreThreshold = scoreThresholdRef.current;
+      const isLeaderRetest = strategyIdRef.current === 'leader-retest';
+
+      // For leader-retest: pre-filter INVALID (late/failed-auction) before sorting.
+      // INVALID candidates have already missed the entry zone — entering them would be chasing.
       const qualified = candidates
-        .filter(c => c.score >= scoreThreshold)
+        .filter(c => {
+          if (c.score < scoreThreshold) return false;
+          if (isLeaderRetest && c.status === 'INVALID') return false;
+          return true;
+        })
         .sort((a, b) => b.score - a.score);
+
+      const invalidCount = isLeaderRetest
+        ? candidates.filter(c => c.score >= scoreThreshold && c.status === 'INVALID').length
+        : 0;
       addLog(
-        `[${interval}] 완료 — 전체 ${candidates.length}개 · ${scoreThreshold}점+ ${qualified.length}개 · 진입대상 ${qualified.length}개`,
+        `[${interval}] 완료 — 전체 ${candidates.length}개 · ${scoreThreshold}점+ ${qualified.length + invalidCount}개` +
+        (invalidCount > 0 ? ` (LATE/INVALID ${invalidCount}개 자동 제외)` : '') +
+        ` · 진입대상 ${qualified.length}개`,
         qualified.length > 0 ? 'success' : (candidates.length > 0 ? 'warn' : 'info'),
       );
       onScanEventRef.current?.({ type: 'interval_done', interval, total: candidates.length, qualified: qualified.length, entered: qualified.length });
@@ -348,11 +367,72 @@ export function useAltAutoTrade({
         }
         // ────────────────────────────────────────────────────────────────────
 
-        // Log at info level only — actual entry confirmation is emitted by the callback after passing all filters
-        addLog(
-          `🔍 [${interval}] 후보 전달: ${c.symbol} ${c.direction.toUpperCase()} 점수${c.score} 진입${c.entryPrice.toFixed(4)} SL${c.slPrice.toFixed(4)} TP${c.tpPrice.toFixed(4)}`,
-          'info',
-        );
+        // ── Leader-retest pre-entry gates ────────────────────────────────────
+        if (isLeaderRetest) {
+          // Gate 1: only TRIGGERED (price inside entry zone) may proceed.
+          // INVALID = price past lateAbove → chasing; PENDING = not yet in zone.
+          if (c.status === 'INVALID') {
+            // Defensive: should already be pre-filtered above, but guard explicitly.
+            addLog(`⛔ [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — LATE/INVALID (lateAbove 초과) → 추격 진입 금지`, 'warn');
+            continue;
+          }
+          if (c.status !== 'TRIGGERED') {
+            addLog(`⏭ [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — 상태 ${c.status ?? '?'} (TRIGGERED 아님) → 진입 대기`, 'info');
+            continue;
+          }
+          // Gate 2: cancelAfterBars — discard order blueprint if scan is stale.
+          // Uses bar-index arithmetic (same pattern as breakout gate).
+          if (c.orderPlan != null) {
+            const ivMs = intervalToMs(interval);
+            const asOfBar    = Math.floor(c.asOfCloseTime / ivMs);
+            const nowBar     = Math.floor(Date.now() / ivMs);
+            const barsElapsed = nowBar - asOfBar;
+            if (barsElapsed > c.orderPlan.cancelAfterBars) {
+              addLog(
+                `⏭ [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — ` +
+                `cancelAfterBars(${c.orderPlan.cancelAfterBars}) 초과 ` +
+                `(${barsElapsed}봉 경과) → 주문 청사진 폐기`,
+                'warn',
+              );
+              continue;
+            }
+          }
+          // TODO: Gate 3 (spread) — block when bid/ask spread > threshold.
+          // Requires real-time order-book data (not yet available in ScanCandidate).
+          // TODO: Gate 4 (position size risk) — block when hardStop distance > max risk %.
+          // Wire when position-sizing module is integrated.
+        }
+        // ────────────────────────────────────────────────────────────────────
+
+        // ── Candidate log — rich detail for leader-retest, compact for others ──
+        if (isLeaderRetest && c.orderPlan != null) {
+          const op = c.orderPlan;
+          const bd = c.scoreBreakdown;
+          const scoresStr = bd
+            ? `L${(bd.leaderScore   * 100).toFixed(0)}` +
+              ` P${(bd.pullbackScore * 100).toFixed(0)}` +
+              ` Lo${(bd.locationScore * 100).toFixed(0)}`
+            : '분석없음';
+          const riskPct = c.entryPrice > 0
+            ? ((Math.abs(c.entryPrice - op.hardStop) / c.entryPrice) * 100).toFixed(2)
+            : '?';
+          addLog(
+            `🔍 [${interval}] 후보 → ${c.symbol} ${c.direction.toUpperCase()} ` +
+            `총${c.score}pts (${scoresStr}) | ` +
+            `진입존 ${fmtPrice(op.entryZoneLow)}~${fmtPrice(op.entryZoneHigh)} ` +
+            `HardStop ${fmtPrice(op.hardStop)} (리스크 ${riskPct}%) ` +
+            `TP1 ${fmtPrice(op.tp1)} | ` +
+            `상태 ${c.status} runner:${op.runnerMode}`,
+            'info',
+          );
+        } else {
+          // Generic log for breakout / fvg-poc-ema72
+          addLog(
+            `🔍 [${interval}] 후보 전달: ${c.symbol} ${c.direction.toUpperCase()} ` +
+            `점수${c.score} 진입${c.entryPrice.toFixed(4)} SL${c.slPrice.toFixed(4)} TP${c.tpPrice.toFixed(4)}`,
+            'info',
+          );
+        }
         onEnterRef.current({ ...c, scanMode: mode, scanStartTime: startTime });
         enteredThisRun.add(key);
         totalEntered++;

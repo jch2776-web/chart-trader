@@ -616,6 +616,7 @@ async function scanSymbolRetest(
     distanceNowPct,
     strategyId: 'leader-retest',
     orderPlan,         // authoritative execution blueprint: entry zone, hardStop, tp1, runnerMode
+    scoreBreakdown: bestBreakdown, // sub-scores for logging / UI inspection
   };
 }
 

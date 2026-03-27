@@ -11,6 +11,7 @@ import {
 import { fetchBinanceKlinesCached } from '../../lib/binanceKlineCache';
 import { acquireScanSlot, getBinanceGovernorSnapshot } from '../../lib/binanceRequestGovernor';
 import type { OrderPlan } from './features/orderPlan';
+import type { RetestScoreBreakdown } from './features/retestScoring';
 
 export type ScanInterval = '15m' | '1h' | '4h' | '1d';
 export type ScanDirection = 'both' | 'long' | 'short';
@@ -79,9 +80,15 @@ export interface ScanCandidate {
   /** True = passed top-N universe filter; false = universe fetch failed (all symbols used) */
   fvgPassedUniverseFilter?: boolean;
 
-  // ── Leader-retest execution blueprint (optional) ──────────────────────────
+  // ── Leader-retest execution blueprint + score breakdown (optional) ────────
   /** Full entry/exit plan produced by buildLeaderRetestOrderPlan(). */
   orderPlan?: OrderPlan;
+  /**
+   * Detailed score breakdown from scoreRetestCandidate() (leader-retest only).
+   * Exposes sub-scores (leaderScore, impulseScore, pullbackScore, locationScore, airScore)
+   * so the auto-trade hook and UI can log / filter by individual components.
+   */
+  scoreBreakdown?: RetestScoreBreakdown;
 }
 
 // ── Utilities ──────────────────────────────────────────────────────────────
