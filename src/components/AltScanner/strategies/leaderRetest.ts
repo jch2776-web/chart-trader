@@ -408,9 +408,11 @@ async function scanSymbolRetest(
   }
   // ───────────────────────────────────────────────────────────────────────
 
-  const entryPrice = lastClosed.close;
-  const srLevels = calcSRLevels(closed, atr, entryPrice);
-  const hvnZones = calcHVN(closed.slice(-300), 100, 5, entryPrice);
+  // scanRefPrice — current close used only as context for calcSRLevels / calcHVN.
+  // NOT the entry price; see `entryPrice` below (= orderPlan.idealEntry).
+  const scanRefPrice = lastClosed.close;
+  const srLevels = calcSRLevels(closed, atr, scanRefPrice);
+  const hvnZones = calcHVN(closed.slice(-300), 100, 5, scanRefPrice);
 
   const detectOpts: RetestDetectOptions = {
     minBars:         opts.minBars,
@@ -531,10 +533,9 @@ async function scanSymbolRetest(
   const { level, direction: foundDir } = best;
   const isLong = foundDir === 'long';
 
-  // ── Current close — state-determination only ─────────────────────────────
-  // Used to classify this signal as PENDING / TRIGGERED / INVALID.
-  // NOT used as the entry price or as input to the orderPlan calculation.
-  const currentClose = lastClosed.close;
+  // currentClose — state-determination only (PENDING / TRIGGERED / INVALID).
+  // Equals scanRefPrice defined above; given an explicit name here for clarity.
+  const currentClose = scanRefPrice;
 
   // ── OrderPlan — structural execution blueprint ────────────────────────────
   // All levels derived from candidate.level, AVWAP, and wick extremes.

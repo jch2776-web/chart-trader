@@ -1430,6 +1430,33 @@ export function AltScannerModal({
                     <span style={{ color: '#0ecb81', fontSize: '0.72rem' }}>목표 {pf(c.tpPrice)}</span>
                     <span style={{ color: '#f6465d', fontSize: '0.72rem' }}>손절 {pf(c.slPrice)}</span>
                   </div>
+                  {/* Leader-retest: compact score breakdown + entry zone */}
+                  {c.strategyId === 'leader-retest' && c.scoreBreakdown != null && (
+                    <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap', marginTop: '2px' }}>
+                      {([
+                        ['L',  c.scoreBreakdown.leaderScore],
+                        ['Im', c.scoreBreakdown.impulseScore],
+                        ['Pb', c.scoreBreakdown.pullbackScore],
+                        ['Lo', c.scoreBreakdown.locationScore],
+                        ['Ar', c.scoreBreakdown.airScore],
+                      ] as [string, number][]).map(([label, val]) => (
+                        <span key={label} style={{
+                          fontSize: '0.63rem',
+                          color: val >= 0.6 ? '#0ecb81' : val >= 0.35 ? '#f0b90b' : '#f6465d',
+                          background: 'rgba(255,255,255,0.05)',
+                          borderRadius: '3px',
+                          padding: '0 3px',
+                        }}>
+                          {label}{Math.round(val * 100)}
+                        </span>
+                      ))}
+                      {c.orderPlan != null && (
+                        <span style={{ fontSize: '0.63rem', color: '#848e9c', marginLeft: '2px' }}>
+                          존 {pf(c.orderPlan.entryZoneLow)}~{pf(c.orderPlan.entryZoneHigh)}
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
               );
             })}

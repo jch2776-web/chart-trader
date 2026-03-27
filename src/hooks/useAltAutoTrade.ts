@@ -36,7 +36,7 @@ export interface AutoTradeLog {
 
 export type ScanLifecycleEvent =
   | { type: 'interval_start'; interval: ScanInterval; symbolCount: number; boundaryTime: number; mode: 'scheduled' | 'manual' }
-  | { type: 'interval_done';  interval: ScanInterval; total: number; qualified: number; entered: number }
+  | { type: 'interval_done';  interval: ScanInterval; total: number; qualified: number; triggeredCount?: number; entered: number }
   | { type: 'scan_done';      totalEntered: number; intervals: ScanInterval[]; mode: 'scheduled' | 'manual' };
 
 let logSeq = 0;
@@ -100,6 +100,8 @@ export function useAltAutoTrade({
   breakoutDirection,
   minCandidateScore,
   breakoutMaxBarsAfterTrigger,
+  maxSpreadBps,
+  maxRiskPct,
 }: {
   symbols: string[];
   onEnterTrade: (candidate: ScanCandidate) => void;
@@ -123,6 +125,19 @@ export function useAltAutoTrade({
   minCandidateScore?: number;
   /** Breakout only: 0 = same bar only, 1 = next bar too, N = N bars later allowed (default 0) */
   breakoutMaxBarsAfterTrigger?: number;
+  /**
+   * Leader-retest Gate 3: block entry when ScanCandidate.spreadBps exceeds this value.
+   * Only fires when spreadBps is populated (real-time order-book data available).
+   * Default 4 bps. Set to 0 to disable.
+   */
+  maxSpreadBps?: number;
+  /**
+   * Leader-retest Gate 4: block entry when wick-stop distance exceeds this fraction of idealEntry.
+   * riskPct = |idealEntry − hardStop| / idealEntry.
+   * Default 0.025 (2.5 %). Set to 0 to disable.
+   * TODO: multiply by position size to get absolute max-loss gate once sizing module is available.
+   */
+  maxRiskPct?: number;
 }) {
   const [isActive, setIsActiveState] = useState<boolean>(() => {
     try { return localStorage.getItem(AUTO_TRADE_KEY) === 'true'; } catch { return false; }
@@ -152,6 +167,8 @@ export function useAltAutoTrade({
   const breakoutDirectionRef      = useRef<'long' | 'short' | 'both'>(breakoutDirection ?? 'both');
   const scoreThresholdRef         = useRef(minCandidateScore ?? 90);
   const maxBarsAfterTriggerRef    = useRef(breakoutMaxBarsAfterTrigger ?? 0);
+  const maxSpreadBpsRef           = useRef(maxSpreadBps ?? 4);
+  const maxRiskPctRef             = useRef(maxRiskPct ?? 0.025);
   isActiveRef.current             = isActive;
   symbolsRef.current              = symbols;
   onEnterRef.current              = onEnterTrade;
@@ -168,6 +185,8 @@ export function useAltAutoTrade({
   breakoutDirectionRef.current    = breakoutDirection ?? 'both';
   scoreThresholdRef.current       = minCandidateScore ?? 90;
   maxBarsAfterTriggerRef.current  = breakoutMaxBarsAfterTrigger ?? 0;
+  maxSpreadBpsRef.current         = maxSpreadBps ?? 4;
+  maxRiskPctRef.current           = maxRiskPct ?? 0.025;
 
   const addLog = useCallback((msg: string, type: AutoTradeLog['type'] = 'info') => {
     setLogs(prev => [{ id: ++logSeq, time: Date.now(), msg, type }, ...prev].slice(0, 200));
@@ -320,13 +339,20 @@ export function useAltAutoTrade({
       const invalidCount = isLeaderRetest
         ? candidates.filter(c => c.score >= scoreThreshold && c.status === 'INVALID').length
         : 0;
+      // triggeredCount: qualified candidates already in the entry zone (TRIGGERED status).
+      // For non-leader-retest strategies all qualified are treated as triggered.
+      const triggeredCount = isLeaderRetest
+        ? qualified.filter(c => c.status === 'TRIGGERED').length
+        : qualified.length;
       addLog(
         `[${interval}] 완료 — 전체 ${candidates.length}개 · ${scoreThreshold}점+ ${qualified.length + invalidCount}개` +
-        (invalidCount > 0 ? ` (LATE/INVALID ${invalidCount}개 자동 제외)` : '') +
-        ` · 진입대상 ${qualified.length}개`,
-        qualified.length > 0 ? 'success' : (candidates.length > 0 ? 'warn' : 'info'),
+        (invalidCount > 0 ? ` (LATE/INVALID ${invalidCount}개 제외)` : '') +
+        (isLeaderRetest ? ` · 진입존 ${triggeredCount}개` : ` · 진입대상 ${qualified.length}개`),
+        triggeredCount > 0 ? 'success' : (candidates.length > 0 ? 'warn' : 'info'),
       );
-      onScanEventRef.current?.({ type: 'interval_done', interval, total: candidates.length, qualified: qualified.length, entered: qualified.length });
+      // interval_done fires AFTER the per-candidate loop so `entered` reflects actual calls.
+      // Declared here, emitted below.
+      let actualEnteredCount = 0;
 
       const maxPositions = maxAutoPositionsRef.current;
       for (const c of qualified) {
@@ -397,10 +423,41 @@ export function useAltAutoTrade({
               continue;
             }
           }
-          // TODO: Gate 3 (spread) — block when bid/ask spread > threshold.
-          // Requires real-time order-book data (not yet available in ScanCandidate).
-          // TODO: Gate 4 (position size risk) — block when hardStop distance > max risk %.
-          // Wire when position-sizing module is integrated.
+          // Gate 3: spread — only when ScanCandidate.spreadBps is populated.
+          // (Real-time order-book data not yet fetched by the scan fn;
+          //  set ScanCandidate.spreadBps when streaming bid/ask becomes available.)
+          if (c.spreadBps != null && maxSpreadBpsRef.current > 0) {
+            if (c.spreadBps > maxSpreadBpsRef.current) {
+              addLog(
+                `⛔ [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — ` +
+                `spread ${c.spreadBps.toFixed(1)} bps > max ${maxSpreadBpsRef.current} bps → 진입 차단`,
+                'warn',
+              );
+              continue;
+            }
+          }
+          // Gate 4: distance-based risk gate using wick-based hardStop.
+          // riskPct = |idealEntry − hardStop| / idealEntry.
+          // TODO: once position-sizing module exists, multiply by size to cap absolute max-loss.
+          if (c.orderPlan != null && maxRiskPctRef.current > 0) {
+            const idealEntry = c.orderPlan.idealEntry;
+            if (idealEntry > 0) {
+              const riskPct = Math.abs(idealEntry - c.orderPlan.hardStop) / idealEntry;
+              if (riskPct > maxRiskPctRef.current) {
+                addLog(
+                  `⛔ [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — ` +
+                  `risk ${(riskPct * 100).toFixed(2)}% > max ${(maxRiskPctRef.current * 100).toFixed(1)}% → 진입 차단`,
+                  'warn',
+                );
+                continue;
+              }
+            }
+          }
+          // ── Position-management hooks (timeStopBars / failedAuctionExitLevel) ──
+          // These operate on live positions AFTER entry, not at scan time.
+          // Wire here once a position-tracking loop exists:
+          //   timeStopBars          → if bars_since_entry > orderPlan.timeStopBars && position < tp1: close/trim
+          //   failedAuctionExitLevel → if close crosses orderPlan.failedAuctionExitLevel: close immediately
         }
         // ────────────────────────────────────────────────────────────────────
 
@@ -433,6 +490,7 @@ export function useAltAutoTrade({
             'info',
           );
         }
+        actualEnteredCount++;
         onEnterRef.current({ ...c, scanMode: mode, scanStartTime: startTime });
         enteredThisRun.add(key);
         totalEntered++;
@@ -442,6 +500,15 @@ export function useAltAutoTrade({
           addLog(`⚡ [${interval}] 첫 후보 전달 — 경계 대비 ${firstLagSec}s`, 'info');
         }
       }
+      // Emit interval_done AFTER the per-candidate loop so `entered` is the actual call count.
+      onScanEventRef.current?.({
+        type: 'interval_done',
+        interval,
+        total: candidates.length,
+        qualified: qualified.length,
+        triggeredCount,
+        entered: actualEnteredCount,
+      });
     }
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);

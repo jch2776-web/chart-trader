@@ -29,7 +29,10 @@ export interface ScanCandidate {
   symbol: string;
   direction: 'long' | 'short';
   score: number;
-  entryPrice: number;       // lastClosed.close at scan time (SL/TP reference)
+  /** Reference entry price. Meaning is strategy-dependent:
+   *  breakout/fvg → lastClosed.close at scan time;
+   *  leader-retest → orderPlan.idealEntry (flip level, NOT current close). */
+  entryPrice: number;
   slPrice: number;
   tpPrice: number;
   tp1Price?: number;
@@ -79,6 +82,14 @@ export interface ScanCandidate {
   fvgBreakoutExtensionPct?: number;
   /** True = passed top-N universe filter; false = universe fetch failed (all symbols used) */
   fvgPassedUniverseFilter?: boolean;
+
+  // ── Execution quality hints (optional — populated when real-time data available) ─
+  /**
+   * Bid/ask spread in basis points at scan time.
+   * leader-retest Gate 3: block entry when spreadBps > maxSpreadBps.
+   * Set by the scan function if real-time order-book data is available; undefined = gate skipped.
+   */
+  spreadBps?: number;
 
   // ── Leader-retest execution blueprint + score breakdown (optional) ────────
   /** Full entry/exit plan produced by buildLeaderRetestOrderPlan(). */
