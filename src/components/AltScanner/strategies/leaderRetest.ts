@@ -30,7 +30,7 @@ import { acquireScanSlot, getBinanceGovernorSnapshot } from '../../../lib/binanc
 import type { ScanFn, ScanStrategy } from '../strategyTypes';
 import { buildRetestCandidates, pickBestRetestCandidate } from '../features/retestCandidates';
 import type { RetestCandidate, RetestDetectOptions } from '../features/retestCandidates';
-import { calcRelativeStrengthVsBenchmark, calcTurnoverAccel, RS_DEFAULT_PERIOD } from '../features/leaderMetrics';
+import { calcRelativeStrengthVsBenchmark, calcRelativeStrengthVsUniverse, calcTurnoverAccel, RS_DEFAULT_PERIOD } from '../features/leaderMetrics';
 import { calcAnchoredVwapFromIndex, calcConfluenceScore, calcAirR } from '../features/locationMetrics';
 import { scoreRetestCandidate } from '../features/retestScoring';
 import type { RetestScoreBreakdown } from '../features/retestScoring';
@@ -220,6 +220,43 @@ function detectRetest(
   return null;
 }
 
+// ── Universe RS helpers ────────────────────────────────────────────────────
+
+/** Number of symbols sampled from the head of the scan list for universe RS. */
+const UNIVERSE_SAMPLE_SIZE = 20;
+
+/**
+ * Pre-fetches close prices for a sample of symbols and returns their
+ * period returns as a number[] for calcRelativeStrengthVsUniverse().
+ *
+ * Each request has weight=1 (limit ≤ 20) and is cached so the main
+ * scan loop reuses the same kline data if it requests the same interval.
+ */
+async function collectUniverseReturns(
+  sampleSymbols: string[],
+  interval: ScanInterval,
+  signal: AbortSignal | undefined,
+): Promise<number[]> {
+  const period = RS_DEFAULT_PERIOD;
+  const limit  = period + 2;
+  const returns: number[] = [];
+
+  await Promise.all(sampleSymbols.map(async (sym) => {
+    if (signal?.aborted) return;
+    try {
+      const candles = await fetchBinanceKlinesCached(sym, interval, limit, signal);
+      const n = candles.length;
+      if (n >= period + 1 && candles[n - 1 - period].close > 0) {
+        returns.push(
+          (candles[n - 1].close - candles[n - 1 - period].close) / candles[n - 1 - period].close,
+        );
+      }
+    } catch { /* skip symbol on error */ }
+  }));
+
+  return returns;
+}
+
 // ── Drawing groups ─────────────────────────────────────────────────────────
 
 function buildRetestDrawings(
@@ -327,6 +364,7 @@ async function scanSymbolRetest(
   interval: ScanInterval,
   direction: ScanDirection,
   opts: Required<RetestOptions>,
+  universeReturns: number[],
   signal?: AbortSignal,
 ): Promise<ScanCandidate | null> {
   const iMs = intervalToMs(interval);
@@ -398,33 +436,79 @@ async function scanSymbolRetest(
     } catch { /* non-fatal — rs fields remain undefined */ }
   }
 
-  // BTC 4H candles for rs4h (reuse btcCandles when scan interval is 4h/1d).
-  let btcCandles4h: Candle[] = [];
-  if (symbol !== 'BTCUSDT' && candles4h.length >= RS_DEFAULT_PERIOD + 1) {
+  // ── Ensure 4H candles available for rs4h ────────────────────────────────
+  // The trend filter above populates candles4h only when require4hTrend+LONG.
+  // Fetch here as fallback so rs4h is always computed when possible.
+  if (candles4h.length < RS_DEFAULT_PERIOD + 1 && symbol !== 'BTCUSDT') {
     if (interval === '4h' || interval === '1d') {
-      btcCandles4h = btcCandles; // already on the 4h / 1d timeframe
+      candles4h = closed;
     } else {
       try {
-        const rawBtc4h = await fetchBinanceKlinesCached('BTCUSDT', '4h', 60, signal);
+        const raw4h = await fetchBinanceKlinesCached(symbol, '4h', RS_DEFAULT_PERIOD + 5, signal);
+        candles4h = closedOnly(raw4h, intervalToMs('4h'));
+      } catch { /* non-fatal */ }
+    }
+  }
+  // BTC 4H candles for rs4h
+  let btcCandles4h: Candle[] = [];
+  if (candles4h.length >= RS_DEFAULT_PERIOD + 1 && symbol !== 'BTCUSDT') {
+    if (interval === '4h' || interval === '1d') {
+      btcCandles4h = btcCandles;
+    } else {
+      try {
+        const rawBtc4h = await fetchBinanceKlinesCached('BTCUSDT', '4h', RS_DEFAULT_PERIOD + 5, signal);
         btcCandles4h = closedOnly(rawBtc4h, intervalToMs('4h'));
       } catch { /* non-fatal */ }
     }
   }
 
+  // ── 1H candles for rs1h ──────────────────────────────────────────────────
+  // When scanning 1H, reuse closed / btcCandles directly (already 1H).
+  // Other intervals: fetch 1H separately (weight=1 each, cached after first call).
+  let candles1h: Candle[] = [];
+  let btcCandles1h: Candle[] = [];
+  if (symbol !== 'BTCUSDT') {
+    if (interval === '1h') {
+      candles1h    = closed;
+      btcCandles1h = btcCandles;
+    } else {
+      try {
+        const raw1h = await fetchBinanceKlinesCached(symbol, '1h', RS_DEFAULT_PERIOD + 5, signal);
+        candles1h = closedOnly(raw1h, intervalToMs('1h'));
+      } catch { /* non-fatal */ }
+      if (candles1h.length >= RS_DEFAULT_PERIOD + 1) {
+        try {
+          const rawBtc1h = await fetchBinanceKlinesCached('BTCUSDT', '1h', RS_DEFAULT_PERIOD + 5, signal);
+          btcCandles1h = closedOnly(rawBtc1h, intervalToMs('1h'));
+        } catch { /* non-fatal */ }
+      }
+    }
+  }
+
+  // All leader inputs computed once per symbol (same for every candidate of this symbol)
+  const rsVsBtcVal  = btcCandles.length  >= RS_DEFAULT_PERIOD + 1
+    ? calcRelativeStrengthVsBenchmark(closed,     btcCandles,   RS_DEFAULT_PERIOD) : undefined;
+  const rs4hVal     = candles4h.length   >= RS_DEFAULT_PERIOD + 1
+                   && btcCandles4h.length >= RS_DEFAULT_PERIOD + 1
+    ? calcRelativeStrengthVsBenchmark(candles4h,  btcCandles4h, RS_DEFAULT_PERIOD) : undefined;
+  const rs1hVal     = candles1h.length   >= RS_DEFAULT_PERIOD + 1
+                   && btcCandles1h.length >= RS_DEFAULT_PERIOD + 1
+    ? calcRelativeStrengthVsBenchmark(candles1h,  btcCandles1h, RS_DEFAULT_PERIOD) : undefined;
+  const rsUnivVal   = universeReturns.length > 0
+    ? calcRelativeStrengthVsUniverse(closed, universeReturns, RS_DEFAULT_PERIOD)   : undefined;
+  const turnAccelVal = calcTurnoverAccel(closed);
+
   for (const c of allCandidates) {
-    // ── Leader metrics ──────────────────────────────────────────────────
-    if (btcCandles.length >= RS_DEFAULT_PERIOD + 1) {
-      c.rsVsBtc = calcRelativeStrengthVsBenchmark(closed, btcCandles, RS_DEFAULT_PERIOD);
-    }
-    if (candles4h.length >= RS_DEFAULT_PERIOD + 1 && btcCandles4h.length >= RS_DEFAULT_PERIOD + 1) {
-      c.rs4h = calcRelativeStrengthVsBenchmark(candles4h, btcCandles4h, RS_DEFAULT_PERIOD);
-    }
-    c.turnoverAccel = calcTurnoverAccel(closed);
+    // ── Leader metrics (same value for all candidates of this symbol) ────
+    c.rsVsBtc       = rsVsBtcVal;
+    c.rs4h          = rs4hVal;
+    c.rs1h          = rs1hVal;
+    c.rsVsUniverse  = rsUnivVal;
+    c.turnoverAccel = turnAccelVal;
 
     // ── Location metrics ────────────────────────────────────────────────
     const avwap = calcAnchoredVwapFromIndex(closed, c.breakoutIndex);
     if (avwap > 0) {
-      // Signed: positive = price on the favorable side of AVWAP for direction
       const raw = (entryPrice - avwap) / c.atr;
       c.avwapBreakout = c.direction === 'long' ? raw : -raw;
     }
@@ -565,6 +649,15 @@ async function runLeaderRetestScanInternal(
   let done = 0;
   if (total === 0) { scanSlot.release(); return; }
 
+  // Pre-collect universe returns from the first UNIVERSE_SAMPLE_SIZE symbols.
+  // These klines (limit≤20, weight=1 each) are cached, so the main scan
+  // reuses them for those symbols without extra API calls.
+  const universeReturns = await collectUniverseReturns(
+    symbols.slice(0, UNIVERSE_SAMPLE_SIZE),
+    interval,
+    signal,
+  );
+
   const concurrency = Math.max(1, options?.concurrency ?? 3);
   const delayMs = Math.max(0, options?.delayMs ?? 200);
   const queue = [...symbols];
@@ -575,7 +668,7 @@ async function runLeaderRetestScanInternal(
       const sym = queue.shift();
       if (!sym) return;
       try {
-        const result = await scanSymbolRetest(sym, interval, direction, retestOpts, signal);
+        const result = await scanSymbolRetest(sym, interval, direction, retestOpts, universeReturns, signal);
         if (result) onResult(result);
       } catch { /* swallow per-symbol errors */ } finally {
         done++;

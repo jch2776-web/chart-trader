@@ -135,36 +135,32 @@ function normalizeAvwapBreakout(v: number): number {
 /**
  * Leader score: how well the coin is outperforming its benchmark/universe.
  *
- * Uses (in priority order):
- *   1. rsVsBtc + rs4h + turnoverAccel  (all available)
- *   2. rsVsBtc + turnoverAccel
- *   3. rs4h + turnoverAccel
- *   4. turnoverAccel alone (fallback)
+ * Signals and their base priority weights (when all five are present):
+ *   rsVsBtc       0.30  — RS vs BTC on scan timeframe (primary benchmark)
+ *   rs4h          0.25  — RS vs BTC on 4H timeframe (trend confirmation)
+ *   rs1h          0.15  — RS vs BTC on 1H timeframe (short-term momentum)
+ *   rsVsUniverse  0.15  — RS vs scan-universe average (relative ranking)
+ *   turnoverAccel 0.15  — volume participation growth
  *
- * Missing fields fall back to 0.5 (neutral) only when blended with present ones.
+ * Missing fields are excluded; remaining weights are renormalised so the
+ * result is always a proper weighted average of whatever signals are present.
+ * Returns 0.5 (neutral) only when no signal is available at all.
  */
 function calcLeaderScore(c: RetestCandidate): number {
-  const hasRsBtc = c.rsVsBtc    !== undefined;
-  const hasRs4h  = c.rs4h       !== undefined;
-  const hasAccel = c.turnoverAccel !== undefined;
+  // [normalised value, base priority weight]
+  type WeightedSignal = [number, number];
+  const signals: WeightedSignal[] = [];
 
-  const rsBtcN  = hasRsBtc  ? normalizeRS(c.rsVsBtc!)             : null;
-  const rs4hN   = hasRs4h   ? normalizeRS(c.rs4h!)                : null;
-  const accelN  = hasAccel  ? normalizeTurnoverAccel(c.turnoverAccel!) : null;
+  if (c.rsVsBtc       !== undefined) signals.push([normalizeRS(c.rsVsBtc),                     0.30]);
+  if (c.rs4h          !== undefined) signals.push([normalizeRS(c.rs4h),                        0.25]);
+  if (c.rs1h          !== undefined) signals.push([normalizeRS(c.rs1h),                        0.15]);
+  if (c.rsVsUniverse  !== undefined) signals.push([normalizeRS(c.rsVsUniverse),                0.15]);
+  if (c.turnoverAccel !== undefined) signals.push([normalizeTurnoverAccel(c.turnoverAccel),    0.15]);
 
-  if (rsBtcN !== null && rs4hN !== null && accelN !== null) {
-    return rsBtcN * 0.40 + rs4hN * 0.30 + accelN * 0.30;
-  }
-  if (rsBtcN !== null && accelN !== null) {
-    return rsBtcN * 0.60 + accelN * 0.40;
-  }
-  if (rs4hN !== null && accelN !== null) {
-    return rs4hN * 0.60 + accelN * 0.40;
-  }
-  if (accelN !== null) {
-    return accelN;
-  }
-  return 0.5; // no leader data available
+  if (signals.length === 0) return 0.5;
+
+  const totalWeight = signals.reduce((s, sig) => s + sig[1], 0);
+  return signals.reduce((s, sig) => s + sig[0] * (sig[1] / totalWeight), 0);
 }
 
 /**

@@ -85,6 +85,8 @@ export interface RetestCandidate {
   rs4h?: number;
   /** Relative strength vs BTCUSDT on 1H timeframe [-1, +1]. */
   rs1h?: number;
+  /** Relative strength vs the scan-universe average return [-1, +1]. */
+  rsVsUniverse?: number;
   /**
    * Turnover acceleration: (recentAvgVol / baselineAvgVol) − 1.
    * > 0 = participation growing; < 0 = fading.
