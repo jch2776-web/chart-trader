@@ -28,6 +28,8 @@ import { intervalToMs, getTtlBars, getVolFactor, triggerPrice } from '../timeUti
 import { fetchBinanceKlinesCached } from '../../../lib/binanceKlineCache';
 import { acquireScanSlot, getBinanceGovernorSnapshot } from '../../../lib/binanceRequestGovernor';
 import type { ScanFn, ScanStrategy } from '../strategyTypes';
+import { buildRetestCandidates } from '../features/retestCandidates';
+import type { RetestCandidate, RetestDetectOptions } from '../features/retestCandidates';
 
 // ── Retest detection parameters ────────────────────────────────────────────
 
@@ -104,6 +106,8 @@ interface RetestResult {
 }
 
 /**
+ * @deprecated Use buildRetestCandidates (features/retestCandidates.ts) instead.
+ *
  * v2 detectRetest: requires confirmed retest candle.
  *
  * LONG conditions:
@@ -369,12 +373,19 @@ async function scanSymbolRetest(
   const srLevels = calcSRLevels(closed, atr, entryPrice);
   const hvnZones = calcHVN(closed.slice(-300), 100, 5, entryPrice);
 
-  let found: RetestResult | null = null;
-  for (const dir of activeDirs) {
-    const r = detectRetest(closed, dir, atr, srLevels, opts);
-    if (r) { found = r; break; }
-  }
-  if (!found) return null;
+  const detectOpts: RetestDetectOptions = {
+    minBars:        opts.minBars,
+    maxBars:        opts.maxBars,
+    toleranceAtr:   opts.toleranceAtr,
+    maxOvershootAtr: opts.maxOvershootAtr,
+  };
+  const allCandidates: RetestCandidate[] = activeDirs.flatMap(dir =>
+    buildRetestCandidates(closed, dir, atr, srLevels, detectOpts, symbol),
+  );
+  if (allCandidates.length === 0) return null;
+  // TODO(step-3): replace with scoreRetestCandidate() ranking
+  const best = allCandidates[0];
+  const found: RetestResult = { level: best.level, direction: best.direction };
 
   const { level, direction: foundDir } = found;
   const isLong = foundDir === 'long';
