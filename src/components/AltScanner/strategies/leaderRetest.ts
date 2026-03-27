@@ -34,6 +34,7 @@ import { calcRelativeStrengthVsBenchmark, calcRelativeStrengthVsUniverse, calcTu
 import { calcAnchoredVwapFromIndex, calcConfluenceScore, calcAirR } from '../features/locationMetrics';
 import { scoreRetestCandidate } from '../features/retestScoring';
 import type { RetestScoreBreakdown } from '../features/retestScoring';
+import { buildLeaderRetestOrderPlan } from '../features/orderPlan';
 
 // ── Retest detection parameters ────────────────────────────────────────────
 
@@ -535,31 +536,14 @@ async function scanSymbolRetest(
   const { level, direction: foundDir } = best;
   const isLong = foundDir === 'long';
 
-  // SL / TP calculation
-  const R_base = atr * 1.5;
-  let sl: number, tp2: number, tp1: number | undefined;
+  // ── OrderPlan — execution blueprint (replaces fixed ATR SL/TP) ───────────
+  const orderPlan = buildLeaderRetestOrderPlan(best, closed, srLevels, entryPrice);
 
-  if (isLong) {
-    sl = level - R_base;
-    const R = entryPrice - sl;
-    tp2 = entryPrice + 2 * R;
-    const nextRes = srLevels
-      .filter(z => z.kind === 'resistance' && z.centerPrice > entryPrice)
-      .sort((a, b) => a.centerPrice - b.centerPrice)[0];
-    if (nextRes && nextRes.centerPrice - entryPrice >= R * 0.8 && nextRes.centerPrice < tp2) {
-      tp1 = nextRes.centerPrice;
-    }
-  } else {
-    sl = level + R_base;
-    const R = sl - entryPrice;
-    tp2 = entryPrice - 2 * R;
-    const nextSup = srLevels
-      .filter(z => z.kind === 'support' && z.centerPrice < entryPrice)
-      .sort((a, b) => b.centerPrice - a.centerPrice)[0];
-    if (nextSup && entryPrice - nextSup.centerPrice >= R * 0.8 && nextSup.centerPrice > tp2) {
-      tp1 = nextSup.centerPrice;
-    }
-  }
+  // Legacy scalar fields derived from the plan (used by auto-trade hook and drawings)
+  const sl  = orderPlan.hardStop;                               // wick-based stop
+  const tp1 = orderPlan.tp1;                                    // nearest structure
+  const R   = Math.abs(entryPrice - sl);
+  const tp2 = isLong ? entryPrice + 2 * R : entryPrice - 2 * R; // 2R runner
 
   const topLevels = [
     ...srLevels.filter(z => z.kind === 'support').sort((a, b) => b.score - a.score).slice(0, 1),
@@ -593,7 +577,10 @@ async function scanSymbolRetest(
   return {
     symbol, direction: foundDir,
     score,
-    entryPrice, slPrice: sl, tpPrice: tp2, tp1Price: tp1,
+    entryPrice,
+    slPrice: sl,    // orderPlan.hardStop — wick-based; legacy field for auto-trade hook
+    tpPrice: tp2,   // 2R runner from wick-based SL; legacy runner field
+    tp1Price: tp1,  // orderPlan.tp1 — nearest structure
     atr,
     breakoutType: 'hline',
     srLevels, hvnZones, topLevels, drawingGroups,
@@ -610,6 +597,7 @@ async function scanSymbolRetest(
     triggeredAt: status === 'TRIGGERED' ? lastClosedCloseTime : undefined,
     distanceNowPct,
     strategyId: 'leader-retest',
+    orderPlan,      // full execution blueprint for entry zone / hard stop / TP1 / runner
   };
 }
 

@@ -10,6 +10,7 @@ import {
 } from './timeUtils';
 import { fetchBinanceKlinesCached } from '../../lib/binanceKlineCache';
 import { acquireScanSlot, getBinanceGovernorSnapshot } from '../../lib/binanceRequestGovernor';
+import type { OrderPlan } from './features/orderPlan';
 
 export type ScanInterval = '15m' | '1h' | '4h' | '1d';
 export type ScanDirection = 'both' | 'long' | 'short';
@@ -77,6 +78,10 @@ export interface ScanCandidate {
   fvgBreakoutExtensionPct?: number;
   /** True = passed top-N universe filter; false = universe fetch failed (all symbols used) */
   fvgPassedUniverseFilter?: boolean;
+
+  // ── Leader-retest execution blueprint (optional) ──────────────────────────
+  /** Full entry/exit plan produced by buildLeaderRetestOrderPlan(). */
+  orderPlan?: OrderPlan;
 }
 
 // ── Utilities ──────────────────────────────────────────────────────────────
