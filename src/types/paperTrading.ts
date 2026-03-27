@@ -41,6 +41,8 @@ export interface AltMeta {
   entryDriftPct?: number | null;   // (markPrice - entryPrice) / entryPrice * 100 at decision time
   // Scan strategy that produced this candidate (undefined = legacy breakout)
   strategyId?: string;
+  // Leader-retest: close re-breach of flip level triggers immediate exit (failed auction)
+  failedAuctionExitLevel?: number;
 }
 
 export interface PaperPosition {

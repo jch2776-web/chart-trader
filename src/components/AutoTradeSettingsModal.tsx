@@ -150,6 +150,7 @@ export interface AutoTradeSettings {
   fvgUniverseTopN?: number;
   fvgAutoDirection?: 'long' | 'short' | 'both';
   // Risk gates (lab-compatible)
+  maxAbsLossUsd?: number;            // leader-retest: block entry if abs-loss (riskFrac × notional) > this (0 = disable)
   timeStopBars?: number;             // N bars from entry → market close if TP/SL not hit (0 = use signal TTL, default 4)
   cooldownBarsAfterLoss?: number;    // skip N bars of same TF after a losing trade (0 = disabled, default 0)
   maxConcurrentCorrelated?: number;  // max same-direction open positions (0 = unlimited, default 0)

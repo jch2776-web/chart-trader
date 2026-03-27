@@ -37,6 +37,8 @@ interface Props {
   paperPosId: string;
   onClose: (price: number, reason: Extract<PaperHistoryEntry['closeReason'], 'sl'>) => void;
   onTimeStopRequest: (payload: TimeStopRequestPayload) => void;
+  /** Called when bar close re-breaches the flip level (failed auction). Falls back to onClose when absent. */
+  onFailedAuctionExit?: (price: number) => void;
 }
 
 /**
@@ -47,7 +49,7 @@ interface Props {
  *
  * Renders nothing — mount one per alt-scanned paper position.
  */
-export function AltPositionMonitor({ meta, qty, positionSide, paperPosId, onClose, onTimeStopRequest }: Props) {
+export function AltPositionMonitor({ meta, qty, positionSide, paperPosId, onClose, onTimeStopRequest, onFailedAuctionExit }: Props) {
   const timeStopRequestedRef = useRef(false);
   const handleCandle = useCallback((candle: Candle, isClosed: boolean) => {
     if (!isClosed) return;
@@ -55,6 +57,19 @@ export function AltPositionMonitor({ meta, qty, positionSide, paperPosId, onClos
     const candleCloseTime = candle.time + ivMs;
     const monitorAfter = Math.max(meta.signalCloseTime ?? 0, meta.monitorStartTime ?? 0);
     if (monitorAfter > 0 && candleCloseTime <= monitorAfter + 1000) return;
+
+    // ── Failed auction exit (close re-breaches flip level) ─────────────────
+    if (meta.failedAuctionExitLevel != null) {
+      const fael = meta.failedAuctionExitLevel;
+      if (meta.direction === 'long' && candle.close < fael) {
+        if (onFailedAuctionExit) { onFailedAuctionExit(candle.close); } else { onClose(candle.close, 'sl'); }
+        return;
+      }
+      if (meta.direction === 'short' && candle.close > fael) {
+        if (onFailedAuctionExit) { onFailedAuctionExit(candle.close); } else { onClose(candle.close, 'sl'); }
+        return;
+      }
+    }
 
     // ── Structural invalidation (close breaches SL) ────────────────────────
     if (meta.direction === 'long' && candle.close < meta.slPrice) {
@@ -84,7 +99,7 @@ export function AltPositionMonitor({ meta, qty, positionSide, paperPosId, onClos
         paperPosId,
       });
     }
-  }, [meta, qty, positionSide, paperPosId, onClose, onTimeStopRequest]);
+  }, [meta, qty, positionSide, paperPosId, onClose, onTimeStopRequest, onFailedAuctionExit]);
 
   useBinanceWS(meta.symbol, meta.scanInterval as Interval, handleCandle);
 
@@ -106,6 +121,8 @@ interface LiveProps {
   onTimeStopRequest: (payload: TimeStopRequestPayload) => void;
   onTp1Hit?: (meta: AltMeta) => void;
   metaKey: string;
+  /** Called when bar close re-breaches the flip level (failed auction). Falls back to onCloseMarket when absent. */
+  onFailedAuctionExit?: (price: number) => void;
 }
 
 /**
@@ -114,7 +131,7 @@ interface LiveProps {
  *   1. now > validUntilTime  (time-stop)
  *   2. close crosses slPrice in loss direction  (structural invalidation)
  */
-export function LiveAltPositionMonitor({ meta, positionSide, qty, onCloseMarket, onTimeStopRequest, onTp1Hit, metaKey }: LiveProps) {
+export function LiveAltPositionMonitor({ meta, positionSide, qty, onCloseMarket, onTimeStopRequest, onTp1Hit, metaKey, onFailedAuctionExit }: LiveProps) {
   const closeSide: 'BUY' | 'SELL' = meta.direction === 'long' ? 'SELL' : 'BUY';
   // Prevent double-firing for immediate SL close if WS duplicates closed candles.
   const firedRef = useRef(false);
@@ -150,6 +167,21 @@ export function LiveAltPositionMonitor({ meta, positionSide, qty, onCloseMarket,
     const monitorAfter = Math.max(meta.signalCloseTime ?? 0, meta.monitorStartTime ?? 0, meta.liveEntryTime ?? 0, meta.liveEntrySubmittedAt ?? 0);
     if (monitorAfter > 0 && candleCloseTime <= monitorAfter + 1000) return;
 
+    // ── Failed auction exit (close re-breaches flip level) ─────────────────
+    if (!firedRef.current && meta.failedAuctionExitLevel != null) {
+      const fael = meta.failedAuctionExitLevel;
+      if (meta.direction === 'long' && candle.close < fael) {
+        firedRef.current = true;
+        if (onFailedAuctionExit) { onFailedAuctionExit(candle.close); } else { onCloseMarket(meta.symbol, closeSide, qty, positionSide, 'sl'); }
+        return;
+      }
+      if (meta.direction === 'short' && candle.close > fael) {
+        firedRef.current = true;
+        if (onFailedAuctionExit) { onFailedAuctionExit(candle.close); } else { onCloseMarket(meta.symbol, closeSide, qty, positionSide, 'sl'); }
+        return;
+      }
+    }
+
     if (!firedRef.current && meta.direction === 'long' && candle.close < meta.slPrice) {
       firedRef.current = true;
       onCloseMarket(meta.symbol, closeSide, qty, positionSide, 'sl');
@@ -178,7 +210,7 @@ export function LiveAltPositionMonitor({ meta, positionSide, qty, onCloseMarket,
         requestedAt: Date.now(),
       });
     }
-  }, [meta, closeSide, qty, positionSide, onCloseMarket, onTimeStopRequest, onTp1Hit, metaKey]);
+  }, [meta, closeSide, qty, positionSide, onCloseMarket, onTimeStopRequest, onTp1Hit, metaKey, onFailedAuctionExit]);
 
   useBinanceWS(meta.symbol, meta.scanInterval as Interval, handleCandle);
 

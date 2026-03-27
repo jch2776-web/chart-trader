@@ -56,6 +56,8 @@ export interface AltTradeParams {
   strategyId?: string;
   // Breakout live entry: trigger line price at signal close time (for MARKET/IOC/SKIP decision)
   triggerLinePrice?: number;
+  // Leader-retest: price level where a close re-breach of the flip level triggers immediate exit
+  failedAuctionExitLevel?: number;
 }
 
 interface AutoEntryHints {

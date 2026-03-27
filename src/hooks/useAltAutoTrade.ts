@@ -7,6 +7,7 @@ import { createFvgPocEma72Scan } from '../components/AltScanner/strategies/fvgPo
 import type { FvgPocOptions } from '../components/AltScanner/strategies/fvgPocEma72';
 import type { ScanFn } from '../components/AltScanner/strategyTypes';
 import { getBinanceGovernorSnapshot } from '../lib/binanceRequestGovernor';
+import { subscribeBookTicker, getSpreadBps } from '../lib/binanceBookTicker';
 
 /** Price formatter: ≥1 uses 2dp, otherwise 6dp (handles small-cap crypto). */
 function fmtPrice(p: number): string {
@@ -102,6 +103,8 @@ export function useAltAutoTrade({
   breakoutMaxBarsAfterTrigger,
   maxSpreadBps,
   maxRiskPct,
+  maxAbsLossUsd,
+  estimatedNotionalPerTrade,
 }: {
   symbols: string[];
   onEnterTrade: (candidate: ScanCandidate) => void;
@@ -135,9 +138,15 @@ export function useAltAutoTrade({
    * Leader-retest Gate 4: block entry when wick-stop distance exceeds this fraction of idealEntry.
    * riskPct = |idealEntry − hardStop| / idealEntry.
    * Default 0.025 (2.5 %). Set to 0 to disable.
-   * TODO: multiply by position size to get absolute max-loss gate once sizing module is available.
    */
   maxRiskPct?: number;
+  /**
+   * Leader-retest Gate 5: block entry when absolute loss (riskFrac × estimatedNotional) exceeds this USD amount.
+   * Only active when both maxAbsLossUsd > 0 AND estimatedNotionalPerTrade > 0.
+   */
+  maxAbsLossUsd?: number;
+  /** Estimated notional per trade in USDT (= marginUsdt × leverage for margin mode). */
+  estimatedNotionalPerTrade?: number;
 }) {
   const [isActive, setIsActiveState] = useState<boolean>(() => {
     try { return localStorage.getItem(AUTO_TRADE_KEY) === 'true'; } catch { return false; }
@@ -169,6 +178,8 @@ export function useAltAutoTrade({
   const maxBarsAfterTriggerRef    = useRef(breakoutMaxBarsAfterTrigger ?? 0);
   const maxSpreadBpsRef           = useRef(maxSpreadBps ?? 4);
   const maxRiskPctRef             = useRef(maxRiskPct ?? 0.025);
+  const maxAbsLossUsdRef          = useRef(maxAbsLossUsd ?? 0);
+  const estimatedNotionalRef      = useRef(estimatedNotionalPerTrade ?? 0);
   isActiveRef.current             = isActive;
   symbolsRef.current              = symbols;
   onEnterRef.current              = onEnterTrade;
@@ -187,6 +198,8 @@ export function useAltAutoTrade({
   maxBarsAfterTriggerRef.current  = breakoutMaxBarsAfterTrigger ?? 0;
   maxSpreadBpsRef.current         = maxSpreadBps ?? 4;
   maxRiskPctRef.current           = maxRiskPct ?? 0.025;
+  maxAbsLossUsdRef.current        = maxAbsLossUsd ?? 0;
+  estimatedNotionalRef.current    = estimatedNotionalPerTrade ?? 0;
 
   const addLog = useCallback((msg: string, type: AutoTradeLog['type'] = 'info') => {
     setLogs(prev => [{ id: ++logSeq, time: Date.now(), msg, type }, ...prev].slice(0, 200));
@@ -423,14 +436,15 @@ export function useAltAutoTrade({
               continue;
             }
           }
-          // Gate 3: spread — only when ScanCandidate.spreadBps is populated.
-          // (Real-time order-book data not yet fetched by the scan fn;
-          //  set ScanCandidate.spreadBps when streaming bid/ask becomes available.)
-          if (c.spreadBps != null && maxSpreadBpsRef.current > 0) {
-            if (c.spreadBps > maxSpreadBpsRef.current) {
+          // Gate 3: spread — subscribe to live bookTicker then read freshest value.
+          // subscribeBookTicker is idempotent; gate is skipped (not blocked) when data unavailable.
+          subscribeBookTicker(c.symbol);
+          const spreadBpsNow = c.spreadBps ?? getSpreadBps(c.symbol);
+          if (spreadBpsNow != null && maxSpreadBpsRef.current > 0) {
+            if (spreadBpsNow > maxSpreadBpsRef.current) {
               addLog(
                 `⛔ [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — ` +
-                `spread ${c.spreadBps.toFixed(1)} bps > max ${maxSpreadBpsRef.current} bps → 진입 차단`,
+                `spread ${spreadBpsNow.toFixed(1)} bps > max ${maxSpreadBpsRef.current} bps → 진입 차단`,
                 'warn',
               );
               continue;
@@ -438,7 +452,6 @@ export function useAltAutoTrade({
           }
           // Gate 4: distance-based risk gate using wick-based hardStop.
           // riskPct = |idealEntry − hardStop| / idealEntry.
-          // TODO: once position-sizing module exists, multiply by size to cap absolute max-loss.
           if (c.orderPlan != null && maxRiskPctRef.current > 0) {
             const idealEntry = c.orderPlan.idealEntry;
             if (idealEntry > 0) {
@@ -451,13 +464,22 @@ export function useAltAutoTrade({
                 );
                 continue;
               }
+              // Gate 5: absolute loss gate — riskFrac × estimatedNotional > maxAbsLossUsd.
+              const estimatedNotional = estimatedNotionalRef.current;
+              const maxAbsLoss = maxAbsLossUsdRef.current;
+              if (maxAbsLoss > 0 && estimatedNotional > 0) {
+                const absLossUsd = riskPct * estimatedNotional;
+                if (absLossUsd > maxAbsLoss) {
+                  addLog(
+                    `⛔ [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — ` +
+                    `절대손실 $${absLossUsd.toFixed(2)} > 상한 $${maxAbsLoss.toFixed(2)} → 진입 차단`,
+                    'warn',
+                  );
+                  continue;
+                }
+              }
             }
           }
-          // ── Position-management hooks (timeStopBars / failedAuctionExitLevel) ──
-          // These operate on live positions AFTER entry, not at scan time.
-          // Wire here once a position-tracking loop exists:
-          //   timeStopBars          → if bars_since_entry > orderPlan.timeStopBars && position < tp1: close/trim
-          //   failedAuctionExitLevel → if close crosses orderPlan.failedAuctionExitLevel: close immediately
         }
         // ────────────────────────────────────────────────────────────────────
 

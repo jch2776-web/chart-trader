@@ -1633,6 +1633,7 @@ function AppInner() {
       scanCadenceMinutesAtEntry: params.scanCadenceMinutesAtEntry ?? null,
       entryDriftPct: params.entryDriftPct ?? null,
       strategyId: params.strategyId,
+      failedAuctionExitLevel: params.failedAuctionExitLevel,
       ...paperTp1Meta,
     };
     const side: 'BUY' | 'SELL' = params.direction === 'long' ? 'BUY' : 'SELL';
@@ -1835,6 +1836,11 @@ function AppInner() {
       ...c.drawingGroups.hvn,
       ...c.drawingGroups.entryLines,
     ];
+    // For leader-retest, use orderPlan.timeStopBars if available (structural blueprint TTL).
+    // Falls back to autoSettings.timeStopBars for all other strategies.
+    const effectiveTsb = isRetest && (c.orderPlan?.timeStopBars ?? 0) > 0
+      ? c.orderPlan!.timeStopBars
+      : (autoSettings.timeStopBars ?? 0);
     const params: AltTradeParams = {
       symbol:    c.symbol,
       direction: c.direction,
@@ -1851,8 +1857,8 @@ function AppInner() {
       plannedTP: c.tpPrice ?? null,
       plannedSL: c.slPrice ?? null,
       scanInterval: c.interval,
-      validUntilTime: normalizeAutoTradeTimeStop(autoSettings.timeStopEnabled) && (autoSettings.timeStopBars ?? 0) > 0
-        ? now + autoSettings.timeStopBars! * intervalMs
+      validUntilTime: normalizeAutoTradeTimeStop(autoSettings.timeStopEnabled) && effectiveTsb > 0
+        ? now + effectiveTsb * intervalMs
         : c.validUntilTime,
       signalCloseTime: c.asOfCloseTime,
       monitorStartTime: now,
@@ -1860,8 +1866,8 @@ function AppInner() {
       entrySource: 'auto',
       timeStopEnabled: normalizeAutoTradeTimeStop(autoSettings.timeStopEnabled),
       timeStopEnabledAtEntry: normalizeAutoTradeTimeStop(autoSettings.timeStopEnabled),
-      validUntilTimeAtEntry: normalizeAutoTradeTimeStop(autoSettings.timeStopEnabled) && (autoSettings.timeStopBars ?? 0) > 0
-        ? now + autoSettings.timeStopBars! * intervalMs
+      validUntilTimeAtEntry: normalizeAutoTradeTimeStop(autoSettings.timeStopEnabled) && effectiveTsb > 0
+        ? now + effectiveTsb * intervalMs
         : c.validUntilTime,
       scanCadenceMinutesAtEntry: autoSettings.scanCadenceMinutes,
       breakoutType:    c.breakoutType,
@@ -1872,6 +1878,7 @@ function AppInner() {
       entryDriftPct,
       strategyId: c.strategyId,
       triggerLinePrice: c.triggerSpec ? triggerPrice(c.triggerSpec, c.asOfCloseTime) : undefined,
+      failedAuctionExitLevel: isRetest ? c.orderPlan?.failedAuctionExitLevel : undefined,
     };
     // All filters passed — log confirmed entry attempt and record for scan-done voice
     addLog('order',
@@ -1960,6 +1967,11 @@ function AppInner() {
     breakoutDirection: activeAutoTradeSettings.breakoutDirection ?? 'both',
     minCandidateScore: activeAutoTradeSettings.minCandidateScore ?? 90,
     breakoutMaxBarsAfterTrigger: activeAutoTradeSettings.breakoutMaxBarsAfterTrigger ?? 0,
+    maxAbsLossUsd: activeAutoTradeSettings.maxAbsLossUsd ?? 0,
+    estimatedNotionalPerTrade:
+      activeAutoTradeSettings.sizeMode === 'margin'
+        ? (activeAutoTradeSettings.marginUsdt ?? 0) * (activeAutoTradeSettings.leverage ?? 1)
+        : 0,
   });
   altAutoTradeSetActiveRef.current = altAutoTrade.setActive;
 
@@ -2288,6 +2300,7 @@ function AppInner() {
       scanCadenceMinutesAtEntry: params.scanCadenceMinutesAtEntry ?? null,
       entryDriftPct: params.entryDriftPct ?? null,
       strategyId: params.strategyId,
+      failedAuctionExitLevel: params.failedAuctionExitLevel,
       ...liveTp1Meta,
     };
 
@@ -4000,6 +4013,10 @@ function AppInner() {
               paperTrading.closePosition(p.id, price, reason);
             }}
             onTimeStopRequest={requestTimeStop}
+            onFailedAuctionExit={(price) => {
+              addLog('warn', `[ALT모의] ${p.symbol} 실패 경매 청산 — 플립레벨 재돌파 (종가 ${price.toFixed(4)})`);
+              paperTrading.closePosition(p.id, price, 'sl');
+            }}
           />
         )),
     ...(!isPaperMode ? Object.entries(liveAltMetaMap).flatMap(([key, meta]) => {
@@ -4125,6 +4142,24 @@ function AppInner() {
                     addLog('error', `[ALT실전] ${triggerMeta.symbol} TP1 처리 실패: ${msg}`);
                   }
                 });
+            }}
+            onFailedAuctionExit={(price) => {
+              addLog('warn', `[ALT실전] ${meta.symbol} 실패 경매 청산 — 플립레벨 재돌파 (종가 ${price.toFixed(4)})`);
+              const aliasKey = `${meta.symbol}_${meta.direction}`;
+              liveCloseReasonHintRef.current[key] = 'invalid';
+              liveCloseReasonHintRef.current[aliasKey] = 'invalid';
+              const orphanRefs = liveAltOrderRegistryRef.current[key]?.orders ?? [];
+              const pos = futuresAllPositions.find(p =>
+                p.symbol === meta.symbol && Math.abs(p.positionAmt) > 0 &&
+                (meta.direction === 'long' ? p.positionAmt > 0 : p.positionAmt < 0),
+              );
+              if (!pos) return;
+              Promise.all([
+                ...orphanRefs.map(ref => futuresCancelOrder(ref.orderId, meta.symbol).catch(() => {})),
+                futuresCloseMarket(meta.symbol, meta.direction === 'long' ? 'SELL' : 'BUY', Math.abs(pos.positionAmt), pos.positionSide),
+              ]).catch((e: unknown) => {
+                addLog('error', `[ALT실전] ${meta.symbol} 실패 경매 청산 실패: ${e instanceof Error ? e.message : 'unknown'}`);
+              });
             }}
           />
         )];
