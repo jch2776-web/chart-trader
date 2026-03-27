@@ -39,6 +39,11 @@ export interface LabExperimentConfig {
   /** Direction override for breakout scan (independent from general direction) */
   breakoutDirection?: 'long' | 'short' | 'both';
   /**
+   * Breakout only: 0 = same bar only, 1 = next bar too, N bars later allowed.
+   * Mirrors useAltAutoTrade breakoutMaxBarsAfterTrigger. Default 0.
+   */
+  breakoutMaxBarsAfterTrigger?: number;
+  /**
    * Max seconds since the cadence boundary before discarding stale signal processing.
    * If the scan takes longer than this, remaining entry decisions are skipped.
    * null / 0 = disabled.
@@ -338,6 +343,16 @@ export function useLabExperiment(
           if (sameDir >= cfg.maxConcurrentCorrelatedPositions) {
             continue;
           }
+        }
+
+        // ── Breakout: TRIGGERED-only + maxBarsAfterTrigger ───────────────
+        if (cfg.strategyId === 'breakout') {
+          if (c.status !== 'TRIGGERED') continue;
+          const ivMs2 = intervalToMs(interval);
+          const triggerBarIdx = Math.floor((c.triggeredAt ?? c.asOfCloseTime) / ivMs2);
+          const nowBarIdx     = Math.floor(Date.now() / ivMs2);
+          const maxBars       = cfg.breakoutMaxBarsAfterTrigger ?? 0;
+          if ((nowBarIdx - triggerBarIdx) > maxBars) continue;
         }
 
         // ── Breakout candidate filters (entry-to-SL based) ────────────────

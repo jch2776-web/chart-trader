@@ -37,8 +37,9 @@ export function labConfigToAutoSettings(
     maxSignalAgeSec: cfg.maxSignalAgeSec ?? 0,
     maxBreakoutExtensionPct: cfg.maxBreakoutExtensionPct ?? 0,
     maxEntryDriftPct: cfg.maxEntryDriftPct ?? 0,
-    // 돌파 방향
+    // 돌파 방향 + 진입 타이밍
     breakoutDirection: cfg.breakoutDirection ?? 'both',
+    breakoutMaxBarsAfterTrigger: cfg.breakoutMaxBarsAfterTrigger ?? 0,  // 0 = 같은 봉만
     // 리더-리테스트 파라미터
     retestMinBars: cfg.retestMinBars,
     retestMaxBars: cfg.retestMaxBars,
@@ -287,9 +288,10 @@ interface FormState {
   maxConcurrentCorrelated: number;
   // Breakout-specific
   breakoutDirection: 'long' | 'short' | 'both';
-  maxSignalAgeSec: number;        // 0 = disabled
-  maxBreakoutExtensionPct: number; // 0 = disabled
-  maxEntryDriftPct: number;       // 0 = disabled
+  maxSignalAgeSec: number;           // 0 = disabled
+  maxBreakoutExtensionPct: number;   // 0 = disabled
+  maxEntryDriftPct: number;          // 0 = disabled
+  breakoutMaxBarsAfterTrigger: number; // 0 = same bar only
   // FVG POC + EMA72
   fvgPocLookbackBars: number;
   fvgPocBins: number;
@@ -307,7 +309,7 @@ const DEFAULT_FORM: FormState = {
   minScore: 90, leverage: 10, riskPct: 2, cadence: 60, maxPos: 5,
   retestMinBars: 1, retestMaxBars: 8, retestToleranceAtr: 0.30, retestMaxOvershootAtr: 1.0, retestAutoDirection: 'long',
   require4hTrend: true, cooldownBarsAfterLoss: 0, maxConcurrentCorrelated: 0,
-  breakoutDirection: 'both', maxSignalAgeSec: 0, maxBreakoutExtensionPct: 0, maxEntryDriftPct: 0,
+  breakoutDirection: 'both', maxSignalAgeSec: 0, maxBreakoutExtensionPct: 0, maxEntryDriftPct: 0, breakoutMaxBarsAfterTrigger: 0,
   fvgPocLookbackBars: 500, fvgPocBins: 40, fvgEmaPeriod: 72, fvgUniverseTopN: 100, fvgDirection: 'both',
   labTimeStopEnabled: false, labTimeStopBars: 4,
 };
@@ -351,6 +353,7 @@ function formToConfig(f: FormState): Omit<LabExperimentConfig, 'id'> {
     cfg.maxSignalAgeSec = f.maxSignalAgeSec > 0 ? f.maxSignalAgeSec : null;
     cfg.maxBreakoutExtensionPct = f.maxBreakoutExtensionPct > 0 ? f.maxBreakoutExtensionPct : null;
     cfg.maxEntryDriftPct = f.maxEntryDriftPct > 0 ? f.maxEntryDriftPct : null;
+    cfg.breakoutMaxBarsAfterTrigger = f.breakoutMaxBarsAfterTrigger;
   }
   return cfg;
 }
@@ -379,6 +382,7 @@ function configToForm(cfg: LabExperimentConfig): FormState {
     maxSignalAgeSec: cfg.maxSignalAgeSec ?? 0,
     maxBreakoutExtensionPct: cfg.maxBreakoutExtensionPct ?? 0,
     maxEntryDriftPct: cfg.maxEntryDriftPct ?? 0,
+    breakoutMaxBarsAfterTrigger: cfg.breakoutMaxBarsAfterTrigger ?? 0,
     fvgPocLookbackBars: cfg.fvgPocLookbackBars ?? 500,
     fvgPocBins: cfg.fvgPocBins ?? 40,
     fvgEmaPeriod: cfg.fvgEmaPeriod ?? 72,
@@ -581,6 +585,13 @@ function AddExperimentForm({ onAdd, onCancel, initialForm, diffBase }: {
               <input style={S.input} type="number" min={0} max={10} step={0.1} value={form.maxEntryDriftPct}
                 onChange={e => set('maxEntryDriftPct', Number(e.target.value))} />
               <Helper text="현재 mark가 계획 진입가 대비 N% 이상 이탈 시 스킵. 0=비활성 (권장: 0.5~1.5%)" />
+            </div>
+
+            <label style={S.formLabel}>트리거 후 최대 봉 수<DiffDot cur={form.breakoutMaxBarsAfterTrigger} base={diffBase?.breakoutMaxBarsAfterTrigger} /></label>
+            <div>
+              <input style={S.input} type="number" min={0} max={10} step={1} value={form.breakoutMaxBarsAfterTrigger}
+                onChange={e => set('breakoutMaxBarsAfterTrigger', Math.max(0, parseInt(e.target.value) || 0))} />
+              <Helper text="0=같은 봉만 진입, 1=다음 봉까지 허용. 실전 자동매매와 동일 기준 (기본 0)" />
             </div>
           </>}
 

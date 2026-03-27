@@ -110,12 +110,17 @@ export async function fetchBinanceKlinesCached(
     }
     const raw = await res.json() as unknown[][];
     const parsed: Candle[] = raw.map(r => ({
-      time: Number(r[0]),
-      open: parseFloat(r[1] as string),
-      high: parseFloat(r[2] as string),
-      low: parseFloat(r[3] as string),
-      close: parseFloat(r[4] as string),
+      time:   Number(r[0]),
+      open:   parseFloat(r[1] as string),
+      high:   parseFloat(r[2] as string),
+      low:    parseFloat(r[3] as string),
+      close:  parseFloat(r[4] as string),
       volume: parseFloat(r[5] as string),
+      // Extended fields — indices 7-10 of Binance USDⓈ-M futures kline
+      quoteVolume:          r[7]  != null ? parseFloat(r[7]  as string) || 0 : 0,
+      tradeCount:           r[8]  != null ? Number(r[8])  || 0 : 0,
+      takerBuyBaseVolume:   r[9]  != null ? parseFloat(r[9]  as string) || 0 : 0,
+      takerBuyQuoteVolume:  r[10] != null ? parseFloat(r[10] as string) || 0 : 0,
     }));
     cache.set(key, {
       freshnessKey,
