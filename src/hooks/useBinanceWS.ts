@@ -6,12 +6,16 @@ const WS_BASE = 'wss://fstream.binance.com/ws';
 interface KlineMsg {
   k: {
     t: number;  // kline start time
-    o: string;
-    h: string;
-    l: string;
-    c: string;
-    v: string;
-    x: boolean; // is closed
+    o: string;  // open
+    h: string;  // high
+    l: string;  // low
+    c: string;  // close
+    v: string;  // base asset volume
+    x: boolean; // is kline closed
+    q: string;  // quote asset volume
+    n: number;  // number of trades
+    V: string;  // taker buy base asset volume
+    Q: string;  // taker buy quote asset volume
   };
 }
 
@@ -36,12 +40,16 @@ export function useBinanceWS(
         const msg: KlineMsg = JSON.parse(ev.data);
         const k = msg.k;
         const candle: Candle = {
-          time: k.t,
-          open: parseFloat(k.o),
-          high: parseFloat(k.h),
-          low: parseFloat(k.l),
-          close: parseFloat(k.c),
+          time:   k.t,
+          open:   parseFloat(k.o),
+          high:   parseFloat(k.h),
+          low:    parseFloat(k.l),
+          close:  parseFloat(k.c),
           volume: parseFloat(k.v),
+          quoteVolume:         parseFloat(k.q) || 0,
+          tradeCount:          k.n || 0,
+          takerBuyBaseVolume:  parseFloat(k.V) || 0,
+          takerBuyQuoteVolume: parseFloat(k.Q) || 0,
         };
         onUpdateRef.current(candle, k.x);
       } catch (_) {
