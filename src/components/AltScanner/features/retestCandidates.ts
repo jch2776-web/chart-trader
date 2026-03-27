@@ -5,8 +5,12 @@
  * which walks every qualifying SR level and returns all valid setups
  * with raw participation metrics attached.
  *
- * Next step: scoreRetestCandidate() will rank candidates; for now the
- * caller picks the first (highest-SR-score) candidate.
+ * retestIndex and reclaimIndex are kept distinct:
+ *   retestIndex  = first bar that probed the level (wick touch)
+ *   reclaimIndex = first bar at/after retestIndex whose close reclaimed the level
+ *
+ * Call pickBestRetestCandidate() to select the highest-quality setup.
+ * TODO(step-3): replace pickBestRetestCandidate with scoreRetestCandidate().
  */
 
 import type { Candle } from '../../../types/candle';
@@ -31,11 +35,13 @@ export interface RetestCandidate {
   level: number;
   /** Index into `closed[]` for the bar that confirmed the breakout. */
   breakoutIndex: number;
-  /** Index of the first bar that touched the level after the breakout. */
+  /** Index of the first bar whose wick probed the level after the breakout. */
   retestIndex: number;
-  /** Index of the bar whose close reclaimed the level (often === retestIndex). */
+  /** Index of the first bar at/after retestIndex whose close reclaimed the level. */
   reclaimIndex: number;
   atr: number;
+  /** SR zone score of the matched level (higher = stronger zone). */
+  srScore?: number;
 
   // ── Impulse quality (breakout candle) ──────────────────────────────────
   /** Body / full range of the breakout candle (0–1). Higher = more decisive. */
@@ -54,6 +60,7 @@ export interface RetestCandidate {
    * How deep the pullback probed the level, measured in ATR multiples.
    * LONG  → (breakout_close − min_low_of_pullback_bars) / ATR
    * SHORT → (max_high_of_pullback_bars − breakout_close) / ATR
+   * Pullback window = breakoutIndex+1 … reclaimIndex (inclusive).
    */
   pullbackDepth: number;
   /**
@@ -62,7 +69,7 @@ export interface RetestCandidate {
    */
   pullbackVolRatio: number;
 
-  // ── Reclaim quality ─────────────────────────────────────────────────────
+  // ── Reclaim quality (reclaimIndex bar) ──────────────────────────────────
   /** CLV of the reclaim candle (same directional convention as impulseClv). */
   reclaimClv: number;
   /**
@@ -105,14 +112,62 @@ function bodyPct(c: Candle): number {
   return range > 0 ? Math.abs(c.close - c.open) / range : 0;
 }
 
+// ── Quality ranking ──────────────────────────────────────────────────────────
+
+/**
+ * Composite quality score for a retest candidate (higher = better).
+ *
+ * Weights:
+ *   0.35  breakoutVolZ              — decisive breakout volume
+ *   0.25  1 − pullbackVolRatio      — quiet pullback (< 1 = healthy)
+ *   0.15  impulseBodyPct            — decisive breakout body
+ *   0.15  reclaimClv                — strong close on reclaim bar
+ *   0.05  reclaimTakerImbalance     — aggressive directional flow on reclaim
+ *   0.05  srScore / 100             — zone strength tiebreaker
+ */
+function candidateQualityScore(c: RetestCandidate): number {
+  const dirSign = c.direction === 'long' ? 1 : -1;
+  return (
+    c.breakoutVolZ                             * 0.35 +
+    (1 - Math.min(c.pullbackVolRatio, 2))      * 0.25 +
+    c.impulseBodyPct                           * 0.15 +
+    c.reclaimClv                               * 0.15 +
+    c.reclaimTakerImbalance * dirSign          * 0.05 +
+    ((c.srScore ?? 0) / 100)                   * 0.05
+  );
+}
+
+/**
+ * Returns the highest-quality candidate from the list, or null if empty.
+ *
+ * Selection uses candidateQualityScore() which combines breakoutVolZ,
+ * pullbackVolRatio, impulseBodyPct, reclaimClv, reclaimTakerImbalance,
+ * and srScore into a single weighted score.
+ *
+ * TODO(step-3): replace with scoreRetestCandidate() once the full model is calibrated.
+ */
+export function pickBestRetestCandidate(
+  candidates: RetestCandidate[],
+): RetestCandidate | null {
+  if (candidates.length === 0) return null;
+  return candidates.reduce((best, c) =>
+    candidateQualityScore(c) > candidateQualityScore(best) ? c : best,
+  );
+}
+
 // ── Public API ───────────────────────────────────────────────────────────────
 
 /**
  * Walks every qualifying SR level in `direction` and returns all setups
  * that satisfy the breakout → retest → reclaim structure.
  *
- * Intentionally does **not** score or rank — the caller decides what to do
- * with the full candidate list.
+ * retestIndex  = first bar whose wick probed the level (touch only)
+ * reclaimIndex = first bar at/after retestIndex whose close reclaimed the level
+ * These are always distinct concepts; they may fall on the same bar when the
+ * retest and reclaim happen in a single candle.
+ *
+ * Intentionally does **not** score or rank — call pickBestRetestCandidate()
+ * or a future scoreRetestCandidate() on the result list.
  */
 export function buildRetestCandidates(
   closed: Candle[],
@@ -156,28 +211,36 @@ export function buildRetestCandidates(
       }
       if (breakoutIdx < 0) continue;
 
-      // ── 2. Retest + reclaim: first bar after breakout where
-      //       low touched level AND close closed back above ─────────────────
+      // ── 2a. Retest: first bar after breakout whose low probed the level ──
       let retestIdx = -1;
       for (let i = breakoutIdx + 1; i < n; i++) {
-        const bar = closed[i];
-        if (bar.low <= level + tol && bar.close >= level) {
+        if (closed[i].low <= level + tol) {
           retestIdx = i;
           break;
         }
       }
       if (retestIdx < 0) continue;
 
+      // ── 2b. Reclaim: first bar at/after retestIdx whose close reclaimed ──
+      let reclaimIdx = -1;
+      for (let i = retestIdx; i < n; i++) {
+        if (closed[i].close >= level) {
+          reclaimIdx = i;
+          break;
+        }
+      }
+      if (reclaimIdx < 0) continue;
+
       // ── 3. Current close still holds the level ───────────────────────────
-      if (currentClose < level - tol)                    continue;
-      if (currentClose > level + atr * opts.maxOvershootAtr) continue;
+      if (currentClose < level - tol)                         continue;
+      if (currentClose > level + atr * opts.maxOvershootAtr)  continue;
 
       // ── Metrics ──────────────────────────────────────────────────────────
-      const breakoutBar  = closed[breakoutIdx];
-      const reclaimBar   = closed[retestIdx];   // retest === reclaim on same bar
+      const breakoutBar = closed[breakoutIdx];
+      const reclaimBar  = closed[reclaimIdx];
 
-      // pullback bars = everything from the bar after breakout to reclaimIdx (inclusive)
-      const pullbackSlice = closed.slice(breakoutIdx + 1, retestIdx + 1);
+      // pullback window = breakoutIdx+1 … reclaimIdx (inclusive)
+      const pullbackSlice = closed.slice(breakoutIdx + 1, reclaimIdx + 1);
       const minLow = pullbackSlice.reduce((m, c) => Math.min(m, c.low), breakoutBar.close);
       const pullbackVol = pullbackSlice.reduce((s, c) => s + c.quoteVolume, 0);
 
@@ -187,8 +250,9 @@ export function buildRetestCandidates(
         level,
         breakoutIndex: breakoutIdx,
         retestIndex:   retestIdx,
-        reclaimIndex:  retestIdx,
+        reclaimIndex:  reclaimIdx,
         atr,
+        srScore:               zone.score,
         impulseBodyPct:        bodyPct(breakoutBar),
         impulseClv:            clvLong(breakoutBar),
         breakoutVolZ:          volZScore(closed, breakoutIdx),
@@ -216,26 +280,36 @@ export function buildRetestCandidates(
       }
       if (breakoutIdx < 0) continue;
 
-      // 2. Retest + reclaim: high retouched level, close stayed below
+      // 2a. Retest: first bar after breakout whose high probed the level
       let retestIdx = -1;
       for (let i = breakoutIdx + 1; i < n; i++) {
-        const bar = closed[i];
-        if (bar.high >= level - tol && bar.close <= level) {
+        if (closed[i].high >= level - tol) {
           retestIdx = i;
           break;
         }
       }
       if (retestIdx < 0) continue;
 
-      // 3. Current close still holds
-      if (currentClose > level + tol)                    continue;
-      if (currentClose < level - atr * opts.maxOvershootAtr) continue;
+      // 2b. Reclaim: first bar at/after retestIdx whose close stayed below
+      let reclaimIdx = -1;
+      for (let i = retestIdx; i < n; i++) {
+        if (closed[i].close <= level) {
+          reclaimIdx = i;
+          break;
+        }
+      }
+      if (reclaimIdx < 0) continue;
+
+      // 3. Current close still holds the level
+      if (currentClose > level + tol)                         continue;
+      if (currentClose < level - atr * opts.maxOvershootAtr)  continue;
 
       // ── Metrics ──────────────────────────────────────────────────────────
-      const breakoutBar  = closed[breakoutIdx];
-      const reclaimBar   = closed[retestIdx];
+      const breakoutBar = closed[breakoutIdx];
+      const reclaimBar  = closed[reclaimIdx];
 
-      const pullbackSlice = closed.slice(breakoutIdx + 1, retestIdx + 1);
+      // pullback window = breakoutIdx+1 … reclaimIdx (inclusive)
+      const pullbackSlice = closed.slice(breakoutIdx + 1, reclaimIdx + 1);
       const maxHigh = pullbackSlice.reduce((m, c) => Math.max(m, c.high), breakoutBar.close);
       const pullbackVol = pullbackSlice.reduce((s, c) => s + c.quoteVolume, 0);
 
@@ -245,8 +319,9 @@ export function buildRetestCandidates(
         level,
         breakoutIndex: breakoutIdx,
         retestIndex:   retestIdx,
-        reclaimIndex:  retestIdx,
+        reclaimIndex:  reclaimIdx,
         atr,
+        srScore:               zone.score,
         impulseBodyPct:        bodyPct(breakoutBar),
         impulseClv:            clvShort(breakoutBar),
         breakoutVolZ:          volZScore(closed, breakoutIdx),

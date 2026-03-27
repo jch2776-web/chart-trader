@@ -28,7 +28,7 @@ import { intervalToMs, getTtlBars, getVolFactor, triggerPrice } from '../timeUti
 import { fetchBinanceKlinesCached } from '../../../lib/binanceKlineCache';
 import { acquireScanSlot, getBinanceGovernorSnapshot } from '../../../lib/binanceRequestGovernor';
 import type { ScanFn, ScanStrategy } from '../strategyTypes';
-import { buildRetestCandidates } from '../features/retestCandidates';
+import { buildRetestCandidates, pickBestRetestCandidate } from '../features/retestCandidates';
 import type { RetestCandidate, RetestDetectOptions } from '../features/retestCandidates';
 
 // ── Retest detection parameters ────────────────────────────────────────────
@@ -382,9 +382,12 @@ async function scanSymbolRetest(
   const allCandidates: RetestCandidate[] = activeDirs.flatMap(dir =>
     buildRetestCandidates(closed, dir, atr, srLevels, detectOpts, symbol),
   );
-  if (allCandidates.length === 0) return null;
-  // TODO(step-3): replace with scoreRetestCandidate() ranking
-  const best = allCandidates[0];
+  // Quality ranking via pickBestRetestCandidate(): scores each candidate by
+  // breakoutVolZ (0.35), pullbackVolRatio (0.25), impulseBodyPct (0.15),
+  // reclaimClv (0.15), reclaimTakerImbalance/directional (0.05), srScore (0.05).
+  // TODO(step-3): replace with scoreRetestCandidate() once the full model is calibrated.
+  const best = pickBestRetestCandidate(allCandidates);
+  if (!best) return null;
   const found: RetestResult = { level: best.level, direction: best.direction };
 
   const { level, direction: foundDir } = found;
