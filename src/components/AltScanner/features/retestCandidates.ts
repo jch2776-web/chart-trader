@@ -77,6 +77,39 @@ export interface RetestCandidate {
    * LONG → positive = aggressive buyers reclaimed; SHORT → negative = sellers.
    */
   reclaimTakerImbalance: number;
+
+  // ── Leader metrics (optional — populated by enrichRetestCandidates) ──────
+  /** Relative strength vs BTCUSDT on the scan timeframe [-1, +1]. */
+  rsVsBtc?: number;
+  /** Relative strength vs BTCUSDT on 4H timeframe [-1, +1]. */
+  rs4h?: number;
+  /** Relative strength vs BTCUSDT on 1H timeframe [-1, +1]. */
+  rs1h?: number;
+  /**
+   * Turnover acceleration: (recentAvgVol / baselineAvgVol) − 1.
+   * > 0 = participation growing; < 0 = fading.
+   */
+  turnoverAccel?: number;
+
+  // ── Location metrics (optional — populated by enrichRetestCandidates) ────
+  /**
+   * Signed distance from the anchored VWAP (breakout-anchored) in ATR multiples.
+   * LONG  → positive = current price above AVWAP (bullish)
+   * SHORT → positive = current price below AVWAP (bearish)
+   */
+  avwapBreakout?: number;
+  /**
+   * Distance from entry to the nearest opposing SR level, in R multiples.
+   * Larger = more clear space to run. Capped at AIR_R_CAP (3).
+   */
+  airR?: number;
+  /** Distance to nearest opposing SR level in ATR multiples (unnormalised). */
+  distanceToNextSupply?: number;
+  /**
+   * Structural confluence score at the retest level [0, 1].
+   * Combines SR zone density, HVN overlap, and AVWAP proximity.
+   */
+  confluenceScore?: number;
 }
 
 // ── Private helpers ──────────────────────────────────────────────────────────

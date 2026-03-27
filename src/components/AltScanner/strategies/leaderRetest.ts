@@ -30,6 +30,10 @@ import { acquireScanSlot, getBinanceGovernorSnapshot } from '../../../lib/binanc
 import type { ScanFn, ScanStrategy } from '../strategyTypes';
 import { buildRetestCandidates, pickBestRetestCandidate } from '../features/retestCandidates';
 import type { RetestCandidate, RetestDetectOptions } from '../features/retestCandidates';
+import { calcRelativeStrengthVsBenchmark, calcTurnoverAccel, RS_DEFAULT_PERIOD } from '../features/leaderMetrics';
+import { calcAnchoredVwapFromIndex, calcConfluenceScore, calcAirR } from '../features/locationMetrics';
+import { scoreRetestCandidate } from '../features/retestScoring';
+import type { RetestScoreBreakdown } from '../features/retestScoring';
 
 // ── Retest detection parameters ────────────────────────────────────────────
 
@@ -341,11 +345,15 @@ async function scanSymbolRetest(
   // Build direction list; may be narrowed by 4H trend filter below
   let activeDirs: ('long' | 'short')[] = direction === 'both' ? ['long', 'short'] : [direction];
 
+  // candles4h is hoisted so the enrichment step can reuse them for rs4h
+  let candles4h: Candle[] = [];
+
   // ── 4H uptrend filter (LONG only, v2) ──────────────────────────────────
   if (opts.require4hTrend && activeDirs.includes('long')) {
-    // When scanning on 4H or 1D, reuse already-fetched candles; otherwise fetch 4H separately
-    let candles4h: Candle[] = closed;
-    if (interval !== '4h' && interval !== '1d') {
+    // When scanning on 4H or 1D, reuse already-fetched candles; otherwise fetch separately
+    if (interval === '4h' || interval === '1d') {
+      candles4h = closed;
+    } else {
       try {
         const raw4h = await fetchBinanceKlinesCached(symbol, '4h', 60, signal);
         candles4h = closedOnly(raw4h, intervalToMs('4h'));
@@ -357,12 +365,9 @@ async function scanSymbolRetest(
       const ema20 = calcEMA(candles4h, 20);
       const ema50 = calcEMA(candles4h, 50);
       if (ema20 <= ema50) {
-        // 4H downtrend: LONG not allowed
         activeDirs = activeDirs.filter(d => d !== 'long');
       }
-    }
-    // If we can't determine trend (too few 4H bars), be conservative and skip LONG
-    else if (candles4h.length < 50) {
+    } else {
       activeDirs = activeDirs.filter(d => d !== 'long');
     }
     if (activeDirs.length === 0) return null;
@@ -374,24 +379,76 @@ async function scanSymbolRetest(
   const hvnZones = calcHVN(closed.slice(-300), 100, 5, entryPrice);
 
   const detectOpts: RetestDetectOptions = {
-    minBars:        opts.minBars,
-    maxBars:        opts.maxBars,
-    toleranceAtr:   opts.toleranceAtr,
+    minBars:         opts.minBars,
+    maxBars:         opts.maxBars,
+    toleranceAtr:    opts.toleranceAtr,
     maxOvershootAtr: opts.maxOvershootAtr,
   };
   const allCandidates: RetestCandidate[] = activeDirs.flatMap(dir =>
     buildRetestCandidates(closed, dir, atr, srLevels, detectOpts, symbol),
   );
   if (allCandidates.length === 0) return null;
-  // Temporary quality ranking active via pickBestRetestCandidate():
-  // weights — breakoutVolZ (0.35), pullbackVolRatio (0.25), impulseBodyPct (0.15),
-  //           reclaimClv (0.15), reclaimTakerImbalance/directional (0.05), srScore (0.05).
-  // TODO(step-3): replace with scoreRetestCandidate() once the full model is calibrated.
-  const best = pickBestRetestCandidate(allCandidates);
-  if (!best) return null;
-  const found: RetestResult = { level: best.level, direction: best.direction };
 
-  const { level, direction: foundDir } = found;
+  // ── Enrich candidates with leader / location metrics ─────────────────────
+  // BTC candles for RS (skipped when symbol is BTCUSDT; cached after first call).
+  let btcCandles: Candle[] = [];
+  if (symbol !== 'BTCUSDT') {
+    try {
+      btcCandles = await fetchBinanceKlinesCached('BTCUSDT', interval, 302, signal);
+    } catch { /* non-fatal — rs fields remain undefined */ }
+  }
+
+  // BTC 4H candles for rs4h (reuse btcCandles when scan interval is 4h/1d).
+  let btcCandles4h: Candle[] = [];
+  if (symbol !== 'BTCUSDT' && candles4h.length >= RS_DEFAULT_PERIOD + 1) {
+    if (interval === '4h' || interval === '1d') {
+      btcCandles4h = btcCandles; // already on the 4h / 1d timeframe
+    } else {
+      try {
+        const rawBtc4h = await fetchBinanceKlinesCached('BTCUSDT', '4h', 60, signal);
+        btcCandles4h = closedOnly(rawBtc4h, intervalToMs('4h'));
+      } catch { /* non-fatal */ }
+    }
+  }
+
+  for (const c of allCandidates) {
+    // ── Leader metrics ──────────────────────────────────────────────────
+    if (btcCandles.length >= RS_DEFAULT_PERIOD + 1) {
+      c.rsVsBtc = calcRelativeStrengthVsBenchmark(closed, btcCandles, RS_DEFAULT_PERIOD);
+    }
+    if (candles4h.length >= RS_DEFAULT_PERIOD + 1 && btcCandles4h.length >= RS_DEFAULT_PERIOD + 1) {
+      c.rs4h = calcRelativeStrengthVsBenchmark(candles4h, btcCandles4h, RS_DEFAULT_PERIOD);
+    }
+    c.turnoverAccel = calcTurnoverAccel(closed);
+
+    // ── Location metrics ────────────────────────────────────────────────
+    const avwap = calcAnchoredVwapFromIndex(closed, c.breakoutIndex);
+    if (avwap > 0) {
+      // Signed: positive = price on the favorable side of AVWAP for direction
+      const raw = (entryPrice - avwap) / c.atr;
+      c.avwapBreakout = c.direction === 'long' ? raw : -raw;
+    }
+    c.confluenceScore = calcConfluenceScore(c.level, c.atr, srLevels, hvnZones, avwap);
+    const provSl = c.direction === 'long'
+      ? c.level - c.atr * 1.5
+      : c.level + c.atr * 1.5;
+    c.airR = calcAirR(c.direction, entryPrice, provSl, srLevels, c.atr);
+    const R = Math.abs(entryPrice - provSl);
+    c.distanceToNextSupply = R > 0 ? c.airR * R / c.atr : undefined;
+  }
+
+  // ── Score all candidates and pick the best ────────────────────────────────
+  // scoreRetestCandidate() computes a weighted composite (see retestScoring.ts).
+  // TODO(step-4): feed breakdown into UI so users can inspect sub-scores.
+  type Scored = { candidate: RetestCandidate; breakdown: RetestScoreBreakdown };
+  const scored: Scored[] = allCandidates.map(c => ({
+    candidate: c,
+    breakdown: scoreRetestCandidate(c),
+  }));
+  scored.sort((a, b) => b.breakdown.total - a.breakdown.total);
+  const { candidate: best, breakdown: bestBreakdown } = scored[0];
+
+  const { level, direction: foundDir } = best;
   const isLong = foundDir === 'long';
 
   // SL / TP calculation
@@ -437,10 +494,10 @@ async function scanSymbolRetest(
     srLevels, hvnZones, closed,
   );
 
-  // Score: RR-based heuristic (unchanged)
-  const R = Math.abs(entryPrice - sl);
-  const rr = R > 0 ? Math.abs(tp2 - entryPrice) / R : 0;
-  const score = Math.round(Math.min(100, 40 + rr * 15 + (tp1 ? 10 : 0)));
+  // Score: probability-ranking composite from scoreRetestCandidate()
+  // (leader 22% + impulse 18% + pullback 18% + location 14% + air 12%)
+  // mapped to 0-100 for the ScanCandidate score field.
+  const score = Math.round(bestBreakdown.total * 100);
 
   // Distance to retest level
   const distanceNowPct = isLong
