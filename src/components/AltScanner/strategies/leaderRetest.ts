@@ -382,9 +382,10 @@ async function scanSymbolRetest(
   const allCandidates: RetestCandidate[] = activeDirs.flatMap(dir =>
     buildRetestCandidates(closed, dir, atr, srLevels, detectOpts, symbol),
   );
-  // Quality ranking via pickBestRetestCandidate(): scores each candidate by
-  // breakoutVolZ (0.35), pullbackVolRatio (0.25), impulseBodyPct (0.15),
-  // reclaimClv (0.15), reclaimTakerImbalance/directional (0.05), srScore (0.05).
+  if (allCandidates.length === 0) return null;
+  // Temporary quality ranking active via pickBestRetestCandidate():
+  // weights — breakoutVolZ (0.35), pullbackVolRatio (0.25), impulseBodyPct (0.15),
+  //           reclaimClv (0.15), reclaimTakerImbalance/directional (0.05), srScore (0.05).
   // TODO(step-3): replace with scoreRetestCandidate() once the full model is calibrated.
   const best = pickBestRetestCandidate(allCandidates);
   if (!best) return null;

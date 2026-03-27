@@ -125,7 +125,7 @@ function bodyPct(c: Candle): number {
  *   0.05  reclaimTakerImbalance     — aggressive directional flow on reclaim
  *   0.05  srScore / 100             — zone strength tiebreaker
  */
-function candidateQualityScore(c: RetestCandidate): number {
+export function candidateQualityScore(c: RetestCandidate): number {
   const dirSign = c.direction === 'long' ? 1 : -1;
   return (
     c.breakoutVolZ                             * 0.35 +
