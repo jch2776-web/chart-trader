@@ -126,15 +126,16 @@ export interface AutoTradeSettings {
   maxSignalAgeSec?: number;          // max age of signal since asOfCloseTime (default 120s, 0 = disable)
   maxEntryDriftPct?: number;         // max allowed drift from plannedEntry before skipping (default 1.0%, 0 = disable)
   maxBreakoutExtensionPct?: number;  // max allowed extension of confirmed candle close beyond trigger line (default 0.6%, 0 = disable)
-  // Candidate score threshold for auto-entry (default 90; lower = more candidates qualify)
+  // Candidate score threshold for auto-entry
+  // Breakout default 90 · leader-retest default 70 (max ~84) · fvg-poc-ema72 default 75
   minCandidateScore?: number;
   // Strategy selection (default 'breakout' — preserves existing behavior)
   strategyId?: 'breakout' | 'leader-retest' | 'fvg-poc-ema72';
   // Leader-retest specific parameters (only used when strategyId === 'leader-retest')
   retestMinBars?: number;            // min bars since breakout (default 1)
-  retestMaxBars?: number;            // max bars since breakout (default 8)
-  retestToleranceAtr?: number;       // price must be within level ± toleranceAtr × ATR (default 0.30)
-  retestMaxOvershootAtr?: number;    // max allowed overshoot beyond level in ATR multiples (default 1.0)
+  retestMaxBars?: number;            // max bars since breakout (default 12)
+  retestToleranceAtr?: number;       // price must be within level ± toleranceAtr × ATR (default 0.50)
+  retestMaxOvershootAtr?: number;    // max allowed overshoot beyond level in ATR multiples (default 1.5)
   retestAutoDirection?: 'long' | 'both'; // scan direction for unattended auto-trade (default 'long')
   retestRequire4hTrend?: boolean;    // require 4H EMA20 > EMA50 for LONG entry (default true)
   // Breakout-specific direction override (default 'both')
@@ -207,9 +208,9 @@ export const DEFAULT_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
   maxTotalPositions: 0,
   // Leader-retest defaults
   retestMinBars: 1,
-  retestMaxBars: 8,
-  retestToleranceAtr: 0.30,
-  retestMaxOvershootAtr: 1.0,
+  retestMaxBars: 12,
+  retestToleranceAtr: 0.50,
+  retestMaxOvershootAtr: 1.5,
   retestRequire4hTrend: true,
   retestAutoDirection: 'long',
   maxSpreadBps: 4,
@@ -243,9 +244,9 @@ export const DEFAULT_LIVE_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
   maxTotalPositions: 0,
   // Leader-retest defaults
   retestMinBars: 1,
-  retestMaxBars: 8,
-  retestToleranceAtr: 0.30,
-  retestMaxOvershootAtr: 1.0,
+  retestMaxBars: 12,
+  retestToleranceAtr: 0.50,
+  retestMaxOvershootAtr: 1.5,
   retestRequire4hTrend: true,
   retestAutoDirection: 'long',
   maxSpreadBps: 4,
@@ -677,24 +678,24 @@ function SettingsEditor({
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>최대</span>
               <input type="number" min={2} max={50} step={1}
-                value={draft.retestMaxBars ?? 8}
-                onChange={e => set('retestMaxBars', Math.max(2, Math.min(50, parseInt(e.target.value) || 8)))}
+                value={draft.retestMaxBars ?? 12}
+                onChange={e => set('retestMaxBars', Math.max(2, Math.min(50, parseInt(e.target.value) || 12)))}
                 style={{ ...s.numberInput, width: 52 }} />
               <span style={s.unit}>봉</span>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>허용폭</span>
               <input type="number" min={0.1} max={2.0} step={0.05}
-                value={draft.retestToleranceAtr ?? 0.30}
-                onChange={e => set('retestToleranceAtr', Math.max(0.1, Math.min(2.0, parseFloat(e.target.value) || 0.30)))}
+                value={draft.retestToleranceAtr ?? 0.50}
+                onChange={e => set('retestToleranceAtr', Math.max(0.1, Math.min(2.0, parseFloat(e.target.value) || 0.50)))}
                 style={{ ...s.numberInput, width: 60 }} />
               <span style={s.unit}>× ATR</span>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>오버슈트</span>
               <input type="number" min={0.1} max={3.0} step={0.1}
-                value={draft.retestMaxOvershootAtr ?? 1.0}
-                onChange={e => set('retestMaxOvershootAtr', Math.max(0.1, Math.min(3.0, parseFloat(e.target.value) || 1.0)))}
+                value={draft.retestMaxOvershootAtr ?? 1.5}
+                onChange={e => set('retestMaxOvershootAtr', Math.max(0.1, Math.min(3.0, parseFloat(e.target.value) || 1.5)))}
                 style={{ ...s.numberInput, width: 60 }} />
               <span style={s.unit}>× ATR</span>
             </div>
@@ -718,8 +719,8 @@ function SettingsEditor({
             </button>
           </div>
           <span style={s.hint}>
-            최소/최대봉: 돌파 후 몇 봉 이내에 리테스트가 와야 하는지. 허용폭: 레벨과의 근접도(ATR 배수). 자동매매는 기본 롱만 권장.
-            4H 추세 필터 ON 시 4H EMA20 &gt; EMA50인 경우에만 롱 진입.
+            최소/최대봉: 돌파 후 몇 봉 이내에 리테스트가 와야 하는지 (기본 1~12봉). 허용폭: 레벨 터치 인정 범위(기본 0.5×ATR). 오버슈트: 현재가 허용 상한(기본 1.5×ATR).
+            4H 추세 필터 ON(기본): EMA20 &gt; EMA50 상승 추세 코인만 롱 허용 — 하락장/횡보장에서는 롱 후보가 대폭 줄 수 있음. OFF 시 추세 무관 롱 탐지.
           </span>
 
           {/* Leader-retest entry gates */}
@@ -818,8 +819,8 @@ function SettingsEditor({
           <input
             type="number"
             min={50} max={100} step={1}
-            value={draft.minCandidateScore ?? 90}
-            onChange={e => set('minCandidateScore', Math.max(50, Math.min(100, parseInt(e.target.value) || 90)))}
+            value={draft.minCandidateScore ?? (isLeaderRetest ? 70 : isFvg ? 75 : 90)}
+            onChange={e => set('minCandidateScore', Math.max(50, Math.min(100, parseInt(e.target.value) || (isLeaderRetest ? 70 : isFvg ? 75 : 90))))}
             style={s.numberInput}
           />
           <span style={s.unit}>점</span>
@@ -1142,7 +1143,7 @@ export function AutoTradeSettingsModal({ paperSettings, liveSettings, onSave, on
                           <span style={{ fontSize: '0.78rem', color: '#d1d4dc', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{preset.name}</span>
                           <span style={{ fontSize: '0.62rem', color: badgeColor, background: badgeBg, border: `1px solid ${badgeColor}44`, borderRadius: 3, padding: '1px 5px', flexShrink: 0 }}>{stratLabel}</span>
                         </div>
-                        <div style={{ fontSize: '0.65rem', color: '#5e6673' }}>{savedDate} 저장 · {preset.settings.leverage}x · 리스크 {preset.settings.riskPct}% · 최소 {preset.settings.minCandidateScore ?? 90}점</div>
+                        <div style={{ fontSize: '0.65rem', color: '#5e6673' }}>{savedDate} 저장 · {preset.settings.leverage}x · 리스크 {preset.settings.riskPct}% · 최소 {preset.settings.minCandidateScore ?? (preset.settings.strategyId === 'leader-retest' ? 70 : preset.settings.strategyId === 'fvg-poc-ema72' ? 75 : 90)}점</div>
                       </div>
                       {appliedPresetId === preset.id ? (
                         <span style={{ fontSize: '0.72rem', padding: '3px 10px', border: '1px solid rgba(14,203,129,0.5)', borderRadius: 4, background: 'rgba(14,203,129,0.12)', color: '#0ecb81', flexShrink: 0, fontWeight: 700 }}>

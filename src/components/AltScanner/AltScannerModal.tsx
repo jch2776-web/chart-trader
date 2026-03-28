@@ -995,6 +995,7 @@ export function AltScannerModal({
   const [nextAutoScanAt, setNextAutoScanAt]   = useState<number | null>(null);
   const [lastScanAt, setLastScanAt]           = useState<number | null>(null);
   const [scanNotice, setScanNotice]           = useState<string>('');
+  const [scanLogs, setScanLogs]               = useState<{ message: string; level: 'info' | 'warn' | 'error' }[]>([]);
 
   // Persist strategy choice
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1131,6 +1132,7 @@ export function AltScannerModal({
     abortRef.current = new AbortController();
     setScanning(true);
     setScanNotice('');
+    setScanLogs([]);
     setCandidatesCache(prev => ({ ...prev, [scanInterval]: [] }));
     setSelected(null);
     setProgress({ done: 0, total: symbols.length });
@@ -1152,7 +1154,10 @@ export function AltScannerModal({
         {
           scanTag: `modal-manual:${scanInterval}:${direction}`,
           busyPolicy: 'queue',
-          onStatus: (message) => setScanNotice(message),
+          onStatus: (message, level) => {
+            if (level === 'warn' || level === 'error') setScanNotice(message);
+            setScanLogs(prev => [...prev, { message, level }]);
+          },
         });
     } finally {
       setScanning(false);
@@ -1229,7 +1234,10 @@ export function AltScannerModal({
           {
             scanTag: `modal-auto:${scanInterval}:${direction}`,
             busyPolicy: 'skip',
-            onStatus: (message) => setScanNotice(message),
+            onStatus: (message, level) => {
+              if (level === 'warn' || level === 'error') setScanNotice(message);
+              setScanLogs(prev => [...prev, { message, level }]);
+            },
           },
         );
       } finally {
@@ -1371,6 +1379,22 @@ export function AltScannerModal({
         {scanNotice && (
           <div style={{ padding: '4px 16px', borderBottom: '1px solid #2a2e39', color: '#f0b90b', fontSize: '0.74rem', background: 'rgba(240,185,11,0.08)' }}>
             {scanNotice}
+          </div>
+        )}
+        {scanLogs.length > 0 && (
+          <div style={{ maxHeight: '96px', overflowY: 'auto', borderBottom: '1px solid #2a2e39', background: '#0d1117', padding: '4px 12px' }}>
+            {scanLogs.map((entry, i) => (
+              <div key={i} style={{
+                fontSize: '0.72rem',
+                lineHeight: '1.5',
+                fontFamily: 'monospace',
+                color: entry.level === 'error' ? '#f85149' : entry.level === 'warn' ? '#f0b90b' : '#8b949e',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-all',
+              }}>
+                {entry.message}
+              </div>
+            ))}
           </div>
         )}
 

@@ -1965,7 +1965,10 @@ function AppInner() {
       fvgDirection: activeAutoTradeSettings.fvgAutoDirection,
     },
     breakoutDirection: activeAutoTradeSettings.breakoutDirection ?? 'both',
-    minCandidateScore: activeAutoTradeSettings.minCandidateScore ?? 90,
+    minCandidateScore: activeAutoTradeSettings.minCandidateScore ?? (
+      activeAutoTradeSettings.strategyId === 'leader-retest' ? 70 :
+      activeAutoTradeSettings.strategyId === 'fvg-poc-ema72' ? 75 : 90
+    ),
     breakoutMaxBarsAfterTrigger: activeAutoTradeSettings.breakoutMaxBarsAfterTrigger ?? 0,
     maxSpreadBps: activeAutoTradeSettings.maxSpreadBps ?? 4,
     maxRiskPct: activeAutoTradeSettings.maxRiskPct ?? 0.025,

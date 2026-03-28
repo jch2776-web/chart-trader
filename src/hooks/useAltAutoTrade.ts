@@ -206,7 +206,7 @@ export function useAltAutoTrade({
   const retestAutoDirectionRef    = useRef<'long' | 'both'>(retestAutoDirection ?? 'long');
   const fvgOptionsRef             = useRef(fvgOptions);
   const breakoutDirectionRef      = useRef<'long' | 'short' | 'both'>(breakoutDirection ?? 'both');
-  const scoreThresholdRef         = useRef(minCandidateScore ?? 90);
+  const scoreThresholdRef         = useRef(minCandidateScore ?? (strategyId === 'leader-retest' ? 70 : strategyId === 'fvg-poc-ema72' ? 75 : 90));
   const maxBarsAfterTriggerRef    = useRef(breakoutMaxBarsAfterTrigger ?? 0);
   const maxSpreadBpsRef           = useRef(maxSpreadBps ?? 4);
   const maxRiskPctRef             = useRef(maxRiskPct ?? 0.025);
@@ -228,7 +228,7 @@ export function useAltAutoTrade({
   retestAutoDirectionRef.current  = retestAutoDirection ?? 'long';
   fvgOptionsRef.current           = fvgOptions;
   breakoutDirectionRef.current    = breakoutDirection ?? 'both';
-  scoreThresholdRef.current       = minCandidateScore ?? 90;
+  scoreThresholdRef.current       = minCandidateScore ?? (strategyId === 'leader-retest' ? 70 : strategyId === 'fvg-poc-ema72' ? 75 : 90);
   maxBarsAfterTriggerRef.current  = breakoutMaxBarsAfterTrigger ?? 0;
   maxSpreadBpsRef.current         = maxSpreadBps ?? 4;
   maxRiskPctRef.current           = maxRiskPct ?? 0.025;

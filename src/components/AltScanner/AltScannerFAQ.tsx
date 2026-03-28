@@ -832,7 +832,7 @@ TP1 도달 시: 포지션 50% 청산 (이익 실현)
             '돌파봉 B: [n-maxBars, n-minBars] 구간에서 이전 종가 < 레벨, 이후 종가 > 레벨+0.1×ATR 이상 상향 돌파',
             '확인봉 C (NEW): B+1 이후 구간에서 저점 ≤ 레벨+tol AND 종가 ≥ 레벨 — 실제 리테스트 수요 확인',
             '현재 종가 ≥ 레벨-tol (레벨 이탈 시 신호 무효)',
-            '4H EMA 추세 필터 (NEW): 롱 진입은 4H EMA20 > EMA50 상승 추세일 때만 허용 (설정에서 ON/OFF)',
+            '4H EMA 추세 필터: 기본 ON — 롱 진입은 4H EMA20 > EMA50 상승 추세일 때만 허용. 하락장/횡보장에서 롱 후보를 대량 차단할 수 있음. 자동설정에서 OFF 가능',
             '자동매매: 기본 롱만(long-only), 양방향(both) 선택 가능',
           ]} />
           <Formula>{`감지 조건 v2 (롱 예시):
@@ -861,18 +861,19 @@ TP1 도달 시: 포지션 50% 청산 (이익 실현)
 
           <H2>스코어 구성 (scoreBreakdown)</H2>
           <Table
-            headers={['항목', '최대', '산정 기준']}
+            headers={['항목', '가중치', '산정 기준']}
             rows={[
-              ['leaderScore', '40점', 'SR 레벨 강도 (터치 횟수 × 스코어). 구조적 유효성의 기반'],
-              ['impulseScore', '20점', '돌파봉 B의 강도 (거래량·변동성 복합). 강한 돌파일수록 고점'],
-              ['pullbackScore', '20점', '리테스트 확인봉 C의 품질 (레벨 근접도 + 종가 위치)'],
-              ['locationScore', '10점', '현재가가 진입존 중심에 얼마나 가까운지'],
-              ['airScore', '10점', '진입가~TP 구간의 장애물(SR 레벨) 밀도. 적을수록 고점'],
+              ['leaderScore', '0.22', 'BTC 대비 RS, 유니버스 RS, 턴오버 가속도 복합'],
+              ['impulseScore', '0.18', '돌파봉 B의 강도 (바디비율 · CLV · 거래량 Z스코어)'],
+              ['pullbackScore', '0.18', '리테스트·리클레임 품질 (거래량 하락세 + 클로즈 위치)'],
+              ['locationScore', '0.14', 'AVWAP 기준 위치 + SR/HVN 컨플루언스 스코어'],
+              ['airScore', '0.12', '진입가~다음 저항까지 R배수 공간. 클수록 고점'],
             ]}
           />
-          <Formula>{`총점 = leaderScore + impulseScore + pullbackScore + locationScore + airScore
-  최소 40점 (leaderScore 기반) · 최대 100점
-  권장 최소 진입 점수: 70점 (RR≥2.0 + TP1 존재 시 달성 가능)`}</Formula>
+          <Formula>{`total = 0.22×leader + 0.18×impulse + 0.18×pullback + 0.14×location + 0.12×air
+가중치 합 = 0.84  →  score = round(total × 100)  →  이론 최대 84점
+실전 범위: 40~80점대 (모든 서브스코어 중립값 기준 ~47점)
+권장 최소 진입 점수: 70점 — 자동설정 전환 시 자동 반영됨`}</Formula>
 
           <Card title="FAEL (failedAuctionExitLevel) 동작 방식" accent="#f6465d">
             <P>
@@ -891,9 +892,10 @@ TP1 도달 시: 포지션 50% 청산 (이익 실현)
           </Card>
 
           <Card title="점수 범위 (자동매매 최소 진입 점수 참고)" accent="#5e6673">
-            <Formula>{`점수 = leaderScore + impulseScore + pullbackScore + locationScore + airScore
-  RR=1.5 → ~62점 | RR=2.0 → ~70점 | RR=2.6 → ~79점
-  권장: 최소 진입 점수 70 이상 (RR≥2.0 + TP1 조건)`}</Formula>
+            <Formula>{`이론 최대: 84점 (가중치 합 0.84 × 100)
+실전 분포: 40~80점대 — 기본 임계값 70점
+전략 전환(자동설정) 시 minCandidateScore=70 자동 설정됨
+※ 돌파 전략(기본 90점)과 혼동 주의 — 90점으로 두면 후보 0개`}</Formula>
           </Card>
         </Card>
 
@@ -925,7 +927,7 @@ TP1 도달 시: 포지션 50% 청산 (이익 실현)
             ['추격 진입 방지 ②', '돌파선 이탈폭 체크 적용', '자동 무시 (개념 없음, UI 비활성)', 'POC 이탈폭 체크 적용'],
             ['추격 진입 방지 ①③', '적용', '적용', '적용'],
             ['최소봉/최대봉', '해당 없음', '기본 minBars=2, maxBars=8', '해당 없음'],
-            ['점수 범위', '0~100점 (기본 최소 90점)', '40~80점 (기본 최소 70점)', '40~80점 (기본 최소 75점)'],
+            ['점수 범위', '0~100점 (기본 최소 90점)', '40~84점 (이론최대 84점, 기본 최소 70점)', '40~84점 (기본 최소 75점)'],
             ['자동매매 방향', '양방향 (both)', '기본 롱만 (설정 가능)', '설정 가능'],
             ['히스토리 배지', <Badge color="#3b8beb">ALT추천 + 돌파</Badge>, <Badge color="#9b59b6">ALT추천 + 리테스트</Badge>, <Badge color="#f0b90b">FVG POC + EMA72</Badge>],
           ]}

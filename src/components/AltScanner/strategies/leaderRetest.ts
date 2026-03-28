@@ -57,10 +57,10 @@ export interface RetestOptions {
 
 const DEFAULT_RETEST_OPTIONS: Required<RetestOptions> = {
   minBars: 1,
-  maxBars: 8,          // v2: reduced from 12 — keep retest recent
-  toleranceAtr: 0.30,
-  maxOvershootAtr: 1.0,
-  require4hTrend: true, // v2: 4H uptrend guard for LONG
+  maxBars: 12,          // relaxed: wider window to catch more setups
+  toleranceAtr: 0.50,   // relaxed: looser level-touch requirement
+  maxOvershootAtr: 1.5, // relaxed: allow price to sit further above level
+  require4hTrend: true, // safety guard: only LONG when 4H EMA20 > EMA50
 };
 
 // ── Utilities ──────────────────────────────────────────────────────────────
@@ -353,6 +353,17 @@ function buildRetestDrawings(
   return { breakout: [retestLine], dimSR, topSR, hvn, entryLines };
 }
 
+// ── Per-interval diagnostic counters ──────────────────────────────────────
+
+interface RetestDiagStats {
+  filtered4hTrend: number;    // symbols where LONG was blocked by 4H EMA filter
+  noRetestCandidates: number; // symbols with 0 raw retest candidates after detection
+  statusPending: number;
+  statusTriggered: number;
+  statusInvalid: number;
+  errors: number;
+}
+
 // ── Scan one symbol ────────────────────────────────────────────────────────
 
 async function scanSymbolRetest(
@@ -361,6 +372,7 @@ async function scanSymbolRetest(
   direction: ScanDirection,
   opts: Required<RetestOptions>,
   universeReturns: number[],
+  stats: RetestDiagStats,
   signal?: AbortSignal,
 ): Promise<ScanCandidate | null> {
   const iMs = intervalToMs(interval);
@@ -395,6 +407,7 @@ async function scanSymbolRetest(
         candles4h = [];
       }
     }
+    const hadLong = true; // we know activeDirs includes 'long' here
     if (candles4h.length >= 50) {
       const ema20 = calcEMA(candles4h, 20);
       const ema50 = calcEMA(candles4h, 50);
@@ -404,6 +417,7 @@ async function scanSymbolRetest(
     } else {
       activeDirs = activeDirs.filter(d => d !== 'long');
     }
+    if (hadLong && !activeDirs.includes('long')) stats.filtered4hTrend++;
     if (activeDirs.length === 0) return null;
   }
   // ───────────────────────────────────────────────────────────────────────
@@ -423,7 +437,7 @@ async function scanSymbolRetest(
   const allCandidates: RetestCandidate[] = activeDirs.flatMap(dir =>
     buildRetestCandidates(closed, dir, atr, srLevels, detectOpts, symbol),
   );
-  if (allCandidates.length === 0) return null;
+  if (allCandidates.length === 0) { stats.noRetestCandidates++; return null; }
 
   // ── Enrich candidates with leader / location metrics ─────────────────────
   // BTC candles for RS (skipped when symbol is BTCUSDT; cached after first call).
@@ -504,19 +518,23 @@ async function scanSymbolRetest(
     c.rsVsUniverse  = rsUnivVal;
     c.turnoverAccel = turnAccelVal;
 
-    // ── Location metrics ────────────────────────────────────────────────
+    // ── Location metrics ─────────────────────────────────────────────────
+    // Use c.level as the provisional entry reference (= flip level = idealEntry).
+    // entryPrice is derived from orderPlan later and equals c.level, so this
+    // is numerically identical while avoiding the TDZ (use-before-declaration) bug.
+    const entryRef = c.level;
     const avwap = calcAnchoredVwapFromIndex(closed, c.breakoutIndex);
     if (avwap > 0) {
-      const raw = (entryPrice - avwap) / c.atr;
+      const raw = (entryRef - avwap) / c.atr;
       c.avwapBreakout = c.direction === 'long' ? raw : -raw;
     }
     c.confluenceScore = calcConfluenceScore(c.level, c.atr, srLevels, hvnZones, avwap);
     const provSl = c.direction === 'long'
       ? c.level - c.atr * 1.5
       : c.level + c.atr * 1.5;
-    c.airR = calcAirR(c.direction, entryPrice, provSl, srLevels, c.atr);
-    const R = Math.abs(entryPrice - provSl);
-    c.distanceToNextSupply = R > 0 ? c.airR * R / c.atr : undefined;
+    c.airR = calcAirR(c.direction, entryRef, provSl, srLevels, c.atr);
+    const R = Math.abs(entryRef - provSl);
+    c.distanceToNextSupply = R > 0 ? (c.airR !== undefined ? c.airR * R / c.atr : undefined) : undefined;
   }
 
   // ── Score all candidates and pick the best ────────────────────────────────
@@ -585,6 +603,9 @@ async function scanSymbolRetest(
     ? currentClose > orderPlan.lateAbove
     : currentClose < orderPlan.lateAbove;
   const status: CandidateStatus = isTooLate ? 'INVALID' : inEntryZone ? 'TRIGGERED' : 'PENDING';
+  if (status === 'TRIGGERED') stats.statusTriggered++;
+  else if (status === 'PENDING') stats.statusPending++;
+  else stats.statusInvalid++;
 
   // Distance from current close to the flip level (for display / sorting)
   const distanceNowPct = isLong
@@ -670,15 +691,27 @@ async function runLeaderRetestScanInternal(
   const delayMs = Math.max(0, options?.delayMs ?? 200);
   const queue = [...symbols];
 
+  const diagStats: RetestDiagStats = {
+    filtered4hTrend: 0, noRetestCandidates: 0,
+    statusPending: 0, statusTriggered: 0, statusInvalid: 0,
+    errors: 0,
+  };
+
   async function worker() {
     while (queue.length > 0) {
       if (signal?.aborted) return;
       const sym = queue.shift();
       if (!sym) return;
       try {
-        const result = await scanSymbolRetest(sym, interval, direction, retestOpts, universeReturns, signal);
+        const result = await scanSymbolRetest(sym, interval, direction, retestOpts, universeReturns, diagStats, signal);
         if (result) onResult(result);
-      } catch { /* swallow per-symbol errors */ } finally {
+      } catch (err) {
+        diagStats.errors++;
+        options?.onStatus?.(
+          `[retest] ${sym} 오류: ${err instanceof Error ? err.message : String(err)}`,
+          'warn',
+        );
+      } finally {
         done++;
         onProgress(done, total);
       }
@@ -690,6 +723,16 @@ async function runLeaderRetestScanInternal(
     await Promise.all(Array.from({ length: concurrency }, () => worker()));
   } finally {
     scanSlot.release();
+    // ── Interval-level diagnostic summary ──────────────────────────────
+    const withCandidate = diagStats.statusTriggered + diagStats.statusPending + diagStats.statusInvalid;
+    options?.onStatus?.(
+      `[리테스트 진단 ${interval}] 전체 ${total} | ` +
+      `4H필터제거 ${diagStats.filtered4hTrend} | ` +
+      `리테스트없음 ${diagStats.noRetestCandidates} | ` +
+      `오류 ${diagStats.errors} | ` +
+      `후보 ${withCandidate}개(TRIGGERED ${diagStats.statusTriggered} / PENDING ${diagStats.statusPending} / INVALID ${diagStats.statusInvalid})`,
+      'info',
+    );
   }
 }
 
