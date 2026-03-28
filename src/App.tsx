@@ -969,6 +969,10 @@ function AppInner() {
   }>>({});
   const pendingRetestGtcOrdersRef = useRef(pendingRetestGtcOrders);
   pendingRetestGtcOrdersRef.current = pendingRetestGtcOrders;
+  // GTC remainder-cancel guards (in-memory only; reset on reload is safe)
+  const gtcRemainderCancelInFlightRef = useRef<Set<string>>(new Set());
+  const gtcRemainderCancelDoneRef     = useRef<Set<string>>(new Set());
+  const gtcRemainderCancelFailedRef   = useRef<Set<string>>(new Set());
   const liveAltOrderTagMap = React.useMemo(() => {
     const out: Record<string, 'ALT-AUTO TP' | 'ALT-AUTO SL'> = {};
     for (const entry of Object.values(liveAltOrderRegistry)) {
@@ -2748,6 +2752,69 @@ function AppInner() {
         }
       }
 
+      // ── GTC remainder cancel (leader-retest only) ─────────────────────────
+      // Before attaching TP/SL we must cancel any unfilled entry remainder so
+      // that no extra fill can arrive after TP/SL is placed (qty mismatch risk).
+      if (entry.isGtcLimitEntry && entry.entryOrderId) {
+        if (gtcRemainderCancelInFlightRef.current.has(key)) {
+          continue; // cancel in progress — wait for it to resolve
+        }
+        if (!gtcRemainderCancelDoneRef.current.has(key)) {
+          // First time we see the position open — check if entry order is still live
+          const entryOrderOpen = futuresAllOrders.some(
+            o => o.symbol === entry.symbol && String(o.orderId) === String(entry.entryOrderId),
+          );
+          if (entryOrderOpen) {
+            gtcRemainderCancelInFlightRef.current.add(key);
+            addLog('warn', `[ALT실전/retest] GTC partial fill detected → remainder cancel #${entry.entryOrderId}`);
+            appendAltLifecycleDebug({ action: 'gtc_remainder_cancel_requested', symbol: entry.symbol, key, orderId: entry.entryOrderId, positionAmt: pos.positionAmt });
+            futuresCancelOrder(entry.entryOrderId, entry.symbol)
+              .then(() => {
+                addLog('info', `[ALT실전/retest] GTC remainder canceled #${entry.entryOrderId}`);
+                appendAltLifecycleDebug({ action: 'gtc_remainder_canceled', symbol: entry.symbol, key, orderId: entry.entryOrderId });
+              })
+              .catch((e: unknown) => {
+                const msg = e instanceof Error ? e.message : String(e);
+                const alreadyClosed = /already|cancel|expir|filled/i.test(msg);
+                if (alreadyClosed) {
+                  addLog('warn', `[ALT실전/retest] GTC remainder already closed #${entry.entryOrderId}`);
+                  appendAltLifecycleDebug({ action: 'gtc_remainder_cancel_skipped', symbol: entry.symbol, key, reason: msg });
+                } else {
+                  addLog('error', `[ALT실전/retest] GTC remainder cancel failed #${entry.entryOrderId}: ${msg}`);
+                  appendAltLifecycleDebug({ action: 'gtc_remainder_cancel_failed', symbol: entry.symbol, key, reason: msg });
+                  gtcRemainderCancelFailedRef.current.add(key);
+                }
+              })
+              .finally(() => {
+                gtcRemainderCancelInFlightRef.current.delete(key);
+                gtcRemainderCancelDoneRef.current.add(key);
+                // Order no longer pending fill — remove from expiry-cancel tracking
+                setPendingRetestGtcOrders(prev => {
+                  if (!prev[key]) return prev;
+                  const n = { ...prev }; delete n[key]; return n;
+                });
+              });
+            continue; // do NOT attach TP/SL until cancel settles
+          } else {
+            // Entry order already closed (filled / canceled) — proceed immediately
+            gtcRemainderCancelDoneRef.current.add(key);
+            setPendingRetestGtcOrders(prev => {
+              if (!prev[key]) return prev;
+              const n = { ...prev }; delete n[key]; return n;
+            });
+          }
+        }
+        // Cancel resolved. For failed-cancel: apply 10s grace so any trailing fill
+        // can settle before we lock in the TP/SL qty.
+        if (gtcRemainderCancelFailedRef.current.has(key)) {
+          if (now - (entry.positionOpenedAt ?? now) < 10_000) {
+            addLog('info', `[ALT실전/retest] GTC cancel 실패 — 10s 후 TP/SL 부착 대기 중`);
+            continue;
+          }
+          addLog('warn', `[ALT실전/retest] GTC cancel 실패 — actualQty=${Math.abs(pos.positionAmt)} 기준으로 TP/SL 부착 (잔량 추가 체결 가능성 있음)`);
+        }
+      }
+
       // Only enforce timeout after position actually opened.
       if (now - openedAt > EXPIRE_MS) {
         addLog('error', `[ALT실전] TP/SL 설정 지연 만료(15분) — ${entry.symbol} 포지션은 열려 있음, 수동 설정 필요`);
@@ -2757,6 +2824,9 @@ function AppInner() {
 
       if (inFlightTPSLRef.current.has(key)) continue;
       const actualQty = Math.abs(pos.positionAmt);
+      if (entry.isGtcLimitEntry) {
+        addLog('info', `[ALT실전/retest] attaching TP/SL with actualQty=${actualQty} after remainder cancel`);
+      }
       inFlightTPSLRef.current.add(key);
       futuresPlaceTPSLRef.current(
         entry.symbol,
@@ -2790,7 +2860,7 @@ function AppInner() {
         })
         .finally(() => { inFlightTPSLRef.current.delete(key); });
     }
-  }, [futuresAllPositions, futuresAllOrders, pendingLiveTPSLMap, addLog, upsertLiveAltOrderRegistry, appendAltLifecycleDebug]);
+  }, [futuresAllPositions, futuresAllOrders, pendingLiveTPSLMap, addLog, upsertLiveAltOrderRegistry, appendAltLifecycleDebug, futuresCancelOrder, setPendingRetestGtcOrders]);
 
   const inferLiveCloseReason = useCallback((meta: AltMeta, exitPrice: number | null): LiveCloseReason => {
     if (exitPrice == null || !isFinite(exitPrice) || exitPrice <= 0) return 'unknown';
