@@ -14,6 +14,32 @@ function fmtPrice(p: number): string {
   return p >= 1 ? p.toFixed(2) : p.toFixed(6);
 }
 
+/**
+ * Discriminated union describing how position size is determined.
+ * Used to generalize the absolute-loss gate across both size modes.
+ */
+export type SizingHint =
+  | { mode: 'margin'; notionalUsd: number }   // qty = notionalUsd / entryPrice
+  | { mode: 'risk';   riskAmountUsd: number }; // absLoss = riskAmountUsd (fixed)
+
+/**
+ * Estimates planned absolute loss in USD given the sizing hint and the
+ * distance-based risk fraction (|entry - hardStop| / entry).
+ *
+ * Returns undefined when estimation is impossible (e.g. hint is absent or
+ * required values are zero/invalid).
+ */
+function estimatePlannedAbsLossUsd(hint: SizingHint | undefined, riskFrac: number): number | undefined {
+  if (hint == null) return undefined;
+  if (hint.mode === 'margin') {
+    if (hint.notionalUsd <= 0) return undefined;
+    return riskFrac * hint.notionalUsd;
+  }
+  // risk mode: absolute loss is fixed (= riskAmount); riskFrac is already embedded in qty.
+  if (hint.riskAmountUsd <= 0) return undefined;
+  return hint.riskAmountUsd;
+}
+
 const AUTO_TRADE_KEY   = 'alt_auto_trade_active';
 const DEFAULT_SCAN_INTERVALS: ScanInterval[] = ['1h', '4h', '1d'];
 const DEFAULT_CADENCE_MINUTES = 60;
@@ -104,7 +130,7 @@ export function useAltAutoTrade({
   maxSpreadBps,
   maxRiskPct,
   maxAbsLossUsd,
-  estimatedNotionalPerTrade,
+  sizingHint,
 }: {
   symbols: string[];
   onEnterTrade: (candidate: ScanCandidate) => void;
@@ -141,12 +167,18 @@ export function useAltAutoTrade({
    */
   maxRiskPct?: number;
   /**
-   * Leader-retest Gate 5: block entry when absolute loss (riskFrac × estimatedNotional) exceeds this USD amount.
-   * Only active when both maxAbsLossUsd > 0 AND estimatedNotionalPerTrade > 0.
+   * Leader-retest Gate 5: block entry when estimated absolute loss exceeds this USD amount.
+   * Works for both 'margin' and 'risk' size modes via SizingHint.
+   * Only active when maxAbsLossUsd > 0 AND sizingHint is provided.
    */
   maxAbsLossUsd?: number;
-  /** Estimated notional per trade in USDT (= marginUsdt × leverage for margin mode). */
-  estimatedNotionalPerTrade?: number;
+  /**
+   * Sizing hint used for Gate 5 absolute-loss estimation.
+   * Pass { mode:'margin', notionalUsd: marginUsdt×leverage } or
+   *      { mode:'risk',   riskAmountUsd: balance×riskPct/100 }.
+   * Omit to disable Gate 5.
+   */
+  sizingHint?: SizingHint;
 }) {
   const [isActive, setIsActiveState] = useState<boolean>(() => {
     try { return localStorage.getItem(AUTO_TRADE_KEY) === 'true'; } catch { return false; }
@@ -179,7 +211,7 @@ export function useAltAutoTrade({
   const maxSpreadBpsRef           = useRef(maxSpreadBps ?? 4);
   const maxRiskPctRef             = useRef(maxRiskPct ?? 0.025);
   const maxAbsLossUsdRef          = useRef(maxAbsLossUsd ?? 0);
-  const estimatedNotionalRef      = useRef(estimatedNotionalPerTrade ?? 0);
+  const sizingHintRef             = useRef(sizingHint);
   /** Tracks symbols currently subscribed via bookTicker — enables targeted cleanup. */
   const subscribedBookTickersRef  = useRef(new Set<string>());
   isActiveRef.current             = isActive;
@@ -201,7 +233,7 @@ export function useAltAutoTrade({
   maxSpreadBpsRef.current         = maxSpreadBps ?? 4;
   maxRiskPctRef.current           = maxRiskPct ?? 0.025;
   maxAbsLossUsdRef.current        = maxAbsLossUsd ?? 0;
-  estimatedNotionalRef.current    = estimatedNotionalPerTrade ?? 0;
+  sizingHintRef.current           = sizingHint;
 
   const addLog = useCallback((msg: string, type: AutoTradeLog['type'] = 'info') => {
     setLogs(prev => [{ id: ++logSeq, time: Date.now(), msg, type }, ...prev].slice(0, 200));
@@ -455,10 +487,12 @@ export function useAltAutoTrade({
           }
           // Gate 4: distance-based risk gate using wick-based hardStop.
           // riskPct = |idealEntry − hardStop| / idealEntry.
+          let riskFracForGate5: number | null = null;
           if (c.orderPlan != null && maxRiskPctRef.current > 0) {
             const idealEntry = c.orderPlan.idealEntry;
             if (idealEntry > 0) {
               const riskPct = Math.abs(idealEntry - c.orderPlan.hardStop) / idealEntry;
+              riskFracForGate5 = riskPct;
               if (riskPct > maxRiskPctRef.current) {
                 addLog(
                   `⛔ [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — ` +
@@ -467,19 +501,40 @@ export function useAltAutoTrade({
                 );
                 continue;
               }
-              // Gate 5: absolute loss gate — riskFrac × estimatedNotional > maxAbsLossUsd.
-              const estimatedNotional = estimatedNotionalRef.current;
-              const maxAbsLoss = maxAbsLossUsdRef.current;
-              if (maxAbsLoss > 0 && estimatedNotional > 0) {
-                const absLossUsd = riskPct * estimatedNotional;
-                if (absLossUsd > maxAbsLoss) {
-                  addLog(
-                    `⛔ [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — ` +
-                    `절대손실 $${absLossUsd.toFixed(2)} > 상한 $${maxAbsLoss.toFixed(2)} → 진입 차단`,
-                    'warn',
-                  );
-                  continue;
-                }
+            }
+          } else if (c.orderPlan != null) {
+            // Gate 4 disabled (maxRiskPct=0) but we still compute riskFrac for Gate 5.
+            const idealEntry = c.orderPlan.idealEntry;
+            if (idealEntry > 0) {
+              riskFracForGate5 = Math.abs(idealEntry - c.orderPlan.hardStop) / idealEntry;
+            }
+          }
+          // Gate 5: absolute loss gate — independent of Gate 4.
+          // Works for both 'margin' (riskFrac × notional) and 'risk' (fixed riskAmount) modes.
+          const maxAbsLoss = maxAbsLossUsdRef.current;
+          if (maxAbsLoss > 0) {
+            const hint = sizingHintRef.current;
+            if (hint == null) {
+              // sizingHint not provided — cannot estimate; skip gate with a warning.
+              addLog(
+                `⚠ [${interval}] ${c.symbol} — Gate 5 비활성: sizingHint 없음 (절대손실 추정 불가)`,
+                'warn',
+              );
+            } else {
+              // For margin mode we need riskFrac; derive it from orderPlan if available.
+              const frac = riskFracForGate5 ?? (
+                c.orderPlan != null && c.orderPlan.idealEntry > 0
+                  ? Math.abs(c.orderPlan.idealEntry - c.orderPlan.hardStop) / c.orderPlan.idealEntry
+                  : 0
+              );
+              const absLossUsd = estimatePlannedAbsLossUsd(hint, frac);
+              if (absLossUsd != null && absLossUsd > maxAbsLoss) {
+                addLog(
+                  `⛔ [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — ` +
+                  `절대손실 $${absLossUsd.toFixed(2)} > 상한 $${maxAbsLoss.toFixed(2)} → 진입 차단`,
+                  'warn',
+                );
+                continue;
               }
             }
           }

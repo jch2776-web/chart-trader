@@ -1970,10 +1970,16 @@ function AppInner() {
     maxSpreadBps: activeAutoTradeSettings.maxSpreadBps ?? 4,
     maxRiskPct: activeAutoTradeSettings.maxRiskPct ?? 0.025,
     maxAbsLossUsd: activeAutoTradeSettings.maxAbsLossUsd ?? 0,
-    estimatedNotionalPerTrade:
-      activeAutoTradeSettings.sizeMode === 'margin'
-        ? (activeAutoTradeSettings.marginUsdt ?? 0) * (activeAutoTradeSettings.leverage ?? 1)
-        : 0,
+    sizingHint: (() => {
+      if (activeAutoTradeSettings.sizeMode === 'margin') {
+        const notionalUsd = (activeAutoTradeSettings.marginUsdt ?? 0) * (activeAutoTradeSettings.leverage ?? 1);
+        return notionalUsd > 0 ? { mode: 'margin' as const, notionalUsd } : undefined;
+      }
+      // risk mode: absLoss = balance × riskPct/100
+      const balance = autoTradeMode === 'live' ? futuresBalance : paperTrading.balance;
+      const riskAmountUsd = balance * (activeAutoTradeSettings.riskPct ?? 2) / 100;
+      return riskAmountUsd > 0 ? { mode: 'risk' as const, riskAmountUsd } : undefined;
+    })(),
   });
   altAutoTradeSetActiveRef.current = altAutoTrade.setActive;
 

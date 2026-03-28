@@ -844,9 +844,55 @@ TP1 도달 시: 포지션 50% 청산 (이익 실현)
   4) 현재 종가 ≥ level - tol  (레벨 유지 확인)
   5) [옵션] 4H EMA20 > 4H EMA50  (상승 추세 필터)
      tol = ATR × toleranceAtr`}</Formula>
+
+          <H2>진입 청사진 (orderPlan) 용어</H2>
+          <Table
+            headers={['필드', '설명']}
+            rows={[
+              ['entryZoneLow / High', '진입 허용 가격 범위. 현재가가 이 존 안에 있으면 TRIGGERED, 밖이면 PENDING'],
+              ['hardStop', '릭(wick) 기반 손절가 — SR 레벨 ± ATR 버퍼. Gate 4 리스크% 계산 기준'],
+              ['tp1', '1차 목표가. 다음 SR 레벨 또는 RR 1.0 기반'],
+              ['failedAuctionExitLevel (FAEL)', 'SR 플립 레벨 ± 허용폭. 봉 종가가 이 레벨을 역방향으로 재돌파하면 "경매 실패"로 즉시 청산'],
+              ['timeStopBars', '진입 후 N봉 경과 시 타임스탑 발동. 자동설정의 timeStopBars와 합산되어 validUntilTime 계산'],
+              ['runnerMode', '"runner" = 추세 추종 TP 없음 (SL만 관리), "normal" = RR2 기반 TP 설정'],
+              ['cancelAfterBars', '스캔 시점 기준 N봉 후에도 미진입이면 청사진 자동 폐기'],
+            ]}
+          />
+
+          <H2>스코어 구성 (scoreBreakdown)</H2>
+          <Table
+            headers={['항목', '최대', '산정 기준']}
+            rows={[
+              ['leaderScore', '40점', 'SR 레벨 강도 (터치 횟수 × 스코어). 구조적 유효성의 기반'],
+              ['impulseScore', '20점', '돌파봉 B의 강도 (거래량·변동성 복합). 강한 돌파일수록 고점'],
+              ['pullbackScore', '20점', '리테스트 확인봉 C의 품질 (레벨 근접도 + 종가 위치)'],
+              ['locationScore', '10점', '현재가가 진입존 중심에 얼마나 가까운지'],
+              ['airScore', '10점', '진입가~TP 구간의 장애물(SR 레벨) 밀도. 적을수록 고점'],
+            ]}
+          />
+          <Formula>{`총점 = leaderScore + impulseScore + pullbackScore + locationScore + airScore
+  최소 40점 (leaderScore 기반) · 최대 100점
+  권장 최소 진입 점수: 70점 (RR≥2.0 + TP1 존재 시 달성 가능)`}</Formula>
+
+          <Card title="FAEL (failedAuctionExitLevel) 동작 방식" accent="#f6465d">
+            <P>
+              SR 플립 레벨(돌파가 발생한 레벨) ± 허용폭을 FAEL로 설정합니다.
+              포지션 보유 중 봉 종가가 이 레벨을 역방향으로 재돌파하면 "경매 실패(가격이 레벨 위에서 지지받지 못함)"로 판단하여 즉시 시장가 청산합니다.
+            </P>
+            <Formula>{`롱 진입 예시:
+  SR 레벨 = $100, 허용폭 tol = 0.30 × ATR
+  FAEL = $100 - tol (롱은 레벨 아래)
+  봉 종가 < FAEL → 즉시 청산 (SL 도달 전에도 발동 가능)`}</Formula>
+            <Ul items={[
+              'AltPositionMonitor / LiveAltPositionMonitor가 봉 마감마다 체크',
+              'SL보다 먼저 발동될 수 있음 (경매 실패 = SL보다 엄격한 조건)',
+              'FAEL이 없는 신호는 일반 SL만 적용',
+            ]} />
+          </Card>
+
           <Card title="점수 범위 (자동매매 최소 진입 점수 참고)" accent="#5e6673">
-            <Formula>{`점수 = 40 + RR×15 + (TP1 있으면 +10)
-  RR=1.5 → 62점 | RR=2.0 → 70점 | RR=2.6 → 79점
+            <Formula>{`점수 = leaderScore + impulseScore + pullbackScore + locationScore + airScore
+  RR=1.5 → ~62점 | RR=2.0 → ~70점 | RR=2.6 → ~79점
   권장: 최소 진입 점수 70 이상 (RR≥2.0 + TP1 조건)`}</Formula>
           </Card>
         </Card>

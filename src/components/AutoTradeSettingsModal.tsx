@@ -205,6 +205,16 @@ export const DEFAULT_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
   cooldownBarsAfterLoss: 0,
   maxConcurrentCorrelated: 0,
   maxTotalPositions: 0,
+  // Leader-retest defaults
+  retestMinBars: 1,
+  retestMaxBars: 8,
+  retestToleranceAtr: 0.30,
+  retestMaxOvershootAtr: 1.0,
+  retestRequire4hTrend: true,
+  retestAutoDirection: 'long',
+  maxSpreadBps: 4,
+  maxRiskPct: 0.025,
+  maxAbsLossUsd: 0,
 };
 
 export const DEFAULT_LIVE_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
@@ -231,6 +241,16 @@ export const DEFAULT_LIVE_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
   cooldownBarsAfterLoss: 0,
   maxConcurrentCorrelated: 0,
   maxTotalPositions: 0,
+  // Leader-retest defaults
+  retestMinBars: 1,
+  retestMaxBars: 8,
+  retestToleranceAtr: 0.30,
+  retestMaxOvershootAtr: 1.0,
+  retestRequire4hTrend: true,
+  retestAutoDirection: 'long',
+  maxSpreadBps: 4,
+  maxRiskPct: 0.025,
+  maxAbsLossUsd: 0,
 };
 
 interface Props {
@@ -732,7 +752,7 @@ function SettingsEditor({
           </div>
           <span style={s.hint}>
             스프레드: 호가 스프레드 초과 시 차단 (0 = 비활성). 리스크%: |진입-손절|/진입가 비율 상한 (0 = 비활성).
-            최대손실$: 비율×포지션 크기의 USDT 상한 (0 = 비활성, margin모드 전용).
+            최대손실$: 예상 절대손실 USDT 상한 — margin모드는 리스크%×레버리지노셔널, risk모드는 잔고×리스크% (0 = 비활성).
           </span>
         </div>
       )}
