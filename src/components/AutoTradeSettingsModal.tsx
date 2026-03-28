@@ -899,8 +899,8 @@ function SettingsEditor({
         </span>
       </div>
 
-      {/* TP1 partial close */}
-      <div style={s.fieldRow}>
+      {/* TP1 partial close — not applicable for leader-retest (tp1 is structurally derived from orderPlan) */}
+      {!isLeaderRetest && <div style={s.fieldRow}>
         <label style={s.label}>TP1 부분익절</label>
         <div style={{ display: 'flex', gap: 6 }}>
           <button
@@ -961,7 +961,7 @@ function SettingsEditor({
             <span style={s.hint}>TP1 = 진입가 + (TP−진입가)×{(draft.tp1R ?? 0.30).toFixed(2)} 지점에서 {draft.tp1ClosePct ?? 50}% 익절{(draft.tp1MoveSL !== false) ? ' + SL → 진입가' : ''}</span>
           </div>
         )}
-      </div>
+      </div>}
 
       {/* Risk gates */}
       <div style={s.fieldRow}>

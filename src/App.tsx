@@ -4401,6 +4401,13 @@ function AppInner() {
             tp1MoveSL: liveAutoTradeSettings.tp1MoveSL !== false,
             timeStopEnabled: (liveAutoTradeSettings.timeStopEnabled ?? true) !== false,
           }}
+          retestOptions={{
+            minBars: activeAutoTradeSettings.retestMinBars,
+            maxBars: activeAutoTradeSettings.retestMaxBars,
+            toleranceAtr: activeAutoTradeSettings.retestToleranceAtr,
+            maxOvershootAtr: activeAutoTradeSettings.retestMaxOvershootAtr,
+            require4hTrend: activeAutoTradeSettings.retestRequire4hTrend,
+          }}
         />
       )}
 

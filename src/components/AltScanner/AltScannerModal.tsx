@@ -5,7 +5,8 @@ import type { AltMeta } from '../../types/paperTrading';
 import { CandleChart } from '../Chart/CandleChart';
 import { runBreakoutScan } from './breakoutScanner';
 import type { ScanCandidate, ScanInterval, ScanDirection, CandidateStatus } from './breakoutScanner';
-import { runLeaderRetestScan } from './strategies/leaderRetest';
+import { runLeaderRetestScan, createLeaderRetestScan } from './strategies/leaderRetest';
+import type { RetestOptions } from './strategies/leaderRetest';
 import { runFvgPocEma72Scan } from './strategies/fvgPocEma72';
 import { useBinanceWS } from '../../hooks/useBinanceWS';
 import { revalidateCandidate } from './validateSignal';
@@ -80,6 +81,8 @@ interface Props {
   paperBalance?: number;
   paperAutoSettings?: AutoEntryHints;
   liveAutoSettings?: AutoEntryHints;
+  /** Retest scan options — when provided, manual scan uses these instead of DEFAULT_RETEST_OPTIONS */
+  retestOptions?: RetestOptions;
 }
 
 type LevelMode = 'core' | 'all';
@@ -937,7 +940,7 @@ function InfoBlock({ icon, title, children }: { icon: string; title: string; chi
 export function AltScannerModal({
   symbols, initialCandidates, onCandidatesChange, onClose, onOpenInMain,
   onPaperTrade, onLiveTrade, snapshotMeta, paperBalance,
-  paperAutoSettings, liveAutoSettings,
+  paperAutoSettings, liveAutoSettings, retestOptions,
 }: Props) {
   const [showFAQ, setShowFAQ]           = useState(false);
   const [scanInterval, setScanInterval] = useState<ScanInterval>('1h');
@@ -1131,7 +1134,8 @@ export function AltScannerModal({
     setCandidatesCache(prev => ({ ...prev, [scanInterval]: [] }));
     setSelected(null);
     setProgress({ done: 0, total: symbols.length });
-    const scanFn = strategy === 'leader-retest' ? runLeaderRetestScan
+    const scanFn = strategy === 'leader-retest'
+      ? (retestOptions ? createLeaderRetestScan(retestOptions) : runLeaderRetestScan)
       : strategy === 'fvg-poc-ema72' ? runFvgPocEma72Scan
       : runBreakoutScan;
     try {
@@ -1206,7 +1210,8 @@ export function AltScannerModal({
       setCandidatesCache(prev => ({ ...prev, [scanInterval]: [] }));
       setSelected(null);
       setProgress({ done: 0, total: symbols.length });
-      const autoScanFn = strategy === 'leader-retest' ? runLeaderRetestScan
+      const autoScanFn = strategy === 'leader-retest'
+        ? (retestOptions ? createLeaderRetestScan(retestOptions) : runLeaderRetestScan)
         : strategy === 'fvg-poc-ema72' ? runFvgPocEma72Scan
         : runBreakoutScan;
       try {
