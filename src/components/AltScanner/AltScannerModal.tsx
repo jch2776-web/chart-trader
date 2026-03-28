@@ -7,6 +7,7 @@ import { runBreakoutScan } from './breakoutScanner';
 import type { ScanCandidate, ScanInterval, ScanDirection, CandidateStatus } from './breakoutScanner';
 import { runLeaderRetestScan, createLeaderRetestScan } from './strategies/leaderRetest';
 import type { RetestOptions } from './strategies/leaderRetest';
+import type { OrderPlan } from './features/orderPlan';
 import { runFvgPocEma72Scan } from './strategies/fvgPocEma72';
 import { useBinanceWS } from '../../hooks/useBinanceWS';
 import { revalidateCandidate } from './validateSignal';
@@ -59,6 +60,8 @@ export interface AltTradeParams {
   triggerLinePrice?: number;
   // Leader-retest: price level where a close re-breach of the flip level triggers immediate exit
   failedAuctionExitLevel?: number;
+  // Leader-retest: full execution blueprint — used for zone-aware limit entry in live mode
+  orderPlan?: OrderPlan;
 }
 
 interface AutoEntryHints {
@@ -306,7 +309,8 @@ function TradingInfoPanel({
     tpPrice: c.tpPrice, tp1Price: c.tp1Price,
     candidateId: `${c.symbol}_${c.direction}_${c.asOfCloseTime}`,
     candidateScore: c.score,
-    plannedEntry: c.entryPrice,
+    // leader-retest: plannedEntry = orderPlan.idealEntry (flip level = strategy reference price)
+    plannedEntry: c.strategyId === 'leader-retest' && c.orderPlan ? c.orderPlan.idealEntry : c.entryPrice,
     plannedTP: c.tpPrice ?? null,
     plannedSL: c.slPrice ?? null,
     scanInterval: c.interval,
@@ -319,6 +323,7 @@ function TradingInfoPanel({
     candidateStatus: c.status,
     triggerPriceAtNextClose: c.triggerPriceAtNextClose,
     strategyId: c.strategyId,
+    orderPlan: c.orderPlan,
   };
   const paperTradeParams: AltTradeParams = {
     ...baseParams,

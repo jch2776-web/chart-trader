@@ -44,13 +44,13 @@ const AUTO_TRADE_KEY   = 'alt_auto_trade_active';
 const DEFAULT_SCAN_INTERVALS: ScanInterval[] = ['1h', '4h', '1d'];
 const DEFAULT_CADENCE_MINUTES = 60;
 // Rate-limit settings for automated (unattended) scanning.
-// Each symbol costs 7 weight (limit=202 → wt2, limit=502 → wt5).
+// leader-retest costs ~4 wt/symbol (klines limit=302 → wt4), plus other concurrent requests
+// (price feeds, position monitor) push total above 2400/min when concurrency is too high.
 // Binance Futures IP limit: 2400 weight/min = 40 weight/sec (rolling).
-// concurrency=5, delayMs=200, avg HTTP=250ms → effective delay ≈ 450ms per batch
-//   → throughput ≈ 5/450ms = 11 sym/sec × 7 wt = 77 wt/sec → governor throttles to 1800/min
-// (governor soft limit = 1800/min handles throttling automatically)
-const AUTO_CONCURRENCY = 5;
-const AUTO_DELAY_MS    = 200;
+// concurrency=2, delayMs=450, avg HTTP=250ms → effective delay ≈ 700ms per batch
+//   → throughput ≈ 2/700ms = 2.9 sym/sec × 4 wt = 11.4 wt/sec = 685 wt/min → safe with margin
+const AUTO_CONCURRENCY = 2;
+const AUTO_DELAY_MS    = 450;
 const BETWEEN_SCAN_MS  = 500;
 const SCHEDULE_CHECK_INTERVAL_MS = 1_000;
 
@@ -278,6 +278,7 @@ export function useAltAutoTrade({
     setScanProgress(null);
     const startTime = Date.now();
     const cadence = cadenceRef.current;
+    try {
     const boundaryTime = boundaryTimeArg ?? getSlotStart(startTime, cadence);
     const boundaryLagSec = Math.max(0, Math.round((startTime - boundaryTime) / 1000));
     setLastRunTime(startTime);
@@ -615,10 +616,13 @@ export function useAltAutoTrade({
 
     const now = Date.now();
     setNextRunTime(getNextBoundary(now, cadenceRef.current));
-
-    scanningRef.current = false;
-    setScanning(false);
-    setScanProgress(null);
+    } catch (e) {
+      addLog(`⚠ 스캔 중 예외 발생: ${e instanceof Error ? e.message : String(e)}`, 'error');
+    } finally {
+      scanningRef.current = false;
+      setScanning(false);
+      setScanProgress(null);
+    }
   }, [addLog]);
 
   // Keep runScans accessible via ref so the timer doesn't re-subscribe
@@ -687,7 +691,10 @@ export function useAltAutoTrade({
       addLog(`바이낸스 쿨다운 중(${remainSec}s) — 지금 스캔 불가`, 'warn');
       return;
     }
-    // Do not update scheduled slot marker so the next cadence boundary still runs.
+    // Mark the current slot as handled so the scheduler doesn't immediately re-trigger
+    // after the manual scan completes. The NEXT boundary slot will still be different,
+    // so scheduled scans at the next cadence boundary will still fire normally.
+    lastRunSlotRef.current = getCurrentSlot(Date.now(), cadenceRef.current);
     runScansRef.current('manual', Date.now());
   }, [addLog]);
 

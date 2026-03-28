@@ -959,6 +959,12 @@ function AppInner() {
   // Keys whose ALT position has been detected as closed and cleanup is pending (async state update).
   // Prevents a new manual position on the same symbol/direction from being "adopted" by a stale ALT meta.
   const liveAltPendingCleanupRef = useRef<Set<string>>(new Set());
+  // Leader-retest: GTC entry orders pending fill — tracked for expiry-based cancellation
+  const [pendingRetestGtcOrders, setPendingRetestGtcOrders] = React.useState<Record<string, {
+    orderId: string; symbol: string; direction: 'long' | 'short'; expiresAt: number;
+  }>>({});
+  const pendingRetestGtcOrdersRef = useRef(pendingRetestGtcOrders);
+  pendingRetestGtcOrdersRef.current = pendingRetestGtcOrders;
   const liveAltOrderTagMap = React.useMemo(() => {
     const out: Record<string, 'ALT-AUTO TP' | 'ALT-AUTO SL'> = {};
     for (const entry of Object.values(liveAltOrderRegistry)) {
@@ -2334,11 +2340,68 @@ function AppInner() {
       validUntilTime: params.validUntilTime,
       requestAt: requestStartedAt,
     });
-    // ── Breakout live entry: MARKET / LIMIT_IOC / SKIP based on distance from trigger line ──
-    let liveOrderType: 'MARKET' | 'LIMIT_IOC';
+    // ── Entry order type: strategy-aware routing ──────────────────────────────
+    let liveOrderType: 'MARKET' | 'LIMIT_IOC' | 'LIMIT_GTC';
     let finalEntryPrice = effectiveEntryPrice;
+    const isRetestLive = params.strategyId === 'leader-retest';
     const isBreakoutLive = params.strategyId === 'breakout' && params.entrySource === 'auto';
-    if (isBreakoutLive && params.triggerLinePrice && params.triggerLinePrice > 0) {
+
+    if (isRetestLive) {
+      // Leader-retest: zone-aware limit entry — MARKET 추격 진입 금지
+      if (params.candidateStatus === 'INVALID') {
+        addLog('warn', `[ALT실전/retest] ⛔ ${params.symbol} ${params.direction.toUpperCase()} — 상태 INVALID → 진입 스킵`);
+        return;
+      }
+      const op = params.orderPlan;
+      if (!op) {
+        addLog('warn', `[ALT실전/retest] ⛔ ${params.symbol} orderPlan 없음 (구버전 신호?) → 진입 스킵`);
+        return;
+      }
+      const isLong = params.direction === 'long';
+      const markNow = markPricesMapRef.current[params.symbol] ?? 0;
+      addLog('info',
+        `[ALT실전/retest] ${params.symbol} ${params.direction.toUpperCase()} — ` +
+        `zone=[${op.entryZoneLow.toFixed(4)}~${op.entryZoneHigh.toFixed(4)}] ` +
+        `ideal=${op.idealEntry.toFixed(4)} current=${markNow > 0 ? markNow.toFixed(4) : 'N/A'} ` +
+        `lateAbove=${op.lateAbove.toFixed(4)} status=${params.candidateStatus}`,
+      );
+      // lateAbove guard
+      if (markNow > 0) {
+        const tooLate = isLong ? markNow > op.lateAbove : markNow < op.lateAbove;
+        if (tooLate) {
+          addLog('warn', `[ALT실전/retest] ⛔ ${params.symbol} lateAbove 초과 (${markNow.toFixed(4)} ${isLong ? '>' : '<'} ${op.lateAbove.toFixed(4)}) → 진입 스킵`);
+          return;
+        }
+      }
+      // Zone check
+      const inZone = markNow > 0 && (
+        isLong
+          ? markNow >= op.entryZoneLow && markNow <= op.entryZoneHigh
+          : markNow <= op.entryZoneHigh && markNow >= op.entryZoneLow
+      );
+      if (params.candidateStatus === 'TRIGGERED' || inZone) {
+        // Price inside entry zone: LIMIT_IOC for immediate fill at zone-clamped price
+        const limitPx = markNow > 0
+          ? Math.max(op.entryZoneLow, Math.min(op.entryZoneHigh, markNow))
+          : op.idealEntry;
+        liveOrderType = 'LIMIT_IOC';
+        finalEntryPrice = limitPx;
+        addLog('info', `[ALT실전/retest] ${params.symbol} LIMIT_IOC @ ${limitPx.toFixed(4)} (zone 내 즉시 체결 시도)`);
+      } else if (params.candidateStatus === 'PENDING') {
+        // Price not yet in zone: resting GTC LIMIT at idealEntry (flip level)
+        // Guard: price already broke through zone in wrong direction → structure invalid
+        if (markNow > 0 && (isLong ? markNow < op.entryZoneLow : markNow > op.entryZoneHigh)) {
+          addLog('warn', `[ALT실전/retest] ⛔ ${params.symbol} 현재가(${markNow.toFixed(4)}) zone 이탈 → 구조 무효화 가능성 → 진입 스킵`);
+          return;
+        }
+        liveOrderType = 'LIMIT_GTC';
+        finalEntryPrice = op.idealEntry;
+        addLog('info', `[ALT실전/retest] ${params.symbol} resting LIMIT GTC @ ${op.idealEntry.toFixed(4)} (PENDING — zone 진입 대기, 만료 ${new Date(params.validUntilTime).toLocaleTimeString('ko-KR')})`);
+      } else {
+        addLog('warn', `[ALT실전/retest] ⛔ ${params.symbol} 알 수 없는 상태(${params.candidateStatus}) → 진입 스킵`);
+        return;
+      }
+    } else if (isBreakoutLive && params.triggerLinePrice && params.triggerLinePrice > 0) {
       const liveSettings = liveAutoTradeSettingsRef.current;
       const nearPct = liveSettings.breakoutMarketNearPct ?? 0.20;
       const farPct  = liveSettings.breakoutLimitIocFarPct ?? 0.50;
@@ -2367,7 +2430,9 @@ function AppInner() {
       liveOrderType = liveAutoTradeSettingsRef.current.liveEntryOrderType ?? 'MARKET';
     }
     const isLimitIoc = liveOrderType === 'LIMIT_IOC';
-    addLog('info', `[ALT실전] 진입 요청 시작 — ${side} ${qty} ${params.symbol} (${isLimitIoc ? `지정가 IOC @ ${finalEntryPrice}` : '시장가 MARKET'})`);
+    const isLimitGtc = liveOrderType === 'LIMIT_GTC';
+    const orderTypeLabel = isLimitGtc ? `resting LIMIT GTC @ ${finalEntryPrice.toFixed(4)}` : isLimitIoc ? `지정가 IOC @ ${finalEntryPrice.toFixed(4)}` : '시장가 MARKET';
+    addLog('info', `[ALT실전] 진입 요청 시작 — ${side} ${qty} ${params.symbol} (${orderTypeLabel})`);
 
     try {
       await futuresPlaceOrder(
@@ -2380,7 +2445,9 @@ function AppInner() {
         params.symbol,
         isLimitIoc ? 'IOC' : 'GTC',
         {
-          ...(isLimitIoc ? {} : { orderType: 'MARKET' as const }),
+          // LIMIT_GTC and LIMIT_IOC → no orderType override (defaults to LIMIT on exchange)
+          // MARKET → explicit orderType: 'MARKET'
+          ...(liveOrderType === 'MARKET' ? { orderType: 'MARKET' as const } : {}),
           onAck: (ack) => {
             ackOrderId = ack.orderId || undefined;
             ackStatusRaw = ack.status;
@@ -2411,9 +2478,19 @@ function AppInner() {
         ...baseLiveMeta,
         liveEntryOrderId: ackOrderId,
         liveEntrySubmittedAt: submittedAt,
+        isGtcLimitEntry: isLimitGtc || undefined,
+        gtcEntryExpiresAt: isLimitGtc ? params.validUntilTime : undefined,
       };
       liveAltPendingCleanupRef.current.delete(liveKey);
       setLiveAltMetaMap(prev => ({ ...prev, [liveKey]: liveMeta }));
+      // Track GTC entry orders for expiry-based cancellation
+      if (isLimitGtc && ackOrderId) {
+        setPendingRetestGtcOrders(prev => ({
+          ...prev,
+          [liveKey]: { orderId: ackOrderId!, symbol: params.symbol, direction: params.direction, expiresAt: params.validUntilTime },
+        }));
+        addLog('info', `[ALT실전/retest] GTC LIMIT 주문 등록 #${ackOrderId} — 만료시 자동 취소 (${new Date(params.validUntilTime).toLocaleTimeString('ko-KR')})`);
+      }
       if (ackOrderId) {
         upsertLiveAltEntryOrderRegistry(
           liveKey,
@@ -3275,6 +3352,39 @@ function AppInner() {
     if (pending.length === 0) return null;
     return pending.sort((a, b) => b.requestedAt - a.requestedAt)[0];
   }, [timeStopRequests, hiddenTimeStopKeys]);
+
+  // ── Leader-retest GTC entry order expiry cancellation ──────────────────────
+  React.useEffect(() => {
+    if (!binanceApiKey || !binanceApiSecret) return;
+    const id = window.setInterval(() => {
+      const now = Date.now();
+      const orders = pendingRetestGtcOrdersRef.current;
+      for (const [liveKey, entry] of Object.entries(orders)) {
+        if (now < entry.expiresAt) continue;
+        addLog('info', `[ALT실전/retest] GTC LIMIT 만료 → 주문 취소 ${entry.symbol} #${entry.orderId}`);
+        futuresCancelOrder(entry.orderId, entry.symbol).catch(() => {});
+        // Remove from map and liveAltMetaMap (no position was opened)
+        setPendingRetestGtcOrders(prev => { const n = { ...prev }; delete n[liveKey]; return n; });
+        liveInFlightRef.current.delete(liveKey);
+      }
+    }, 15_000);
+    return () => clearInterval(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [binanceApiKey, binanceApiSecret]);
+  // Remove from GTC pending map once position opens (order filled)
+  React.useEffect(() => {
+    for (const [liveKey, meta] of Object.entries(liveAltMetaMap)) {
+      if (!meta.isGtcLimitEntry) continue;
+      const hasPosition = futuresAllPositions.some(p =>
+        p.symbol === meta.symbol && Math.abs(p.positionAmt) > 0 &&
+        (meta.direction === 'long' ? p.positionAmt > 0 : p.positionAmt < 0),
+      );
+      if (hasPosition && pendingRetestGtcOrdersRef.current[liveKey]) {
+        setPendingRetestGtcOrders(prev => { const n = { ...prev }; delete n[liveKey]; return n; });
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [futuresAllPositions]);
 
   const cleanupAltOrphanOrders = useCallback(async (entry: LiveAltOrderRegistryEntry) => {
     if (!entry.orders.length) {

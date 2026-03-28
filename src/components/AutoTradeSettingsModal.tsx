@@ -895,6 +895,11 @@ function SettingsEditor({
           <span style={s.hint}>
             시장가: 즉시 체결 (슬리피지 있음) · 지정가 IOC: 스캔 시점 가격으로 즉시 체결 시도, 미체결 시 자동 취소 (슬리피지 없음, 진입 실패 가능)
           </span>
+          {isLeaderRetest && (
+            <span style={{ ...s.hint, color: '#5b9cf6', marginTop: 2 }}>
+              ⚠ 리더-리테스트는 이 설정을 무시하고 entryZone 기반 지정가(LIMIT)로 진입합니다. TRIGGERED → LIMIT IOC, PENDING → GTC LIMIT(존 대기). MARKET 추격 진입 없음.
+            </span>
+          )}
         </div>
       )}
 

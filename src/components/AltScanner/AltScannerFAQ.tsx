@@ -1032,14 +1032,24 @@ TP1 도달 시: 포지션 50% 청산 (이익 실현)
           TP/SL 등록, 포지션 자동 모니터링까지 세 단계로 동작합니다.
         </P>
 
-        <Card title="① 실전 진입 로직" accent="#0ecb81">
+        <Card title="① 실전 진입 로직 (전략별 분기)" accent="#0ecb81">
           <Ul items={[
             '진입 방향 결정: direction → BUY(롱) / SELL(숏)',
             'PENDING 추세선 신호도 실전은 봉마감 대기 없이 즉시 진입 요청',
             '수량 계산 기준가는 신호별 계획값 사용 (PENDING=triggerPriceAtNextClose, TRIGGERED=entryPrice)',
-            '실제 실전 주문은 fill-oriented(MARKET) 경로로 접수',
-            '수량 계산: 모의와 동일한 마진 기준 (실전 설정 패널에서 지정)',
+            '돌파(breakout): 트리거라인과의 거리로 MARKET/LIMIT_IOC/스킵 결정',
+            'FVG/기타: 자동설정 "실전 진입 주문 방식"(MARKET 또는 LIMIT_IOC) 사용',
           ]} />
+          <div style={{ marginTop: 8, padding: '6px 10px', background: 'rgba(91,156,246,0.08)', border: '1px solid rgba(91,156,246,0.25)', borderRadius: 5, fontSize: '0.78rem' }}>
+            <b style={{ color: '#5b9cf6' }}>리더-리테스트 전용 진입 방식</b><br />
+            시장가(MARKET) 추격 진입 없음. entryZone 기반 지정가로만 진입합니다:
+            <ul style={{ margin: '4px 0 0 16px', padding: 0, lineHeight: 1.7 }}>
+              <li><b>TRIGGERED</b> (현재가 ∈ zone): LIMIT_IOC @ clamp(현재가, zoneLow, zoneHigh)</li>
+              <li><b>PENDING</b> (현재가 zone 미진입): resting GTC LIMIT @ idealEntry (flip level)</li>
+              <li><b>INVALID</b>: 진입 스킵 (구조 붕괴 / lateAbove 초과)</li>
+            </ul>
+            GTC 주문은 validUntilTime 경과 시 자동 취소됩니다.
+          </div>
         </Card>
 
         <Card title="② TP/SL 지연 등록 (pendingLiveTPSLMap)" accent="#f0b90b">

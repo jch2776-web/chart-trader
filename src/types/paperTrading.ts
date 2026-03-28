@@ -43,6 +43,10 @@ export interface AltMeta {
   strategyId?: string;
   // Leader-retest: close re-breach of flip level triggers immediate exit (failed auction)
   failedAuctionExitLevel?: number;
+  // Leader-retest zone-aware entry: resting GTC LIMIT was placed (not immediate fill)
+  isGtcLimitEntry?: boolean;
+  // Leader-retest: time at which the GTC entry order should be cancelled if unfilled
+  gtcEntryExpiresAt?: number;
 }
 
 export interface PaperPosition {
