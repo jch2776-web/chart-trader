@@ -63,7 +63,7 @@ export interface AutoTradeLog {
 
 export type ScanLifecycleEvent =
   | { type: 'interval_start'; interval: ScanInterval; symbolCount: number; boundaryTime: number; mode: 'scheduled' | 'manual' }
-  | { type: 'interval_done';  interval: ScanInterval; total: number; qualified: number; triggeredCount?: number; entered: number }
+  | { type: 'interval_done';  interval: ScanInterval; total: number; qualified: number; triggeredCount?: number; entered: number; invalidatedRetestKeys?: string[] }
   | { type: 'scan_done';      totalEntered: number; intervals: ScanInterval[]; mode: 'scheduled' | 'manual' };
 
 let logSeq = 0;
@@ -387,6 +387,12 @@ export function useAltAutoTrade({
       const invalidCount = isLeaderRetest
         ? candidates.filter(c => c.score >= scoreThreshold && c.status === 'INVALID').length
         : 0;
+      // Keys for INVALID retest candidates — App.tsx uses these to immediately cancel GTC orders.
+      const invalidatedRetestKeys: string[] = isLeaderRetest
+        ? candidates
+            .filter(c => c.status === 'INVALID')
+            .map(c => `${c.symbol}_${c.direction}`)
+        : [];
       // leader-retest: TRIGGERED = price in zone (immediate limit), PENDING = zone 미도달 (resting limit)
       // Both are eligible for entry; the live executor decides order type per status.
       const triggeredCount = isLeaderRetest
@@ -599,6 +605,7 @@ export function useAltAutoTrade({
         qualified: qualified.length,
         triggeredCount,
         entered: actualEnteredCount,
+        invalidatedRetestKeys: invalidatedRetestKeys.length > 0 ? invalidatedRetestKeys : undefined,
       });
     }
 

@@ -115,6 +115,10 @@ interface PendingLiveTPSL {
   entryOrderStatus?: string;
   entrySubmittedAt?: number;
   positionOpenedAt?: number;
+  // Diagnostic fields for GTC fill tracking
+  strategyId?: string;
+  candidateStatusAtEntry?: string;   // 'TRIGGERED' | 'PENDING' | etc.
+  isGtcLimitEntry?: boolean;
 }
 
 interface LiveAltOrderRegistryEntry {
@@ -1041,6 +1045,10 @@ function AppInner() {
     if (meta.liveEntryOrderId) {
       const byOrder = openRows.filter(r => r.orderId && String(r.orderId) === String(meta.liveEntryOrderId));
       if (byOrder.length > 0) openRows = byOrder;
+      else if (meta.isGtcLimitEntry) {
+        // GTC orders may fill in multiple partial rows; log when none match the order ID yet
+        addLog('info', `[ALT실전/retest] GTC 진입 체결 행 없음 (orderId:${meta.liveEntryOrderId}) — 재시도 대기`);
+      }
     }
     if (openRows.length === 0) return { found: false, nonUsdt: false };
 
@@ -1049,6 +1057,12 @@ function AppInner() {
     const entryFee = nonUsdt
       ? null
       : parseFloat(openRows.reduce((sum, r) => sum + r.commission, 0).toFixed(8));
+
+    if (meta.isGtcLimitEntry) {
+      const totalQty = openRows.reduce((s, r) => s + Math.abs(r.qty), 0);
+      addLog('info', `[ALT실전/retest] GTC 체결 캡처 — ${meta.symbol} rows:${openRows.length} qty:${totalQty.toFixed(4)} fee:${entryFee ?? 'non-USDT'}`);
+      appendAltLifecycleDebug({ action: 'gtc_fill_captured', symbol: meta.symbol, key: liveKey, orderId: meta.liveEntryOrderId, rows: openRows.length, totalQty, entryFee, entryTime });
+    }
 
     setLiveAltMetaMap(prev => {
       const cur = prev[liveKey];
@@ -1063,7 +1077,7 @@ function AppInner() {
       };
     });
     return { found: true, nonUsdt };
-  }, [futuresFetchUserTrades]);
+  }, [futuresFetchUserTrades, addLog, appendAltLifecycleDebug]);
 
   // ── Chart indicators ──────────────────────────────────────────────────
   const [indicators, setIndicators] = useState<IndicatorConfig>(() => {
@@ -1939,6 +1953,24 @@ function AppInner() {
       iv === '15m' ? '15분' : iv === '1h' ? '1시간' : iv === '4h' ? '4시간' : '일봉';
     if (event.type === 'interval_start') {
       speakSound(`${ivLabel(event.interval)} 타임프레임 스캔 시작`, { lang: 'ko-KR', rate: 1.1, pitch: 1.0 });
+    } else if (event.type === 'interval_done' && event.invalidatedRetestKeys?.length) {
+      // INVALID 재감지 → 해당 심볼의 resting GTC 주문 즉시 취소
+      const gtcOrders = pendingRetestGtcOrdersRef.current;
+      for (const key of event.invalidatedRetestKeys) {
+        const gtcEntry = gtcOrders[key];
+        if (!gtcEntry) continue;
+        // Skip if position already opened (order already filled)
+        const alreadyOpen = futuresAllPositionsRef.current.some(p =>
+          p.symbol === gtcEntry.symbol && Math.abs(p.positionAmt ?? 0) > 0 &&
+          (gtcEntry.direction === 'long' ? p.positionAmt > 0 : p.positionAmt < 0),
+        );
+        if (alreadyOpen) continue;
+        addLog('warn', `[ALT실전/retest] INVALID 재감지 → GTC 주문 즉시 취소 ${gtcEntry.symbol} #${gtcEntry.orderId}`);
+        futuresCancelOrder(gtcEntry.orderId, gtcEntry.symbol).catch(() => {});
+        appendAltLifecycleDebug({ action: 'gtc_cancel', reason: 'invalidated', symbol: gtcEntry.symbol, orderId: gtcEntry.orderId, key });
+        setPendingRetestGtcOrders(prev => { const n = { ...prev }; delete n[key]; return n; });
+        liveInFlightRef.current.delete(key);
+      }
     } else if (event.type === 'scan_done') {
       const entries = scanConfirmedEntriesRef.current;
       scanConfirmedEntriesRef.current = [];  // reset for next scan
@@ -1949,7 +1981,7 @@ function AppInner() {
       }
       // entries > 0 → 개별 진입 확정 음성(announceAltEntry)이 실제 주문 성공 후 각자 발화됨
     }
-  }, [speakSound]);
+  }, [speakSound, addLog, appendAltLifecycleDebug, futuresCancelOrder, setPendingRetestGtcOrders]);
 
   const activeAutoTradeSettings = autoTradeMode === 'live' ? liveAutoTradeSettings : paperAutoTradeSettings;
   const altAutoTrade = useAltAutoTrade({
@@ -2531,9 +2563,12 @@ function AppInner() {
           entryOrderId: ackOrderId,
           entryOrderStatus: ackStatus,
           entrySubmittedAt: submittedAt,
+          strategyId: params.strategyId,
+          candidateStatusAtEntry: params.candidateStatus,
+          isGtcLimitEntry: isLimitGtc || undefined,
         },
       }));
-      addLog('info', `[ALT실전] TP/SL 대기 등록 — 포지션 체결 확인 후 자동 적용`);
+      addLog('info', `[ALT실전] TP/SL 대기 등록 — 포지션 체결 확인 후 자동 적용${isLimitGtc ? ' (GTC — 체결 후 적용)' : ''}`);
 
       // Entry fill capture: immediate attempt + bounded retries
       liveEntryFillRetryRef.current[liveKey] = {
@@ -2707,7 +2742,10 @@ function AppInner() {
           if (!cur || cur.positionOpenedAt) return prev;
           return { ...prev, [key]: { ...cur, positionOpenedAt: openedAt } };
         });
-        addLog('info', `[ALT실전] ${entry.symbol} 포지션 체결 확인 — TP/SL 등록 시작`);
+        addLog('info', `[ALT실전] ${entry.symbol} 포지션 체결 확인 — TP/SL 등록 시작${entry.isGtcLimitEntry ? ' (GTC LIMIT 체결)' : ''}`);
+        if (entry.isGtcLimitEntry) {
+          appendAltLifecycleDebug({ action: 'gtc_fill_detected', symbol: entry.symbol, key, strategyId: entry.strategyId, candidateStatusAtEntry: entry.candidateStatusAtEntry, qty: Math.abs(pos.positionAmt), entryPrice: pos.entryPrice });
+        }
       }
 
       // Only enforce timeout after position actually opened.
@@ -2741,7 +2779,10 @@ function AppInner() {
         },
       )
         .then(() => {
-          addLog('info', `[ALT실전] TP/SL 등록 완료 — ${entry.symbol} qty:${actualQty} TP:${entry.tp ?? '—'} SL:${entry.sl ?? '—'}`);
+          addLog('info', `[ALT실전] TP/SL 등록 완료 — ${entry.symbol} qty:${actualQty} TP:${entry.tp ?? '—'} SL:${entry.sl ?? '—'}${entry.isGtcLimitEntry ? ' [GTC]' : ''}`);
+          if (entry.isGtcLimitEntry) {
+            appendAltLifecycleDebug({ action: 'gtc_tpsl_attached', symbol: entry.symbol, key, strategyId: entry.strategyId, tp: entry.tp, sl: entry.sl, qty: actualQty });
+          }
           setPendingLiveTPSLMap(prev => { const n = { ...prev }; delete n[key]; return n; });
         })
         .catch((e: unknown) => {
@@ -2749,7 +2790,7 @@ function AppInner() {
         })
         .finally(() => { inFlightTPSLRef.current.delete(key); });
     }
-  }, [futuresAllPositions, futuresAllOrders, pendingLiveTPSLMap, addLog, upsertLiveAltOrderRegistry]);
+  }, [futuresAllPositions, futuresAllOrders, pendingLiveTPSLMap, addLog, upsertLiveAltOrderRegistry, appendAltLifecycleDebug]);
 
   const inferLiveCloseReason = useCallback((meta: AltMeta, exitPrice: number | null): LiveCloseReason => {
     if (exitPrice == null || !isFinite(exitPrice) || exitPrice <= 0) return 'unknown';
