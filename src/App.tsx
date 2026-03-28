@@ -1967,6 +1967,8 @@ function AppInner() {
     breakoutDirection: activeAutoTradeSettings.breakoutDirection ?? 'both',
     minCandidateScore: activeAutoTradeSettings.minCandidateScore ?? 90,
     breakoutMaxBarsAfterTrigger: activeAutoTradeSettings.breakoutMaxBarsAfterTrigger ?? 0,
+    maxSpreadBps: activeAutoTradeSettings.maxSpreadBps ?? 4,
+    maxRiskPct: activeAutoTradeSettings.maxRiskPct ?? 0.025,
     maxAbsLossUsd: activeAutoTradeSettings.maxAbsLossUsd ?? 0,
     estimatedNotionalPerTrade:
       activeAutoTradeSettings.sizeMode === 'margin'

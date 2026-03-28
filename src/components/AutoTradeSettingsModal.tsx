@@ -150,6 +150,8 @@ export interface AutoTradeSettings {
   fvgUniverseTopN?: number;
   fvgAutoDirection?: 'long' | 'short' | 'both';
   // Risk gates (lab-compatible)
+  maxSpreadBps?: number;             // leader-retest: block when bid-ask spread > N bps (0 = disable, default 4)
+  maxRiskPct?: number;               // leader-retest: block when |entry-SL|/entry > N% (0 = disable, default 2.5)
   maxAbsLossUsd?: number;            // leader-retest: block entry if abs-loss (riskFrac × notional) > this (0 = disable)
   timeStopBars?: number;             // N bars from entry → market close if TP/SL not hit (0 = use signal TTL, default 4)
   cooldownBarsAfterLoss?: number;    // skip N bars of same TF after a losing trade (0 = disabled, default 0)
@@ -698,6 +700,39 @@ function SettingsEditor({
           <span style={s.hint}>
             최소/최대봉: 돌파 후 몇 봉 이내에 리테스트가 와야 하는지. 허용폭: 레벨과의 근접도(ATR 배수). 자동매매는 기본 롱만 권장.
             4H 추세 필터 ON 시 4H EMA20 &gt; EMA50인 경우에만 롱 진입.
+          </span>
+
+          {/* Leader-retest entry gates */}
+          <div style={{ fontSize: '0.72rem', color: '#3b8beb', fontWeight: 700, marginTop: 4 }}>진입 게이트 (리더-리테스트 전용)</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap' as const, gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>최대 스프레드</span>
+              <input type="number" min={0} max={50} step={0.5}
+                value={draft.maxSpreadBps ?? 4}
+                onChange={e => set('maxSpreadBps', Math.max(0, parseFloat(e.target.value) || 0))}
+                style={{ ...s.numberInput, width: 60 }} />
+              <span style={s.unit}>bps</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>최대 리스크%</span>
+              <input type="number" min={0} max={20} step={0.1}
+                value={(draft.maxRiskPct ?? 0.025) * 100}
+                onChange={e => set('maxRiskPct', Math.max(0, Math.min(20, parseFloat(e.target.value) || 0)) / 100)}
+                style={{ ...s.numberInput, width: 60 }} />
+              <span style={s.unit}>%</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>최대 손실$</span>
+              <input type="number" min={0} max={10000} step={1}
+                value={draft.maxAbsLossUsd ?? 0}
+                onChange={e => set('maxAbsLossUsd', Math.max(0, parseFloat(e.target.value) || 0))}
+                style={{ ...s.numberInput, width: 70 }} />
+              <span style={s.unit}>USDT</span>
+            </div>
+          </div>
+          <span style={s.hint}>
+            스프레드: 호가 스프레드 초과 시 차단 (0 = 비활성). 리스크%: |진입-손절|/진입가 비율 상한 (0 = 비활성).
+            최대손실$: 비율×포지션 크기의 USDT 상한 (0 = 비활성, margin모드 전용).
           </span>
         </div>
       )}

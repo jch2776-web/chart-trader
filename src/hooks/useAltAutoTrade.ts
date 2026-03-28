@@ -7,7 +7,7 @@ import { createFvgPocEma72Scan } from '../components/AltScanner/strategies/fvgPo
 import type { FvgPocOptions } from '../components/AltScanner/strategies/fvgPocEma72';
 import type { ScanFn } from '../components/AltScanner/strategyTypes';
 import { getBinanceGovernorSnapshot } from '../lib/binanceRequestGovernor';
-import { subscribeBookTicker, getSpreadBps } from '../lib/binanceBookTicker';
+import { subscribeBookTicker, getSpreadBps, unsubscribeBookTicker } from '../lib/binanceBookTicker';
 
 /** Price formatter: ≥1 uses 2dp, otherwise 6dp (handles small-cap crypto). */
 function fmtPrice(p: number): string {
@@ -180,6 +180,8 @@ export function useAltAutoTrade({
   const maxRiskPctRef             = useRef(maxRiskPct ?? 0.025);
   const maxAbsLossUsdRef          = useRef(maxAbsLossUsd ?? 0);
   const estimatedNotionalRef      = useRef(estimatedNotionalPerTrade ?? 0);
+  /** Tracks symbols currently subscribed via bookTicker — enables targeted cleanup. */
+  const subscribedBookTickersRef  = useRef(new Set<string>());
   isActiveRef.current             = isActive;
   symbolsRef.current              = symbols;
   onEnterRef.current              = onEnterTrade;
@@ -439,6 +441,7 @@ export function useAltAutoTrade({
           // Gate 3: spread — subscribe to live bookTicker then read freshest value.
           // subscribeBookTicker is idempotent; gate is skipped (not blocked) when data unavailable.
           subscribeBookTicker(c.symbol);
+          subscribedBookTickersRef.current.add(c.symbol);
           const spreadBpsNow = c.spreadBps ?? getSpreadBps(c.symbol);
           if (spreadBpsNow != null && maxSpreadBpsRef.current > 0) {
             if (spreadBpsNow > maxSpreadBpsRef.current) {
@@ -533,6 +536,18 @@ export function useAltAutoTrade({
       });
     }
 
+    // ── BookTicker cleanup: unsubscribe symbols no longer in the scan list ──
+    // Only runs for leader-retest; subscribedBookTickersRef is empty for other strategies.
+    if (isLeaderRetest) {
+      const currentSymbols = new Set(syms);
+      for (const sym of subscribedBookTickersRef.current) {
+        if (!currentSymbols.has(sym)) {
+          unsubscribeBookTicker(sym);
+          subscribedBookTickersRef.current.delete(sym);
+        }
+      }
+    }
+
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
     const firstReadyText = firstCandidateReadyAt != null
       ? `${Math.max(0, Math.round((firstCandidateReadyAt - startTime) / 1000))}s`
@@ -581,6 +596,29 @@ export function useAltAutoTrade({
 
     return () => clearInterval(timer);
   }, [cadenceMinutes]);
+
+  // ── BookTicker WS lifecycle: unsubscribe all on strategy change or unmount ───
+  useEffect(() => {
+    // When strategy changes away from leader-retest, tear down all WS connections
+    // that were opened for spread-gate checking.
+    if (strategyIdRef.current !== 'leader-retest') {
+      for (const sym of subscribedBookTickersRef.current) {
+        unsubscribeBookTicker(sym);
+      }
+      subscribedBookTickersRef.current.clear();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [strategyId]);
+
+  useEffect(() => {
+    // Unmount cleanup: release all open bookTicker WS connections.
+    return () => {
+      for (const sym of subscribedBookTickersRef.current) {
+        unsubscribeBookTicker(sym);
+      }
+      subscribedBookTickersRef.current.clear();
+    };
+  }, []);
 
   // ── Manual trigger ───────────────────────────────────────────────────────────
   const triggerNow = useCallback(() => {

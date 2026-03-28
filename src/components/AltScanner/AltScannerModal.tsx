@@ -349,7 +349,26 @@ function TradingInfoPanel({
           borderColor: isLong ? '#0ecb81' : '#f6465d',
         }}>{isLong ? '▲ 롱 매수' : '▼ 숏 매도'}</span>
 
-        <MBadge num="①" label="진입가" value={pf(c.entryPrice)} color="#f0b90b" />
+        {c.strategyId === 'leader-retest' && c.orderPlan != null ? (
+          <>
+            {/* Leader-retest: show entry zone + status badge instead of single entry price */}
+            <div style={{ display: 'flex', flexDirection: 'column' as const, alignItems: 'center', minWidth: 80 }}>
+              <span style={{ fontSize: '0.63rem', color: '#848e9c', textTransform: 'uppercase' as const, letterSpacing: '0.04em' }}>진입존</span>
+              <span style={{ fontSize: '0.78rem', color: '#f0b90b', fontWeight: 600 }}>
+                {pf(c.orderPlan.entryZoneLow)}~{pf(c.orderPlan.entryZoneHigh)}
+              </span>
+              <span style={{
+                fontSize: '0.60rem', fontWeight: 700, padding: '1px 5px', borderRadius: 3, marginTop: 2,
+                background: c.status === 'TRIGGERED' ? 'rgba(14,203,129,0.18)' : 'rgba(240,185,11,0.13)',
+                color: c.status === 'TRIGGERED' ? '#0ecb81' : '#f0b90b',
+              }}>
+                {c.status === 'TRIGGERED' ? '✓ 진입존 진입' : '⏳ 대기중'}
+              </span>
+            </div>
+          </>
+        ) : (
+          <MBadge num="①" label="진입가" value={pf(c.entryPrice)} color="#f0b90b" />
+        )}
         <div style={S.msep} />
         <MBadge num="④" label="손절 SL" value={pf(c.slPrice)} sub={pctStr(slPct)} color="#f6465d" />
         {tp1Pct != null && c.tp1Price != null && (
@@ -715,6 +734,48 @@ function TradingInfoPanel({
         </div>
       )}
 
+      {/* Leader-retest: scoreBreakdown + orderPlan highlights */}
+      {c.strategyId === 'leader-retest' && (c.scoreBreakdown != null || c.orderPlan != null) && (
+        <div style={{ display: 'flex', flexWrap: 'wrap' as const, gap: 8, padding: '6px 10px', background: 'rgba(59,139,235,0.05)', border: '1px solid rgba(59,139,235,0.18)', borderRadius: 6, fontSize: '0.74rem' }}>
+          {c.scoreBreakdown != null && (
+            <div style={{ display: 'flex', gap: 5, alignItems: 'center', flexWrap: 'wrap' as const }}>
+              <span style={{ color: '#5e6673', fontSize: '0.67rem' }}>스코어:</span>
+              {([
+                ['리더', c.scoreBreakdown.leaderScore],
+                ['임펄스', c.scoreBreakdown.impulseScore],
+                ['풀백', c.scoreBreakdown.pullbackScore],
+                ['위치', c.scoreBreakdown.locationScore],
+                ['공간', c.scoreBreakdown.airScore],
+              ] as [string, number][]).map(([label, val]) => (
+                <span key={label} style={{
+                  padding: '1px 5px', borderRadius: 3,
+                  background: val >= 0.6 ? 'rgba(14,203,129,0.12)' : val >= 0.35 ? 'rgba(240,185,11,0.10)' : 'rgba(246,70,93,0.10)',
+                  color: val >= 0.6 ? '#0ecb81' : val >= 0.35 ? '#f0b90b' : '#f6465d',
+                  fontSize: '0.67rem', fontWeight: 600,
+                }}>
+                  {label} {(val * 100).toFixed(0)}
+                </span>
+              ))}
+            </div>
+          )}
+          {c.orderPlan != null && (
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' as const, color: '#9aa4b5' }}>
+              {c.orderPlan.failedAuctionExitLevel != null && (
+                <span title="플립레벨 재돌파 시 즉시 청산 (실패 경매 레벨)">
+                  🔄 FAEL {pf(c.orderPlan.failedAuctionExitLevel)}
+                </span>
+              )}
+              <span title="진입 후 N봉 내 TP 미도달 시 청산">
+                ⏱ {c.orderPlan.timeStopBars}봉 타임스탑
+              </span>
+              <span title="러너 모드: 수익구간에서 포지션 유지 방식">
+                🏃 {c.orderPlan.runnerMode === 'trail' ? '추적' : c.orderPlan.runnerMode === 'none' ? '전량' : c.orderPlan.runnerMode}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Row 2: 4 explanation blocks */}
       <div style={S.blockRow}>
         <InfoBlock icon="📌" title="진입 조건">
@@ -760,6 +821,19 @@ function TradingInfoPanel({
               {(c as any).pocPrice != null && (
                 <div>POC <b>{pf((c as any).pocPrice)}</b>{(c as any).fvgEma != null ? ` · EMA72 ${pf((c as any).fvgEma)}` : ''}</div>
               )}
+            </>
+          ) : c.strategyId === 'leader-retest' && c.scoreBreakdown != null ? (
+            <>
+              <div>
+                리더 <b style={{ color: c.scoreBreakdown.leaderScore >= 0.6 ? '#0ecb81' : '#f0b90b' }}>{(c.scoreBreakdown.leaderScore * 100).toFixed(0)}</b>
+                {' '}풀백 <b style={{ color: c.scoreBreakdown.pullbackScore >= 0.6 ? '#0ecb81' : '#f0b90b' }}>{(c.scoreBreakdown.pullbackScore * 100).toFixed(0)}</b>
+                {' '}위치 <b style={{ color: c.scoreBreakdown.locationScore >= 0.6 ? '#0ecb81' : '#f0b90b' }}>{(c.scoreBreakdown.locationScore * 100).toFixed(0)}</b>
+              </div>
+              <div>
+                임펄스 <b style={{ color: c.scoreBreakdown.impulseScore >= 0.6 ? '#0ecb81' : '#f0b90b' }}>{(c.scoreBreakdown.impulseScore * 100).toFixed(0)}</b>
+                {' '}공간 <b style={{ color: c.scoreBreakdown.airScore >= 0.6 ? '#0ecb81' : '#f0b90b' }}>{(c.scoreBreakdown.airScore * 100).toFixed(0)}</b>
+                {' '}· SR {c.srLevels.length}개
+              </div>
             </>
           ) : (
             <>
