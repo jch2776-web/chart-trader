@@ -387,16 +387,22 @@ export function useAltAutoTrade({
       const invalidCount = isLeaderRetest
         ? candidates.filter(c => c.score >= scoreThreshold && c.status === 'INVALID').length
         : 0;
-      // triggeredCount: qualified candidates already in the entry zone (TRIGGERED status).
-      // For non-leader-retest strategies all qualified are treated as triggered.
+      // leader-retest: TRIGGERED = price in zone (immediate limit), PENDING = zone 미도달 (resting limit)
+      // Both are eligible for entry; the live executor decides order type per status.
       const triggeredCount = isLeaderRetest
         ? qualified.filter(c => c.status === 'TRIGGERED').length
         : qualified.length;
+      const pendingCount = isLeaderRetest
+        ? qualified.filter(c => c.status === 'PENDING').length
+        : 0;
+      const eligibleCount = isLeaderRetest ? qualified.length : qualified.length;
       addLog(
-        `[${interval}] 완료 — 전체 ${candidates.length}개 · ${scoreThreshold}점+ ${qualified.length + invalidCount}개` +
-        (invalidCount > 0 ? ` (LATE/INVALID ${invalidCount}개 제외)` : '') +
-        (isLeaderRetest ? ` · 진입존 ${triggeredCount}개` : ` · 진입대상 ${qualified.length}개`),
-        triggeredCount > 0 ? 'success' : (candidates.length > 0 ? 'warn' : 'info'),
+        `[${interval}] 완료 — 전체 ${candidates.length}개 · ${scoreThreshold}점+ ${eligibleCount + invalidCount}개` +
+        (invalidCount > 0 ? ` (INVALID ${invalidCount}개 제외)` : '') +
+        (isLeaderRetest
+          ? ` · 진입가능 ${eligibleCount}개 (TRIGGERED ${triggeredCount} / PENDING ${pendingCount})`
+          : ` · 진입대상 ${qualified.length}개`),
+        eligibleCount > 0 ? 'success' : (candidates.length > 0 ? 'warn' : 'info'),
       );
       // interval_done fires AFTER the per-candidate loop so `entered` reflects actual calls.
       // Declared here, emitted below.
@@ -443,16 +449,19 @@ export function useAltAutoTrade({
 
         // ── Leader-retest pre-entry gates ────────────────────────────────────
         if (isLeaderRetest) {
-          // Gate 1: only TRIGGERED (price inside entry zone) may proceed.
-          // INVALID = price past lateAbove → chasing; PENDING = not yet in zone.
+          // Gate 1: status routing
+          //   TRIGGERED → price inside entry zone → executor sends LIMIT_IOC
+          //   PENDING   → zone 미도달, setup alive → executor sends resting LIMIT_GTC
+          //   INVALID   → chasing / lateAbove 초과 / 구조 무효 → 진입 금지
           if (c.status === 'INVALID') {
-            // Defensive: should already be pre-filtered above, but guard explicitly.
-            addLog(`⛔ [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — LATE/INVALID (lateAbove 초과) → 추격 진입 금지`, 'warn');
+            // Defensive: pre-filtered above, but guard explicitly.
+            addLog(`⛔ [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — INVALID (lateAbove 초과 또는 구조 무효) → 추격 진입 금지`, 'warn');
             continue;
           }
-          if (c.status !== 'TRIGGERED') {
-            addLog(`⏭ [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — 상태 ${c.status ?? '?'} (TRIGGERED 아님) → 진입 대기`, 'info');
-            continue;
+          if (c.status === 'TRIGGERED') {
+            addLog(`[자동매매/retest] [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — TRIGGERED → immediate LIMIT_IOC 후보`, 'info');
+          } else if (c.status === 'PENDING') {
+            addLog(`[자동매매/retest] [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — PENDING → resting LIMIT_GTC 후보 (zone 진입 대기)`, 'info');
           }
           // Gate 2: cancelAfterBars — discard order blueprint if scan is stale.
           // Uses bar-index arithmetic (same pattern as breakout gate).
@@ -554,13 +563,14 @@ export function useAltAutoTrade({
           const riskPct = c.entryPrice > 0
             ? ((Math.abs(c.entryPrice - op.hardStop) / c.entryPrice) * 100).toFixed(2)
             : '?';
+          const orderTypeHint = c.status === 'TRIGGERED' ? 'LIMIT_IOC' : c.status === 'PENDING' ? 'LIMIT_GTC' : c.status;
           addLog(
             `🔍 [${interval}] 후보 → ${c.symbol} ${c.direction.toUpperCase()} ` +
             `총${c.score}pts (${scoresStr}) | ` +
-            `진입존 ${fmtPrice(op.entryZoneLow)}~${fmtPrice(op.entryZoneHigh)} ` +
+            `진입존 ${fmtPrice(op.entryZoneLow)}~${fmtPrice(op.entryZoneHigh)} ideal=${fmtPrice(op.idealEntry)} ` +
             `HardStop ${fmtPrice(op.hardStop)} (리스크 ${riskPct}%) ` +
             `TP1 ${fmtPrice(op.tp1)} | ` +
-            `상태 ${c.status} runner:${op.runnerMode}`,
+            `상태 ${c.status} → ${orderTypeHint} runner:${op.runnerMode}`,
             'info',
           );
         } else {

@@ -1859,7 +1859,10 @@ function AppInner() {
       riskPct:    autoSettings.riskPct,
       candidateId: `${c.symbol}_${c.direction}_${c.asOfCloseTime}`,
       candidateScore: c.score,
-      plannedEntry: c.entryPrice,
+      // leader-retest: plannedEntry = idealEntry (flip level = strategy reference price).
+      // entryPrice is the same value (set by leaderRetest.ts) but use orderPlan explicitly for clarity.
+      // Actual order submit price is determined zone-aware in the live executor (params.orderPlan).
+      plannedEntry: isRetest && c.orderPlan ? c.orderPlan.idealEntry : c.entryPrice,
       plannedTP: c.tpPrice ?? null,
       plannedSL: c.slPrice ?? null,
       scanInterval: c.interval,
@@ -1884,12 +1887,23 @@ function AppInner() {
       entryDriftPct,
       strategyId: c.strategyId,
       triggerLinePrice: c.triggerSpec ? triggerPrice(c.triggerSpec, c.asOfCloseTime) : undefined,
+      // leader-retest: failedAuctionExitLevel is kept at top-level for AltMeta/monitor compat,
+      // AND the full orderPlan is forwarded so the live executor can use zone-aware limit entry.
       failedAuctionExitLevel: isRetest ? c.orderPlan?.failedAuctionExitLevel : undefined,
+      orderPlan: isRetest ? c.orderPlan : undefined,
     };
     // All filters passed — log confirmed entry attempt and record for scan-done voice
-    addLog('order',
-      `[자동매매] ✅ ${autoTradeModeRef.current === 'live' ? '실전' : '모의'}진입 확정: ${c.symbol} ${c.direction.toUpperCase()} [${c.interval}] 점수${c.score} 진입${c.entryPrice.toFixed(4)} SL${c.slPrice.toFixed(4)} TP${c.tpPrice.toFixed(4)}`,
-    );
+    if (isRetest && c.orderPlan) {
+      const op = c.orderPlan;
+      addLog('order',
+        `[자동매매/retest] ✅ ${autoTradeModeRef.current === 'live' ? '실전' : '모의'}진입 확정: ${c.symbol} ${c.direction.toUpperCase()} [${c.interval}] ` +
+        `점수${c.score} 상태:${c.status} | orderPlan 전달 zone=[${op.entryZoneLow.toFixed(4)}~${op.entryZoneHigh.toFixed(4)}] ideal=${op.idealEntry.toFixed(4)}`,
+      );
+    } else {
+      addLog('order',
+        `[자동매매] ✅ ${autoTradeModeRef.current === 'live' ? '실전' : '모의'}진입 확정: ${c.symbol} ${c.direction.toUpperCase()} [${c.interval}] 점수${c.score} 진입${c.entryPrice.toFixed(4)} SL${c.slPrice.toFixed(4)} TP${c.tpPrice.toFixed(4)}`,
+      );
+    }
     scanConfirmedEntriesRef.current.push({
       symbol:    c.symbol,
       direction: c.direction,
