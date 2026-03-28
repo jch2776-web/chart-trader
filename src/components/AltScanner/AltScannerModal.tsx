@@ -746,24 +746,43 @@ function TradingInfoPanel({
       {c.strategyId === 'leader-retest' && (c.scoreBreakdown != null || c.orderPlan != null) && (
         <div style={{ display: 'flex', flexWrap: 'wrap' as const, gap: 8, padding: '6px 10px', background: 'rgba(59,139,235,0.05)', border: '1px solid rgba(59,139,235,0.18)', borderRadius: 6, fontSize: '0.74rem' }}>
           {c.scoreBreakdown != null && (
-            <div style={{ display: 'flex', gap: 5, alignItems: 'center', flexWrap: 'wrap' as const }}>
-              <span style={{ color: '#5e6673', fontSize: '0.67rem' }}>스코어:</span>
-              {([
-                ['리더', c.scoreBreakdown.leaderScore],
-                ['임펄스', c.scoreBreakdown.impulseScore],
-                ['풀백', c.scoreBreakdown.pullbackScore],
-                ['위치', c.scoreBreakdown.locationScore],
-                ['공간', c.scoreBreakdown.airScore],
-              ] as [string, number][]).map(([label, val]) => (
-                <span key={label} style={{
-                  padding: '1px 5px', borderRadius: 3,
-                  background: val >= 0.6 ? 'rgba(14,203,129,0.12)' : val >= 0.35 ? 'rgba(240,185,11,0.10)' : 'rgba(246,70,93,0.10)',
-                  color: val >= 0.6 ? '#0ecb81' : val >= 0.35 ? '#f0b90b' : '#f6465d',
-                  fontSize: '0.67rem', fontWeight: 600,
-                }}>
-                  {label} {(val * 100).toFixed(0)}
-                </span>
-              ))}
+            <div style={{ display: 'flex', flexDirection: 'column' as const, gap: 4 }}>
+              <div style={{ display: 'flex', gap: 5, alignItems: 'center', flexWrap: 'wrap' as const }}>
+                <span style={{ color: '#5e6673', fontSize: '0.67rem' }}>스코어:</span>
+                {([
+                  ['리더', c.scoreBreakdown.leaderScore],
+                  ['임펄스', c.scoreBreakdown.impulseScore],
+                  ['풀백', c.scoreBreakdown.pullbackScore],
+                  ['위치', c.scoreBreakdown.locationScore],
+                  ['공간', c.scoreBreakdown.airScore],
+                ] as [string, number][]).map(([label, val]) => (
+                  <span key={label} style={{
+                    padding: '1px 5px', borderRadius: 3,
+                    background: val >= 0.6 ? 'rgba(14,203,129,0.12)' : val >= 0.35 ? 'rgba(240,185,11,0.10)' : 'rgba(246,70,93,0.10)',
+                    color: val >= 0.6 ? '#0ecb81' : val >= 0.35 ? '#f0b90b' : '#f6465d',
+                    fontSize: '0.67rem', fontWeight: 600,
+                  }}>
+                    {label} {(val * 100).toFixed(0)}
+                  </span>
+                ))}
+              </div>
+              {(c.scoreBreakdown.penalties.execution > 0 || c.scoreBreakdown.penalties.crowding > 0) && (
+                <div style={{ display: 'flex', gap: 5, alignItems: 'center', flexWrap: 'wrap' as const }}>
+                  <span style={{ color: '#5e6673', fontSize: '0.67rem' }}>패널티:</span>
+                  {c.scoreBreakdown.penalties.execution > 0 && (
+                    <span style={{ padding: '1px 5px', borderRadius: 3, background: 'rgba(246,70,93,0.10)', color: '#f6465d', fontSize: '0.67rem', fontWeight: 600 }}
+                      title={`spread/depth 패널티 — 체결 비용 높음`}>
+                      체결 -{(c.scoreBreakdown.penalties.execution * 100).toFixed(0)}
+                    </span>
+                  )}
+                  {c.scoreBreakdown.penalties.crowding > 0 && (
+                    <span style={{ padding: '1px 5px', borderRadius: 3, background: 'rgba(240,185,11,0.10)', color: '#f0b90b', fontSize: '0.67rem', fontWeight: 600 }}
+                      title={`포지션 중복/방향 과밀 패널티`}>
+                      크라우딩 -{(c.scoreBreakdown.penalties.crowding * 100).toFixed(0)}
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           )}
           {c.orderPlan != null && (
@@ -777,7 +796,7 @@ function TradingInfoPanel({
                 ⏱ {c.orderPlan.timeStopBars}봉 타임스탑
               </span>
               <span title="러너 모드: 수익구간에서 포지션 유지 방식">
-                🏃 {c.orderPlan.runnerMode === 'trail' ? '추적' : c.orderPlan.runnerMode === 'none' ? '전량' : c.orderPlan.runnerMode}
+                🏃 {c.orderPlan.runnerMode === 'avwap' ? 'AVWAP' : c.orderPlan.runnerMode === 'ema9' ? 'EMA9' : c.orderPlan.runnerMode}
               </span>
             </div>
           )}

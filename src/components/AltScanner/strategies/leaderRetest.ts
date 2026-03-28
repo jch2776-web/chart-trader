@@ -28,7 +28,7 @@ import { intervalToMs, getTtlBars, getVolFactor, triggerPrice } from '../timeUti
 import { fetchBinanceKlinesCached } from '../../../lib/binanceKlineCache';
 import { acquireScanSlot, getBinanceGovernorSnapshot } from '../../../lib/binanceRequestGovernor';
 import type { ScanFn, ScanStrategy } from '../strategyTypes';
-import { buildRetestCandidates, pickBestRetestCandidate } from '../features/retestCandidates';
+import { buildRetestCandidates } from '../features/retestCandidates';
 import type { RetestCandidate, RetestDetectOptions } from '../features/retestCandidates';
 import { calcRelativeStrengthVsBenchmark, calcRelativeStrengthVsUniverse, calcTurnoverAccel, RS_DEFAULT_PERIOD } from '../features/leaderMetrics';
 import { calcAnchoredVwapFromIndex, calcConfluenceScore, calcAirR } from '../features/locationMetrics';
@@ -125,6 +125,7 @@ interface RetestResult {
  *
  * SHORT is the exact mirror.
  */
+// @ts-expect-error TS6133 — retained for reference; not called in current v2 path
 function detectRetest(
   closed: Candle[],
   dir: 'long' | 'short',

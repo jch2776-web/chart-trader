@@ -138,6 +138,9 @@ export interface AutoTradeSettings {
   retestMaxOvershootAtr?: number;    // max allowed overshoot beyond level in ATR multiples (default 1.5)
   retestAutoDirection?: 'long' | 'both'; // scan direction for unattended auto-trade (default 'long')
   retestRequire4hTrend?: boolean;    // require 4H EMA20 > EMA50 for LONG entry (default true)
+  // Leader-retest market regime filter
+  retestRegimeFilter?: boolean;      // ON = apply BTC trend + breadth regime gate to auto-entry (default true)
+  retestRegimeStrictness?: 'relaxed' | 'normal' | 'strict'; // how aggressively regime adjusts threshold/pending (default 'normal')
   // Breakout-specific direction override (default 'both')
   breakoutDirection?: 'long' | 'short' | 'both';
   // Breakout live entry precision controls (only used when strategyId === 'breakout' AND mode === 'live')
@@ -212,6 +215,8 @@ export const DEFAULT_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
   retestToleranceAtr: 0.50,
   retestMaxOvershootAtr: 1.5,
   retestRequire4hTrend: true,
+  retestRegimeFilter: true,
+  retestRegimeStrictness: 'normal',
   retestAutoDirection: 'long',
   maxSpreadBps: 4,
   maxRiskPct: 0.025,
@@ -248,6 +253,8 @@ export const DEFAULT_LIVE_AUTO_TRADE_SETTINGS: AutoTradeSettings = {
   retestToleranceAtr: 0.50,
   retestMaxOvershootAtr: 1.5,
   retestRequire4hTrend: true,
+  retestRegimeFilter: true,
+  retestRegimeStrictness: 'normal',
   retestAutoDirection: 'long',
   maxSpreadBps: 4,
   maxRiskPct: 0.025,
@@ -721,6 +728,34 @@ function SettingsEditor({
           <span style={s.hint}>
             최소/최대봉: 돌파 후 몇 봉 이내에 리테스트가 와야 하는지 (기본 1~12봉). 허용폭: 레벨 터치 인정 범위(기본 0.5×ATR). 오버슈트: 현재가 허용 상한(기본 1.5×ATR).
             4H 추세 필터 ON(기본): EMA20 &gt; EMA50 상승 추세 코인만 롱 허용 — 하락장/횡보장에서는 롱 후보가 대폭 줄 수 있음. OFF 시 추세 무관 롱 탐지.
+          </span>
+
+          {/* Market regime filter */}
+          <div style={{ fontSize: '0.72rem', color: '#3b8beb', fontWeight: 700, marginTop: 6 }}>시장 레짐 필터 (리더-리테스트 자동매매 전용)</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' as const }}>
+            <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>레짐 필터</span>
+            <button
+              style={{ ...s.toggleChip, ...((draft.retestRegimeFilter ?? true) ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
+              onClick={() => set('retestRegimeFilter', !(draft.retestRegimeFilter ?? true))}>
+              {(draft.retestRegimeFilter ?? true) ? 'ON' : 'OFF'}
+            </button>
+            {(draft.retestRegimeFilter ?? true) && (
+              <>
+                <span style={{ fontSize: '0.74rem', color: '#9aa4b5', marginLeft: 8, whiteSpace: 'nowrap' as const }}>강도</span>
+                {(['relaxed', 'normal', 'strict'] as const).map(preset => (
+                  <button key={preset}
+                    style={{ ...s.toggleChip, ...((draft.retestRegimeStrictness ?? 'normal') === preset ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
+                    onClick={() => set('retestRegimeStrictness', preset)}>
+                    {preset === 'relaxed' ? '완화' : preset === 'normal' ? '기본' : '엄격'}
+                  </button>
+                ))}
+              </>
+            )}
+          </div>
+          <span style={s.hint}>
+            🌡 BTCUSDT 4H·1H EMA 추세 + 스캔 breadth 로 시장 레짐(bull/neutral/chop/bear)을 판단하고 자동매매 진입 강도를 조절합니다.
+            bull → 기본 동작. neutral[엄격] → 기준점수 +5. chop → PENDING GTC 억제 + [엄격] +10점. bear → long 자동진입 중단(양방향 모드 시 short만 허용).
+            수동 스캔 후보 표시는 레짐 필터와 무관하게 유지됩니다.
           </span>
 
           {/* Leader-retest entry gates */}

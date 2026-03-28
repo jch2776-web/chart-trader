@@ -16,19 +16,123 @@
  *       − penalties.execution
  *
  * Each sub-score is normalised to [0, 1] before weighting.
- * The sum of weights = 0.84; the remaining 0.16 is reserved for penalties
- * and future components.
+ * The sum of weights = 0.84; the remaining 0.16 is reserved for penalties.
  *
  * Penalty wiring
  * ──────────────
- * penalties.crowding   — future: deduct when too many positions already open
- *                         in the same direction on the same timeframe.
- * penalties.execution  — future: deduct when bid/ask spread is wide or market
- *                         depth is shallow relative to position size.
- * Both are wired to 0 until the data sources are available.
+ * penalties.execution  — spread + depth penalty (live order-book data).
+ *                        Supplied via RetestPenaltyContext from useAltAutoTrade.
+ * penalties.crowding   — direction saturation + same-symbol duplicate penalty.
+ *                        Supplied via RetestPenaltyContext from useAltAutoTrade.
+ * Both default to 0 when context is absent (scan-time call without live data).
  */
 
 import type { RetestCandidate } from './retestCandidates';
+
+// ── Penalty context ────────────────────────────────────────────────────────────
+
+/**
+ * Live-data context fed by useAltAutoTrade at ranking time.
+ * Not available inside the scan function — computed from the trading hook's
+ * position registry and order-book cache.
+ * All fields are optional; missing values contribute 0 penalty (safe, never fail).
+ */
+export interface RetestPenaltyContext {
+  /** Live bid/ask spread in bps at decision time. */
+  spreadBps?: number;
+  /** USD depth within 10 bps of mid-price. Not yet collected; reserved for future use. */
+  depth10bpsUsd?: number;
+  /** Planned position notional in USD (from sizingHint). Used for depth coverage ratio. */
+  plannedNotionalUsd?: number;
+  /** Open live/paper positions in the same direction as this candidate. */
+  sameDirectionOpenCount?: number;
+  /** Pending resting entry orders (GTC) in the same direction. */
+  sameDirectionPendingCount?: number;
+  /** True when the same symbol+direction already has an open position. */
+  sameSymbolOpen?: boolean;
+  /** True when the same symbol+direction already has a pending resting entry. */
+  sameSymbolPending?: boolean;
+}
+
+/**
+ * Pre-computed snapshot of open positions and pending GTC orders.
+ * Built once per render in App.tsx and passed to useAltAutoTrade.
+ * Converted to per-candidate RetestPenaltyContext inside the hook.
+ */
+export interface RetestCrowdingSnapshot {
+  openLong:   number;
+  openShort:  number;
+  pendingLong:  number;
+  pendingShort: number;
+  /** `${symbol}_long` | `${symbol}_short` for each open position */
+  openKeys:    ReadonlySet<string>;
+  /** Same format for pending resting entries */
+  pendingKeys: ReadonlySet<string>;
+}
+
+// ── Penalty helpers ────────────────────────────────────────────────────────────
+
+/**
+ * Execution penalty: deduction for wide spread or shallow depth.
+ * - spread <= 1.5 bps : 0
+ * - spread 1.5 – 4 bps : 0 → 0.04 (linear)
+ * - spread 4 – 8 bps   : 0.04 → 0.08 (linear)
+ * - spread >= 8 bps    : capped at 0.08 (hard gate already blocks >= maxSpreadBps)
+ * Total cap: 0.10.
+ */
+export function computeExecutionPenalty(ctx: RetestPenaltyContext): number {
+  let pen = 0;
+
+  if (ctx.spreadBps != null) {
+    const s = ctx.spreadBps;
+    if (s > 1.5 && s <= 4) {
+      pen += ((s - 1.5) / 2.5) * 0.04;
+    } else if (s > 4 && s <= 8) {
+      pen += 0.04 + ((s - 4) / 4) * 0.04;
+    } else if (s > 8) {
+      pen += 0.08;
+    }
+  }
+
+  // Depth coverage (data not yet collected — penalty 0 until wired)
+  if (ctx.depth10bpsUsd != null && ctx.plannedNotionalUsd != null && ctx.plannedNotionalUsd > 0) {
+    const coverage = ctx.depth10bpsUsd / ctx.plannedNotionalUsd;
+    if (coverage < 20) {
+      pen += clamp01(1 - coverage / 20) * 0.04;
+    }
+  }
+
+  return Math.min(pen, 0.10);
+}
+
+/**
+ * Crowding penalty: deduction for same-symbol duplicate or overcrowded direction.
+ * - sameSymbolOpen     → 0.06 (strong — same position already exists)
+ * - sameSymbolPending  → 0.03 (moderate — resting order pending)
+ * - direction count 2–3 → +0.02
+ * - direction count 4+  → +0.04
+ * Total cap: 0.10.
+ */
+export function computeCrowdingPenalty(ctx: RetestPenaltyContext): number {
+  let pen = 0;
+
+  if (ctx.sameSymbolOpen) {
+    pen += 0.06;
+  } else if (ctx.sameSymbolPending) {
+    pen += 0.03;
+  }
+
+  const openCount    = ctx.sameDirectionOpenCount    ?? 0;
+  const pendingCount = ctx.sameDirectionPendingCount ?? 0;
+  const totalCount   = openCount + pendingCount;
+  if (totalCount >= 4) {
+    pen += 0.04;
+  } else if (totalCount >= 2) {
+    pen += 0.02;
+  }
+
+  return Math.min(pen, 0.10);
+}
 
 // ── Score breakdown shape ─────────────────────────────────────────────────────
 
@@ -231,20 +335,25 @@ function calcAirScore(c: RetestCandidate): number {
  * metrics (rsVsBtc, rs4h, turnoverAccel, avwapBreakout, confluenceScore, airR).
  * Missing optional fields fall back to neutral (0.5) contributions.
  *
+ * The optional `ctx` parameter supplies live execution/crowding data that is
+ * not available inside the scan function.  When omitted, penalties are 0.
+ * useAltAutoTrade re-applies penalties after scanning via the exported
+ * computeExecutionPenalty / computeCrowdingPenalty helpers.
+ *
  * The `total` field in the returned breakdown is suitable for sorting:
  * higher = better quality setup.
  */
-export function scoreRetestCandidate(c: RetestCandidate): RetestScoreBreakdown {
+export function scoreRetestCandidate(c: RetestCandidate, ctx?: RetestPenaltyContext): RetestScoreBreakdown {
   const leaderScore   = calcLeaderScore(c);
   const impulseScore  = calcImpulseScore(c);
   const pullbackScore = calcPullbackScore(c);
   const locationScore = calcLocationScore(c);
   const airScore      = calcAirScore(c);
 
-  // Penalty placeholders — wired to 0 until crowding/execution data is available.
-  // crowding:  connect when open-position registry tracks live direction counts.
-  // execution: connect when bid/ask spread data is streamed via WebSocket.
-  const penalties = { crowding: 0, execution: 0 };
+  const penalties = {
+    crowding:  ctx ? computeCrowdingPenalty(ctx)  : 0,
+    execution: ctx ? computeExecutionPenalty(ctx) : 0,
+  };
   const totalPenalty = penalties.crowding + penalties.execution;
 
   const total = clamp01(

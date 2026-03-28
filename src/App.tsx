@@ -49,6 +49,7 @@ import { TimeStopDecisionModal } from './components/AltScanner/TimeStopDecisionM
 import type { AltMeta } from './types/paperTrading';
 import { useAltAutoTrade } from './hooks/useAltAutoTrade';
 import type { ScanLifecycleEvent } from './hooks/useAltAutoTrade';
+import type { RetestCrowdingSnapshot } from './components/AltScanner/features/retestScoring';
 import { useStrategyLab } from './hooks/useStrategyLab';
 import { useSoundPlayer } from './hooks/useSoundPlayer';
 import { SoundSettingsModal } from './components/SoundSettingsModal';
@@ -973,6 +974,7 @@ function AppInner() {
   const gtcRemainderCancelInFlightRef = useRef<Set<string>>(new Set());
   const gtcRemainderCancelDoneRef     = useRef<Set<string>>(new Set());
   const gtcRemainderCancelFailedRef   = useRef<Set<string>>(new Set());
+
   const liveAltOrderTagMap = React.useMemo(() => {
     const out: Record<string, 'ALT-AUTO TP' | 'ALT-AUTO SL'> = {};
     for (const entry of Object.values(liveAltOrderRegistry)) {
@@ -1104,6 +1106,33 @@ function AppInner() {
   }, [isPaperMode]);
 
   const paperTrading = usePaperTrading(uk('paper-trading'));
+
+  // ── Leader-retest penalty context snapshot ────────────────────────────────
+  // Pre-computed once per render; passed to useAltAutoTrade for execution/crowding penalty scoring.
+  const retestCrowdingSnapshot = React.useMemo<RetestCrowdingSnapshot>(() => {
+    const isLive = autoTradeMode === 'live';
+    let openLong = 0; let openShort = 0;
+    const openKeys = new Set<string>();
+    if (isLive) {
+      for (const p of futuresAllPositions) {
+        if (p.positionAmt > 0) { openLong++; openKeys.add(`${p.symbol}_long`); }
+        else if (p.positionAmt < 0) { openShort++; openKeys.add(`${p.symbol}_short`); }
+      }
+    } else {
+      for (const p of paperTrading.positions) {
+        if (p.positionSide === 'LONG') { openLong++; openKeys.add(`${p.symbol}_long`); }
+        else { openShort++; openKeys.add(`${p.symbol}_short`); }
+      }
+    }
+    const gtcEntries = Object.values(pendingRetestGtcOrders);
+    let pendingLong = 0; let pendingShort = 0;
+    const pendingKeys = new Set<string>();
+    for (const o of gtcEntries) {
+      if (o.direction === 'long') { pendingLong++; pendingKeys.add(`${o.symbol}_long`); }
+      else { pendingShort++; pendingKeys.add(`${o.symbol}_short`); }
+    }
+    return { openLong, openShort, pendingLong, pendingShort, openKeys, pendingKeys };
+  }, [autoTradeMode, futuresAllPositions, paperTrading.positions, pendingRetestGtcOrders]);
 
   // ── TP1 chart lines ───────────────────────────────────────────────────
   const chartTp1Lines = React.useMemo<Array<{ price: number; hit: boolean }>>(() => {
@@ -2029,6 +2058,9 @@ function AppInner() {
     maxSpreadBps: activeAutoTradeSettings.maxSpreadBps ?? 4,
     maxRiskPct: activeAutoTradeSettings.maxRiskPct ?? 0.025,
     maxAbsLossUsd: activeAutoTradeSettings.maxAbsLossUsd ?? 0,
+    retestCrowdingSnapshot,
+    retestRegimeFilter: activeAutoTradeSettings.retestRegimeFilter ?? true,
+    retestRegimeStrictness: activeAutoTradeSettings.retestRegimeStrictness ?? 'normal',
     sizingHint: (() => {
       if (activeAutoTradeSettings.sizeMode === 'margin') {
         const notionalUsd = (activeAutoTradeSettings.marginUsdt ?? 0) * (activeAutoTradeSettings.leverage ?? 1);

@@ -8,6 +8,17 @@ import type { FvgPocOptions } from '../components/AltScanner/strategies/fvgPocEm
 import type { ScanFn } from '../components/AltScanner/strategyTypes';
 import { getBinanceGovernorSnapshot } from '../lib/binanceRequestGovernor';
 import { subscribeBookTicker, getSpreadBps, unsubscribeBookTicker } from '../lib/binanceBookTicker';
+import {
+  computeExecutionPenalty,
+  computeCrowdingPenalty,
+} from '../components/AltScanner/features/retestScoring';
+import type { RetestPenaltyContext, RetestCrowdingSnapshot } from '../components/AltScanner/features/retestScoring';
+import {
+  fetchBenchmarkTrend,
+  finalizeRegime,
+  calcRegimeAdjustment,
+} from '../components/AltScanner/features/regimeMetrics';
+import type { RegimeStrictness } from '../components/AltScanner/features/regimeMetrics';
 
 /** Price formatter: ≥1 uses 2dp, otherwise 6dp (handles small-cap crypto). */
 function fmtPrice(p: number): string {
@@ -131,6 +142,9 @@ export function useAltAutoTrade({
   maxRiskPct,
   maxAbsLossUsd,
   sizingHint,
+  retestCrowdingSnapshot,
+  retestRegimeFilter,
+  retestRegimeStrictness,
 }: {
   symbols: string[];
   onEnterTrade: (candidate: ScanCandidate) => void;
@@ -179,6 +193,23 @@ export function useAltAutoTrade({
    * Omit to disable Gate 5.
    */
   sizingHint?: SizingHint;
+  /**
+   * Pre-computed snapshot of open positions and pending GTC entry orders.
+   * Used to compute execution/crowding penalties for leader-retest candidates
+   * before sorting.  Omit to skip penalty adjustment (penalties remain 0).
+   */
+  retestCrowdingSnapshot?: RetestCrowdingSnapshot;
+  /**
+   * Enable market regime filter for leader-retest auto-trade (default true).
+   * When true, fetches BTCUSDT 4H/1H trend and computes breadth to gate entries.
+   */
+  retestRegimeFilter?: boolean;
+  /**
+   * How aggressively the regime adjusts score threshold / PENDING suppression.
+   * 'relaxed' = only bear disables; 'normal' (default) = chop suppresses PENDING;
+   * 'strict' = neutral +5, chop +10.
+   */
+  retestRegimeStrictness?: RegimeStrictness;
 }) {
   const [isActive, setIsActiveState] = useState<boolean>(() => {
     try { return localStorage.getItem(AUTO_TRADE_KEY) === 'true'; } catch { return false; }
@@ -211,7 +242,10 @@ export function useAltAutoTrade({
   const maxSpreadBpsRef           = useRef(maxSpreadBps ?? 4);
   const maxRiskPctRef             = useRef(maxRiskPct ?? 0.025);
   const maxAbsLossUsdRef          = useRef(maxAbsLossUsd ?? 0);
-  const sizingHintRef             = useRef(sizingHint);
+  const sizingHintRef                    = useRef(sizingHint);
+  const retestCrowdingSnapshotRef        = useRef(retestCrowdingSnapshot);
+  const retestRegimeFilterRef            = useRef(retestRegimeFilter ?? true);
+  const retestRegimeStrictnessRef        = useRef<RegimeStrictness>(retestRegimeStrictness ?? 'normal');
   /** Tracks symbols currently subscribed via bookTicker — enables targeted cleanup. */
   const subscribedBookTickersRef  = useRef(new Set<string>());
   isActiveRef.current             = isActive;
@@ -232,8 +266,11 @@ export function useAltAutoTrade({
   maxBarsAfterTriggerRef.current  = breakoutMaxBarsAfterTrigger ?? 0;
   maxSpreadBpsRef.current         = maxSpreadBps ?? 4;
   maxRiskPctRef.current           = maxRiskPct ?? 0.025;
-  maxAbsLossUsdRef.current        = maxAbsLossUsd ?? 0;
-  sizingHintRef.current           = sizingHint;
+  maxAbsLossUsdRef.current               = maxAbsLossUsd ?? 0;
+  sizingHintRef.current                  = sizingHint;
+  retestCrowdingSnapshotRef.current      = retestCrowdingSnapshot;
+  retestRegimeFilterRef.current          = retestRegimeFilter ?? true;
+  retestRegimeStrictnessRef.current      = retestRegimeStrictness ?? 'normal';
 
   const addLog = useCallback((msg: string, type: AutoTradeLog['type'] = 'info') => {
     setLogs(prev => [{ id: ++logSeq, time: Date.now(), msg, type }, ...prev].slice(0, 200));
@@ -371,19 +408,97 @@ export function useAltAutoTrade({
         continue;
       }
 
-      const scoreThreshold = scoreThresholdRef.current;
       const isLeaderRetest = strategyIdRef.current === 'leader-retest';
+
+      // ── Leader-retest: market regime detection ───────────────────────────────
+      // Regime is evaluated once per interval (BTC 4H/1H benchmark + candidate breadth).
+      // On fetch failure the gate is bypassed — defaults leave all candidates eligible.
+      let regimeScoreThresholdBump = 0;
+      let regimeSuppressPending    = false;
+      let regimeDisableLong        = false;
+      if (isLeaderRetest && retestRegimeFilterRef.current) {
+        try {
+          const benchmarkTrend = await fetchBenchmarkTrend(abortCtrl.signal);
+          // breadth: fraction of scanned symbols that produced any long candidate this scan
+          const breadth = syms.length > 0
+            ? candidates.filter(c => c.direction === 'long').length / syms.length
+            : 0;
+          const regimeResult = finalizeRegime(benchmarkTrend, breadth);
+          const adj = calcRegimeAdjustment(
+            regimeResult.regime,
+            retestRegimeStrictnessRef.current,
+            retestAutoDirectionRef.current,
+          );
+          regimeScoreThresholdBump = adj.scoreThresholdBump;
+          regimeSuppressPending    = adj.suppressPending;
+          regimeDisableLong        = adj.disableLong;
+          const adjNote =
+            adj.disableLong           ? ' → LONG 자동진입 비활성' :
+            adj.suppressPending       ? ' → PENDING 억제' :
+            adj.scoreThresholdBump > 0 ? ` → 점수 임계 +${adj.scoreThresholdBump}` : '';
+          addLog(
+            `[${interval}] 📊 ${regimeResult.reason}${adjNote}`,
+            regimeResult.regime === 'bear' || regimeResult.regime === 'chop' ? 'warn' : 'info',
+          );
+        } catch (e) {
+          addLog(
+            `[${interval}] ⚠ 레짐 감지 실패 — BTC 데이터 오류: ${e instanceof Error ? e.message : String(e)} → 레짐 게이트 우회`,
+            'warn',
+          );
+        }
+      }
+
+      const scoreThreshold = scoreThresholdRef.current + regimeScoreThresholdBump;
+
+      // ── Leader-retest: apply execution+crowding penalties before sorting ──────
+      // The scan function scores chart quality only (no live data available there).
+      // Here we re-score with real-time spread and live position crowding context.
+      const candidatesForRanking = isLeaderRetest
+        ? candidates.map(c => {
+            if (!c.scoreBreakdown) return c;
+            const snap = retestCrowdingSnapshotRef.current;
+            const penCtx: RetestPenaltyContext = {
+              spreadBps: getSpreadBps(c.symbol) ?? c.spreadBps,
+              plannedNotionalUsd: sizingHintRef.current?.mode === 'margin'
+                ? sizingHintRef.current.notionalUsd
+                : undefined,
+              ...(snap ? {
+                sameDirectionOpenCount:    c.direction === 'long' ? snap.openLong  : snap.openShort,
+                sameDirectionPendingCount: c.direction === 'long' ? snap.pendingLong : snap.pendingShort,
+                sameSymbolOpen:    snap.openKeys.has(`${c.symbol}_${c.direction}`),
+                sameSymbolPending: snap.pendingKeys.has(`${c.symbol}_${c.direction}`),
+              } : {}),
+            };
+            const execution = computeExecutionPenalty(penCtx);
+            const crowding  = computeCrowdingPenalty(penCtx);
+            if (execution === 0 && crowding === 0) return c;
+            const adjustedTotal = Math.max(0, Math.min(1, c.scoreBreakdown.total - execution - crowding));
+            return {
+              ...c,
+              score: Math.round(adjustedTotal * 100),
+              scoreBreakdown: {
+                ...c.scoreBreakdown,
+                penalties: { execution, crowding },
+                total: adjustedTotal,
+              },
+            };
+          })
+        : candidates;
 
       // For leader-retest: pre-filter INVALID (late/failed-auction) before sorting.
       // INVALID candidates have already missed the entry zone — entering them would be chasing.
-      const qualified = candidates
+      const qualified = candidatesForRanking
         .filter(c => {
           if (c.score < scoreThreshold) return false;
           if (isLeaderRetest && c.status === 'INVALID') return false;
+          if (isLeaderRetest && regimeDisableLong && c.direction === 'long') return false;
+          if (isLeaderRetest && regimeSuppressPending && c.status === 'PENDING') return false;
           return true;
         })
         .sort((a, b) => b.score - a.score);
 
+      // Use original unrescored candidates for INVALID tracking (structural invalidity,
+      // not score-based; penalties don't change INVALID status).
       const invalidCount = isLeaderRetest
         ? candidates.filter(c => c.score >= scoreThreshold && c.status === 'INVALID').length
         : 0;
@@ -561,10 +676,14 @@ export function useAltAutoTrade({
         if (isLeaderRetest && c.orderPlan != null) {
           const op = c.orderPlan;
           const bd = c.scoreBreakdown;
+          const penStr = bd && (bd.penalties.execution > 0 || bd.penalties.crowding > 0)
+            ? (bd.penalties.execution > 0 ? ` -체결${(bd.penalties.execution * 100).toFixed(0)}` : '') +
+              (bd.penalties.crowding  > 0 ? ` -크라${(bd.penalties.crowding  * 100).toFixed(0)}` : '')
+            : '';
           const scoresStr = bd
             ? `L${(bd.leaderScore   * 100).toFixed(0)}` +
               ` P${(bd.pullbackScore * 100).toFixed(0)}` +
-              ` Lo${(bd.locationScore * 100).toFixed(0)}`
+              ` Lo${(bd.locationScore * 100).toFixed(0)}` + penStr
             : '분석없음';
           const riskPct = c.entryPrice > 0
             ? ((Math.abs(c.entryPrice - op.hardStop) / c.entryPrice) * 100).toFixed(2)
@@ -611,7 +730,7 @@ export function useAltAutoTrade({
 
     // ── BookTicker cleanup: unsubscribe symbols no longer in the scan list ──
     // Only runs for leader-retest; subscribedBookTickersRef is empty for other strategies.
-    if (isLeaderRetest) {
+    if (strategyIdRef.current === 'leader-retest') {
       const currentSymbols = new Set(syms);
       for (const sym of subscribedBookTickersRef.current) {
         if (!currentSymbols.has(sym)) {
