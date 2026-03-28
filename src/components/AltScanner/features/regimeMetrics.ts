@@ -156,7 +156,8 @@ export function calcRegimeAdjustment(
   }
 
   if (regime === 'chop') {
-    const bump = strictness === 'strict' ? 10 : strictness === 'normal' ? 5 : 0;
+    // normal: suppressPending only (no score bump); strict: +10 + suppressPending
+    const bump = strictness === 'strict' ? 10 : 0;
     return { scoreThresholdBump: bump, suppressPending: true, disableLong: false, allowShortOnly: false };
   }
 

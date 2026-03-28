@@ -110,6 +110,47 @@ export function getBestBidAsk(symbol: string): { bid: number; ask: number } | un
   return { bid: entry.bid, ask: entry.ask };
 }
 
+// ── Depth cache ───────────────────────────────────────────────────────────────
+
+const DEPTH_CACHE_TTL_MS = 30_000;
+const depthCache = new Map<string, { depth10bpsUsd: number; fetchedAt: number }>();
+
+/**
+ * Returns the USD liquidity within 10 bps of mid on the bid side for `symbol`.
+ * Fetches /fapi/v1/depth?limit=5 (weight 2) and caches the result for 30 seconds
+ * to avoid redundant calls within the same scan cycle.
+ * Returns `undefined` on any error — caller uses 0 penalty.
+ */
+export async function getDepth10bpsUsd(symbol: string, signal?: AbortSignal): Promise<number | undefined> {
+  const cached = depthCache.get(symbol);
+  if (cached && Date.now() - cached.fetchedAt < DEPTH_CACHE_TTL_MS) {
+    return cached.depth10bpsUsd;
+  }
+  try {
+    const res = await fetch(
+      `https://fapi.binance.com/fapi/v1/depth?symbol=${encodeURIComponent(symbol)}&limit=5`,
+      { signal },
+    );
+    if (!res.ok) return undefined;
+    const data = await res.json() as { bids: [string, string][]; asks: [string, string][] };
+    const bestBid = parseFloat(data.bids[0]?.[0] ?? '0');
+    const bestAsk = parseFloat(data.asks[0]?.[0] ?? '0');
+    if (bestBid <= 0 || bestAsk <= 0) return undefined;
+    const mid   = (bestBid + bestAsk) / 2;
+    const floor = mid * (1 - 10 / 10_000); // 10 bps below mid
+    let depth = 0;
+    for (const [priceStr, qtyStr] of data.bids) {
+      const price = parseFloat(priceStr);
+      const qty   = parseFloat(qtyStr);
+      if (price >= floor) depth += price * qty;
+    }
+    depthCache.set(symbol, { depth10bpsUsd: depth, fetchedAt: Date.now() });
+    return depth;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Returns the bid/ask spread in basis points for `symbol`, or `undefined`
  * when fresh data is unavailable (caller should skip the gate, not block entry).

@@ -40,7 +40,7 @@ import type { RetestCandidate } from './retestCandidates';
 export interface RetestPenaltyContext {
   /** Live bid/ask spread in bps at decision time. */
   spreadBps?: number;
-  /** USD depth within 10 bps of mid-price. Not yet collected; reserved for future use. */
+  /** USD depth within 10 bps of mid-price (bid side). Fetched per scan cycle via getDepth10bpsUsd. */
   depth10bpsUsd?: number;
   /** Planned position notional in USD (from sizingHint). Used for depth coverage ratio. */
   plannedNotionalUsd?: number;
@@ -94,7 +94,7 @@ export function computeExecutionPenalty(ctx: RetestPenaltyContext): number {
     }
   }
 
-  // Depth coverage (data not yet collected — penalty 0 until wired)
+  // Depth coverage: penalty scales from 0 → 0.04 as coverage ratio drops from 20× to 0×
   if (ctx.depth10bpsUsd != null && ctx.plannedNotionalUsd != null && ctx.plannedNotionalUsd > 0) {
     const coverage = ctx.depth10bpsUsd / ctx.plannedNotionalUsd;
     if (coverage < 20) {

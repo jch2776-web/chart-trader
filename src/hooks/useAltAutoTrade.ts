@@ -7,7 +7,7 @@ import { createFvgPocEma72Scan } from '../components/AltScanner/strategies/fvgPo
 import type { FvgPocOptions } from '../components/AltScanner/strategies/fvgPocEma72';
 import type { ScanFn } from '../components/AltScanner/strategyTypes';
 import { getBinanceGovernorSnapshot } from '../lib/binanceRequestGovernor';
-import { subscribeBookTicker, getSpreadBps, unsubscribeBookTicker } from '../lib/binanceBookTicker';
+import { subscribeBookTicker, getSpreadBps, unsubscribeBookTicker, getDepth10bpsUsd } from '../lib/binanceBookTicker';
 import {
   computeExecutionPenalty,
   computeCrowdingPenalty,
@@ -450,15 +450,31 @@ export function useAltAutoTrade({
 
       const scoreThreshold = scoreThresholdRef.current + regimeScoreThresholdBump;
 
+      // ── Leader-retest: pre-fetch depth10bpsUsd for all candidate symbols ────────
+      // Fetched in parallel before the re-scoring map; 30s cache prevents redundant calls.
+      const depthBySymbol = new Map<string, number | undefined>();
+      if (isLeaderRetest && candidates.length > 0) {
+        const uniqueSymbols = [...new Set(candidates.map(c => c.symbol))];
+        const depthResults = await Promise.all(
+          uniqueSymbols.map(sym =>
+            getDepth10bpsUsd(sym, abortCtrl.signal)
+              .then(d => [sym, d] as const)
+              .catch(() => [sym, undefined] as const),
+          ),
+        );
+        for (const [sym, d] of depthResults) depthBySymbol.set(sym, d);
+      }
+
       // ── Leader-retest: apply execution+crowding penalties before sorting ──────
       // The scan function scores chart quality only (no live data available there).
-      // Here we re-score with real-time spread and live position crowding context.
+      // Here we re-score with real-time spread + depth and live position crowding context.
       const candidatesForRanking = isLeaderRetest
         ? candidates.map(c => {
             if (!c.scoreBreakdown) return c;
             const snap = retestCrowdingSnapshotRef.current;
             const penCtx: RetestPenaltyContext = {
               spreadBps: getSpreadBps(c.symbol) ?? c.spreadBps,
+              depth10bpsUsd: depthBySymbol.get(c.symbol),
               plannedNotionalUsd: sizingHintRef.current?.mode === 'margin'
                 ? sizingHintRef.current.notionalUsd
                 : undefined,
