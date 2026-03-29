@@ -23,6 +23,7 @@ import type {
   ScalpActiveOrder,
   ScalpTelemetryEvent,
   ScalpBrokerCallbacks,
+  ScalpOrderUpdate,
 } from './types';
 import type { ScalpSettings } from './scalpSettings';
 
@@ -60,16 +61,131 @@ export interface UseScalpAutoTradeResult {
   clearLogs: () => void;
 }
 
-// ── Paper broker (simulates fills for testing) ────────────────────────────────
+// ── Paper broker (simulates fills and stop/tp triggers) ───────────────────────
 
-function createPaperBroker(): ScalpBrokerCallbacks {
+interface PaperPendingOrder {
+  orderId: string;
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  quantity: number;
+  price: number;
+  /** 'limit' fills after one tick; 'stop_market'/'take_profit_market' triggers on price cross */
+  kind: 'limit' | 'stop_market' | 'take_profit_market';
+  reduceOnly: boolean;
+  ticksRemaining: number; // for limit: 1 (fill after one tick)
+  canceled: boolean;
+}
+
+interface ScalpPaperBroker extends ScalpBrokerCallbacks {
+  tickPaper(
+    getSnapshot: (symbol: string) => ScalpMarketSnapshot | null,
+    onUpdate: (upd: ScalpOrderUpdate) => void,
+  ): void;
+}
+
+function createPaperBroker(onLog: (msg: string, level: 'info' | 'warn' | 'error') => void): ScalpPaperBroker {
   let orderSeq = 0;
+  const pending = new Map<string, PaperPendingOrder>();
+
+  function makeFillUpdate(o: PaperPendingOrder): ScalpOrderUpdate {
+    return {
+      orderId: o.orderId,
+      symbol: o.symbol,
+      status: 'FILLED',
+      executedQty: o.quantity,
+      avgPrice: o.price,
+      lastFilledQty: o.quantity,
+      lastFilledPrice: o.price,
+      reduceOnly: o.reduceOnly,
+      ts: Date.now(),
+    };
+  }
+
   return {
-    placeLimitOrder: (params) =>
-      Promise.resolve(`PAPER_${++orderSeq}_${params.symbol}_${params.side}`),
-    placeStopMarketOrder: (params) =>
-      Promise.resolve(`PAPER_STOP_${++orderSeq}_${params.symbol}_${params.orderType}`),
-    cancelOrder: () => Promise.resolve(),
+    placeLimitOrder: (params) => {
+      const id = `PAPER_LMT_${++orderSeq}_${params.symbol}_${params.side}`;
+      pending.set(id, {
+        orderId: id,
+        symbol: params.symbol,
+        side: params.side,
+        quantity: params.quantity,
+        price: params.price,
+        kind: 'limit',
+        reduceOnly: params.reduceOnly,
+        ticksRemaining: 1,
+        canceled: false,
+      });
+      onLog(`[PAPER] LIMIT ${params.side} ${params.quantity} ${params.symbol} @ ${params.price.toFixed(4)} 접수`, 'info');
+      return Promise.resolve(id);
+    },
+
+    placeStopMarketOrder: (params) => {
+      const kind = params.orderType === 'TAKE_PROFIT_MARKET' ? 'take_profit_market' : 'stop_market';
+      const id = `PAPER_${kind.toUpperCase()}_${++orderSeq}_${params.symbol}`;
+      pending.set(id, {
+        orderId: id,
+        symbol: params.symbol,
+        side: params.side,
+        quantity: params.quantity,
+        price: params.stopPrice,
+        kind,
+        reduceOnly: params.reduceOnly,
+        ticksRemaining: 0,
+        canceled: false,
+      });
+      onLog(`[PAPER] ${params.orderType} ${params.side} ${params.quantity} ${params.symbol} stopPrice=${params.stopPrice.toFixed(4)} 접수`, 'info');
+      return Promise.resolve(id);
+    },
+
+    cancelOrder: (orderId) => {
+      const o = pending.get(orderId);
+      if (o) {
+        o.canceled = true;
+        pending.delete(orderId);
+        onLog(`[PAPER] 주문 취소: ${orderId}`, 'info');
+      }
+      return Promise.resolve();
+    },
+
+    tickPaper: (getSnapshot, onUpdate) => {
+      for (const [id, o] of pending) {
+        if (o.canceled) { pending.delete(id); continue; }
+
+        if (o.kind === 'limit') {
+          o.ticksRemaining--;
+          if (o.ticksRemaining <= 0) {
+            // Simulate fill at submitted price
+            pending.delete(id);
+            onLog(`[PAPER] LIMIT ${o.side} 체결 — ${o.symbol} @ ${o.price.toFixed(4)}`, 'info');
+            onUpdate(makeFillUpdate(o));
+          }
+          continue;
+        }
+
+        // stop_market / take_profit_market — check price trigger
+        const snap = getSnapshot(o.symbol);
+        if (!snap) continue;
+        const mid = (snap.bid + snap.ask) / 2;
+
+        let triggered = false;
+        if (o.kind === 'stop_market') {
+          // SL sell (long position): trigger when price drops to/below stopPrice
+          // SL buy  (short position): trigger when price rises to/above stopPrice
+          triggered = o.side === 'SELL' ? mid <= o.price : mid >= o.price;
+        } else {
+          // take_profit_market sell (long position): trigger when price rises to/above stopPrice
+          // take_profit_market buy  (short position): trigger when price drops to/below stopPrice
+          triggered = o.side === 'SELL' ? mid >= o.price : mid <= o.price;
+        }
+
+        if (triggered) {
+          pending.delete(id);
+          const fillPrice = mid;
+          onLog(`[PAPER] ${o.kind.toUpperCase()} ${o.side} 트리거 — ${o.symbol} @ ${fillPrice.toFixed(4)}`, 'warn');
+          onUpdate({ ...makeFillUpdate(o), avgPrice: fillPrice, lastFilledPrice: fillPrice });
+        }
+      }
+    },
   };
 }
 
@@ -99,9 +215,10 @@ export function useScalpAutoTrade({
   onLogRef.current   = onLog;
 
   // Engine instances live in refs — recreated on session start
-  const riskRef  = useRef(createScalpRiskEngine());
-  const telemRef = useRef(createScalpTelemetry());
-  const execRef  = useRef<ReturnType<typeof createScalpExecutionEngine> | null>(null);
+  const riskRef        = useRef(createScalpRiskEngine());
+  const telemRef       = useRef(createScalpTelemetry());
+  const execRef        = useRef<ReturnType<typeof createScalpExecutionEngine> | null>(null);
+  const paperBrokerRef = useRef<ScalpPaperBroker | null>(null);
 
   // ── Internal log helper ─────────────────────────────────────────────────
   const addLog = useCallback((msg: string, level: ScalpLog['level'] = 'info') => {
@@ -161,10 +278,16 @@ export function useScalpAutoTrade({
       // Fresh engines per session
       riskRef.current  = createScalpRiskEngine();
       telemRef.current = createScalpTelemetry();
-      const activeBroker: ScalpBrokerCallbacks =
-        mode === 'live' && brokerRef.current
-          ? brokerRef.current
-          : createPaperBroker();
+
+      let activeBroker: ScalpBrokerCallbacks;
+      if (mode === 'live' && brokerRef.current) {
+        activeBroker = brokerRef.current;
+        paperBrokerRef.current = null;
+      } else {
+        const pb = createPaperBroker((msg, level) => addLog(msg, level));
+        paperBrokerRef.current = pb;
+        activeBroker = pb;
+      }
 
       execRef.current = createScalpExecutionEngine(
         activeBroker,
@@ -172,10 +295,12 @@ export function useScalpAutoTrade({
         riskRef.current,
         (msg, level) => addLog(msg, level),
         getScalpSnapshot,
+        () => settingsRef.current,
       );
       addLog(`⚡ 스캘핑 시작 — ${mode === 'live' ? '실전' : '페이퍼'} | ${settings.symbols.length}개 심볼`, 'success');
     } else {
       execRef.current?.cancelAll();
+      paperBrokerRef.current = null;
       setUserStreamConnected(false);
       addLog('⏹ 스캘핑 중단 — 미체결 주문 취소', 'warn');
     }
@@ -206,11 +331,16 @@ export function useScalpAutoTrade({
     return () => { setUserStreamConnected(false); stop(); };
   }, [isActive, mode, userStream, addLog]);
 
-  // ── Tick: order timeout / reprice / UI refresh ───────────────────────────
+  // ── Tick: order timeout / reprice / UI refresh / paper simulation ────────
   useEffect(() => {
     if (!isActive) return;
     const timer = setInterval(() => {
       execRef.current?.tick();
+      // Paper mode: simulate stop/tp triggers
+      paperBrokerRef.current?.tickPaper(
+        getScalpSnapshot,
+        (upd) => execRef.current?.onOrderUpdate(upd),
+      );
       refreshUi();
     }, 200);
     return () => clearInterval(timer);

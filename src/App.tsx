@@ -480,6 +480,8 @@ function AppInner() {
   const scalpSettingsRef = React.useRef(scalpSettings);
   scalpSettingsRef.current = scalpSettings;
   const [showScalpSettings, setShowScalpSettings] = useState(false);
+  /** true = hedge/dual-side mode; false = one-way. Read once when API keys are available. */
+  const scalpPositionModeRef = React.useRef(false);
 
   // ── 실험실 자동설정 프리셋 ────────────────────────────────────────────────
   const [labAutoPresets, setLabAutoPresets] = useState<LabAutoPreset[]>(() => {
@@ -2109,6 +2111,21 @@ function AppInner() {
     });
   }, [binanceApiKey]);
 
+  // ── Scalp position mode (one-way vs hedge) ───────────────────────────────
+  // Read once when live API keys are available. Used to derive positionSide for TP/SL orders.
+  React.useEffect(() => {
+    if (!binanceApiKey || !binanceApiSecret) return;
+    getPositionMode(binanceApiKey, binanceApiSecret)
+      .then(isDual => {
+        scalpPositionModeRef.current = isDual;
+        addLog('info', `[스캘핑] 포지션 모드: ${isDual ? '헤지(Hedge)' : '단방향(One-way)'}`);
+      })
+      .catch(() => {
+        // Non-fatal: default to one-way
+      });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [binanceApiKey, binanceApiSecret]);
+
   // ── Scalp auto-trade broker adapter ──────────────────────────────────────
   // Wraps futuresPlaceOrder / futuresPlaceTPSL into the ScalpBrokerCallbacks interface.
   const scalpBroker = React.useMemo(() => ({
@@ -2144,13 +2161,20 @@ function AppInner() {
     }) =>
       new Promise<string>((resolve, reject) => {
         const isTP = params.orderType === 'TAKE_PROFIT_MARKET';
+        // Hedge mode: SELL order closes a LONG position → positionSide = 'LONG';
+        //             BUY  order closes a SHORT position → positionSide = 'SHORT'.
+        // One-way mode: always 'BOTH'.
+        const isDual = scalpPositionModeRef.current;
+        const positionSide = isDual
+          ? (params.side === 'SELL' ? 'LONG' : 'SHORT')
+          : 'BOTH';
         futuresPlaceTPSL(
           params.symbol,
           params.side,
           params.quantity,
           isTP ? params.stopPrice : undefined,
           isTP ? undefined : params.stopPrice,
-          'BOTH',
+          positionSide,
           { onPlacedOrders: (refs) => { const r = refs[0]; if (r) resolve(r.orderId); else reject(new Error('orderId 없음')); } },
         ).catch(reject);
       }),
