@@ -28,6 +28,8 @@ interface Props {
   onOpenSoundSettings?: () => void;
   onOpenAutoTradeSettings?: () => void;
   onOpenScalpSettings?: () => void;
+  /** Direct start/stop toggle — validation is done in App before calling */
+  onToggleScalp?: () => void;
   isScalpActive?: boolean;
   isAutoTradeActive?: boolean;
   autoTradeScanning?: boolean;
@@ -40,6 +42,20 @@ interface Props {
   isMobile?: boolean;
   mobilePanel?: 'none' | 'tickers' | 'settings';
   onToggleMobilePanel?: (panel: 'tickers' | 'settings') => void;
+  // Scalp status
+  scalpMode?: 'paper' | 'live';
+  scalpActiveOrderCount?: number;
+  scalpBreakOpen?: boolean;
+  scalpStreamConnected?: boolean;
+  scalpStats?: {
+    sessionTrades: number;
+    exposureUsd: number;
+    symbolCount: number;
+    signalMode: string;
+    maxSpreadBps: number;
+    minDepthUsd: number;
+    maxPerTradeRiskUsd: number;
+  };
   // Notification bell
   errorLogs?: ActivityLog[];
   onClearErrors?: () => void;
@@ -65,10 +81,12 @@ export function Toolbar({
   isMultiMode, onToggleMultiMode, isPaperMode, onTogglePaperMode,
   indicators, onToggleIndicator,
   onOpenBoard, onOpenUserBoard, onOpenSecurityFaq, onOpenAltScanner, onOpenSoundSettings, onOpenAutoTradeSettings, onOpenScalpSettings,
+  onToggleScalp,
   isAutoTradeActive, isScalpActive, autoTradeScanning, onToggleAutoTrade, onTriggerAutoTradeNow,
   autoTradeMode = 'paper', autoTradeCadenceMinutes = 60, onChangeAutoTradeMode,
   autoScanProgress,
   isMobile, mobilePanel, onToggleMobilePanel,
+  scalpMode, scalpActiveOrderCount = 0, scalpBreakOpen, scalpStreamConnected, scalpStats,
   errorLogs = [], onClearErrors,
   liveBalance, liveMarginBalance, liveUnrealizedPnl,
   paperBalance, paperUnrealizedPnl,
@@ -79,6 +97,60 @@ export function Toolbar({
   };
   const cadence = Math.max(15, Math.round(autoTradeCadenceMinutes || 60));
   const cadenceLabel = cadence >= 60 && cadence % 60 === 0 ? `${cadence / 60}시간` : `${cadence}분`;
+
+  // ── Scalp quick-info popover ────────────────────────────────────────────
+  const [showScalpInfo, setShowScalpInfo] = React.useState(false);
+  const [scalpInfoPos, setScalpInfoPos] = React.useState<{ top: number; right: number }>({ top: 44, right: 0 });
+  const scalpChipRef = React.useRef<HTMLButtonElement>(null);
+  const scalpPopRef  = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    if (!showScalpInfo) return;
+    function handle(e: MouseEvent) {
+      const target = e.target as Node;
+      if (
+        scalpChipRef.current && !scalpChipRef.current.contains(target) &&
+        scalpPopRef.current  && !scalpPopRef.current.contains(target)
+      ) {
+        setShowScalpInfo(false);
+      }
+    }
+    document.addEventListener('mousedown', handle);
+    return () => document.removeEventListener('mousedown', handle);
+  }, [showScalpInfo]);
+
+  function handleChipClick() {
+    if (showScalpInfo) { setShowScalpInfo(false); return; }
+    const rect = scalpChipRef.current?.getBoundingClientRect();
+    if (rect) {
+      setScalpInfoPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+    }
+    setShowScalpInfo(true);
+  }
+
+  // Chip label + color
+  let chipLabel: string;
+  let chipColor: string;
+  let chipBg: string;
+  let chipBorder: string;
+  if (!isScalpActive) {
+    chipLabel = 'SCALP OFF';
+    chipColor = '#5e6673';
+    chipBg = 'none';
+    chipBorder = '#2a2e39';
+  } else if (scalpMode === 'live') {
+    chipLabel = scalpBreakOpen
+      ? 'SCALP LIVE ⛔'
+      : `SCALP LIVE ${scalpStreamConnected ? '●' : '○'}${scalpActiveOrderCount > 0 ? ` ${scalpActiveOrderCount}ord` : ''}`;
+    chipColor = scalpBreakOpen ? '#f6465d' : '#f0b90b';
+    chipBg = scalpBreakOpen ? 'rgba(246,70,93,0.10)' : 'rgba(240,185,11,0.10)';
+    chipBorder = scalpBreakOpen ? 'rgba(246,70,93,0.50)' : 'rgba(240,185,11,0.50)';
+  } else {
+    chipLabel = `SCALP PAPER${scalpActiveOrderCount > 0 ? ` ● ${scalpActiveOrderCount}ord` : ''}`;
+    chipColor = '#0ecb81';
+    chipBg = 'rgba(14,203,129,0.08)';
+    chipBorder = 'rgba(14,203,129,0.40)';
+  }
 
   return (
     <div style={styles.toolbar}>
@@ -342,17 +414,127 @@ export function Toolbar({
         ⚙ 자동설정
       </button>
 
-      {/* Scalp auto-trade settings button */}
+      {/* ── Scalp section ─────────────────────────────────────────────────── */}
+      <div style={styles.divider} />
+
+      {/* Scalp status chip — click to open quick-info popover */}
+      <button
+        ref={scalpChipRef}
+        style={{
+          ...styles.featureBtn,
+          background: chipBg,
+          border: `1px solid ${chipBorder}`,
+          color: chipColor,
+          fontFamily: '"SF Mono", Consolas, monospace',
+          fontSize: '0.72rem',
+          letterSpacing: '0.02em',
+          fontWeight: 700,
+          paddingLeft: 8,
+          paddingRight: 8,
+        }}
+        onClick={handleChipClick}
+        title="스캘핑 상태 — 클릭하여 요약 보기"
+      >
+        {chipLabel}
+      </button>
+
+      {/* Scalp direct start/stop toggle */}
+      {onToggleScalp && (
+        <button
+          style={{
+            ...styles.featureBtn,
+            display: 'flex', alignItems: 'center', gap: 5,
+            ...(isScalpActive
+              ? { background: 'rgba(246,70,93,0.10)', border: '1px solid rgba(246,70,93,0.55)', color: '#f6465d' }
+              : { background: 'rgba(14,203,129,0.10)', border: '1px solid rgba(14,203,129,0.55)', color: '#0ecb81' }),
+          }}
+          onClick={onToggleScalp}
+          title={isScalpActive ? '스캘핑 정지' : '스캘핑 시작'}
+        >
+          {/* Toggle knob — same style as auto-trade */}
+          <span style={{
+            display: 'inline-flex', alignItems: 'center',
+            justifyContent: isScalpActive ? 'flex-end' : 'flex-start',
+            width: 26, height: 13, borderRadius: 7,
+            background: isScalpActive ? '#f6465d' : '#0ecb81',
+            transition: 'background 0.2s', flexShrink: 0,
+            padding: '0 2px', boxSizing: 'border-box',
+          }}>
+            <span style={{ width: 9, height: 9, borderRadius: '50%', background: '#fff', flexShrink: 0 }} />
+          </span>
+          {isScalpActive ? '⏹ 스캘핑 정지' : '▶ 스캘핑 시작'}
+        </button>
+      )}
+
+      {/* Scalp settings gear button — opens full settings modal */}
       <button
         style={{
           ...styles.featureBtn,
           ...(isScalpActive ? { background: '#f0b90b22', border: '1px solid #f0b90b55', color: '#f0b90b' } : {}),
         }}
         onClick={onOpenScalpSettings}
-        title="초단타 스캘핑 자동매매 설정"
+        title="초단타 스캘핑 자동매매 상세 설정"
       >
-        ⚡ 스캘핑
+        ⚙ 스캘핑설정
       </button>
+
+      {/* ── Quick-info popover ─────────────────────────────────────────────── */}
+      {showScalpInfo && (
+        <div
+          ref={scalpPopRef}
+          style={{
+            position: 'fixed',
+            top: scalpInfoPos.top,
+            right: scalpInfoPos.right,
+            zIndex: 9200,
+            background: '#1a2232',
+            border: '1px solid #2d3a4e',
+            borderRadius: 8,
+            padding: '12px 16px',
+            minWidth: 220,
+            boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+            color: '#c9d1d9',
+            fontFamily: 'Inter, system-ui, sans-serif',
+            fontSize: 12,
+          }}
+        >
+          {/* Header */}
+          <div style={{ fontSize: 11, fontWeight: 700, color: '#8b9db0', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 10 }}>
+            스캘핑 요약
+          </div>
+
+          {/* Session stats — only when active */}
+          {isScalpActive && (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 10, paddingBottom: 10, borderBottom: '1px solid #2d3a4e' }}>
+              <Stat label="세션 진입" value={String(scalpStats?.sessionTrades ?? 0)} />
+              <Stat label="노출 (USD)" value={`$${(scalpStats?.exposureUsd ?? 0).toFixed(1)}`} />
+              <Stat label="활성 주문" value={String(scalpActiveOrderCount)} />
+              <Stat label="스트림" value={scalpMode === 'live' ? (scalpStreamConnected ? '● 연결' : '○ 끊김') : 'PAPER'} valueColor={scalpMode === 'live' ? (scalpStreamConnected ? '#0ecb81' : '#f6465d') : '#0ecb81'} />
+            </div>
+          )}
+
+          {/* Settings snapshot */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+            <Stat label="심볼" value={`${scalpStats?.symbolCount ?? 0}개`} />
+            <Stat label="신호 모드" value={scalpStats?.signalMode ?? '—'} />
+            <Stat label="최대 스프레드" value={scalpStats ? `${scalpStats.maxSpreadBps}bps` : '—'} />
+            <Stat label="최소 뎁스" value={scalpStats ? (scalpStats.minDepthUsd > 0 ? `$${(scalpStats.minDepthUsd / 1000).toFixed(0)}k` : 'OFF') : '—'} />
+            <Stat label="최대 리스크" value={scalpStats ? `$${scalpStats.maxPerTradeRiskUsd}` : '—'} />
+          </div>
+
+          {/* Breaker warning */}
+          {scalpBreakOpen && (
+            <div style={{ marginTop: 10, fontSize: 11, color: '#f6465d', fontWeight: 700 }}>
+              ⛔ 연속 손실 차단기 동작 중
+            </div>
+          )}
+
+          {/* Footer hint */}
+          <div style={{ marginTop: 10, fontSize: 10, color: '#3a4a5a', borderTop: '1px solid #2d3a4e', paddingTop: 8 }}>
+            ⚙ 상세 설정은 [스캘핑설정] 버튼
+          </div>
+        </div>
+      )}
 
       {/* User board button */}
       <button
@@ -471,6 +653,19 @@ export function Toolbar({
         logs={errorLogs}
         onClear={onClearErrors ?? (() => {})}
       />
+    </div>
+  );
+}
+
+// ── Compact stat cell (used in popover) ───────────────────────────────────────
+
+function Stat({ label, value, valueColor }: { label: string; value: string; valueColor?: string }) {
+  return (
+    <div>
+      <div style={{ fontSize: 10, color: '#4a5a70', marginBottom: 1 }}>{label}</div>
+      <div style={{ fontSize: 12, fontWeight: 700, color: valueColor ?? '#c9d1d9', fontFamily: '"SF Mono", Consolas, monospace' }}>
+        {value}
+      </div>
     </div>
   );
 }

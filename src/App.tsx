@@ -2199,6 +2199,21 @@ function AppInner() {
       : undefined,
   });
 
+  // ── Scalp direct start/stop (validates before calling setActive) ──────────
+  const handleToggleScalp = useCallback(() => {
+    if (!scalpAutoTrade.isActive) {
+      if (scalpSettings.symbols.length === 0) {
+        addLog('warn', '[스캘핑] 시작 불가: 심볼을 먼저 설정하세요 (⚙ 스캘핑설정)');
+        return;
+      }
+      if (autoTradeMode === 'live' && !binanceApiKey) {
+        addLog('warn', '[스캘핑] 시작 불가: 실전 모드에서 API 키가 필요합니다');
+        return;
+      }
+    }
+    scalpAutoTrade.setActive(!scalpAutoTrade.isActive);
+  }, [scalpAutoTrade, scalpSettings.symbols.length, autoTradeMode, binanceApiKey, addLog]);
+
   const tryAcquireAutoTradeLeaderLock = useCallback(async (): Promise<boolean> => {
     const lockDocRef = autoTradeLeaderLockDocRef.current;
     if (!lockDocRef) return true;
@@ -4657,6 +4672,8 @@ function AppInner() {
                 onRemoveConditionalOrder={handleRemoveConditionalOrder}
                 onConditionalDrawingHighlight={handleConditionalDrawingHighlight}
                 onConditionalPriceChange={setConditionalFormPrices}
+                scalpLogs={scalpAutoTrade.logs.slice(0, 10)}
+                scalpIsActive={scalpAutoTrade.isActive}
               />
             )}
           </div>
@@ -4686,7 +4703,21 @@ function AppInner() {
         onOpenSoundSettings={() => setShowSoundSettings(true)}
         onOpenAutoTradeSettings={() => setShowAutoTradeSettings(true)}
         onOpenScalpSettings={() => setShowScalpSettings(true)}
+        onToggleScalp={handleToggleScalp}
         isScalpActive={scalpAutoTrade.isActive}
+        scalpMode={autoTradeMode}
+        scalpActiveOrderCount={scalpAutoTrade.activeOrders.length}
+        scalpBreakOpen={scalpAutoTrade.stats.breakerOpen}
+        scalpStreamConnected={scalpAutoTrade.userStreamConnected}
+        scalpStats={{
+          sessionTrades: scalpAutoTrade.stats.sessionTrades,
+          exposureUsd: scalpAutoTrade.stats.exposureUsd,
+          symbolCount: scalpSettings.symbols.length,
+          signalMode: scalpSettings.signalMode,
+          maxSpreadBps: scalpSettings.maxSpreadBps,
+          minDepthUsd: scalpSettings.minDepthUsd,
+          maxPerTradeRiskUsd: scalpSettings.maxPerTradeRiskUsd,
+        }}
         isAutoTradeActive={altAutoTrade.isActive}
         autoTradeScanning={altAutoTrade.scanning}
         autoScanProgress={altAutoTrade.scanProgress ?? undefined}
@@ -4962,6 +4993,8 @@ function AppInner() {
             onRemoveConditionalOrder={handleRemoveConditionalOrder}
             onConditionalDrawingHighlight={handleConditionalDrawingHighlight}
             onConditionalPriceChange={setConditionalFormPrices}
+            scalpLogs={scalpAutoTrade.logs.slice(0, 10)}
+            scalpIsActive={scalpAutoTrade.isActive}
           />
         )}
       </div>

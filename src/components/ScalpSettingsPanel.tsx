@@ -281,10 +281,13 @@ export function ScalpSettingsPanel({
             <div style={{ fontWeight: 700, color: '#e6edf3', marginBottom: 3 }}>
               스캘핑 세션
             </div>
-            <div style={{ fontSize: 11, color: '#4a5a70' }}>
+            <div style={{ fontSize: 11, color: '#4a5a70', lineHeight: 1.5 }}>
               {isActive
                 ? '실행 중 — 설정 저장 후 다음 세션에 적용됩니다'
-                : '정지됨 — 저장 후 시작 버튼으로 세션을 시작하세요'}
+                : '정지됨 — 저장 후 아래 버튼 또는 툴바 [▶ 스캘핑 시작]으로 세션을 시작하세요'}
+            </div>
+            <div style={{ fontSize: 10, color: '#3a4a5a', marginTop: 4 }}>
+              이 패널은 상세 설정/상태 확인용입니다. 시작/정지는 툴바에서도 바로 가능합니다.
             </div>
           </div>
           <button

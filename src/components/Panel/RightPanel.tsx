@@ -9,7 +9,7 @@ import { MonitorSettingsPanel } from './MonitorSettings';
 import { ActivityLogPanel } from './ActivityLog';
 import { ApiKeyPanel } from './ApiKeyPanel';
 
-type Tab = 'drawings' | 'trade' | 'monitor' | 'log' | 'api';
+type Tab = 'drawings' | 'trade' | 'monitor' | 'log' | 'api' | 'scalp';
 
 interface Props {
   drawings: Drawing[];
@@ -52,6 +52,9 @@ interface Props {
   onRemoveConditionalOrder?: (id: string) => void;
   onConditionalDrawingHighlight?: (id: string | null) => void;
   onConditionalPriceChange?: (prices: number[]) => void;
+  // Scalp auto-trade logs (recent entries, shown in dedicated tab)
+  scalpLogs?: Array<{ id: number; ts: number; msg: string; level: string }>;
+  scalpIsActive?: boolean;
 }
 
 export function RightPanel({
@@ -65,6 +68,7 @@ export function RightPanel({
   ticker, currentPrice, availableUsdt, onPlaceOrder, onCancelOrder, onLimitPriceChange,
   conditionalOrders, onAddConditionalOrder, onRemoveConditionalOrder,
   onConditionalDrawingHighlight, onConditionalPriceChange,
+  scalpLogs, scalpIsActive,
 }: Props) {
   const [tab, setTab] = useState<Tab>('drawings');
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -89,6 +93,9 @@ export function RightPanel({
         <TabBtn active={tab === 'log'} onClick={() => setTab('log')}>로그</TabBtn>
         <TabBtn active={tab === 'api'} onClick={() => setTab('api')}>
           계좌{(futuresPositions?.length ?? 0) > 0 ? `(${futuresPositions!.length})` : ''}
+        </TabBtn>
+        <TabBtn active={tab === 'scalp'} onClick={() => setTab('scalp')}>
+          {scalpIsActive ? '⚡스캘핑' : '스캘핑'}
         </TabBtn>
       </div>
 
@@ -160,6 +167,7 @@ export function RightPanel({
           />
         )}
         {tab === 'log' && <ActivityLogPanel logs={logs} />}
+        {tab === 'scalp' && <ScalpLogPanel logs={scalpLogs ?? []} isActive={scalpIsActive ?? false} />}
         {tab === 'api' && (
           <ApiKeyPanel
             apiKey={binanceApiKey}
@@ -172,6 +180,67 @@ export function RightPanel({
             orders={futuresOrders}
             onCancelOrder={onCancelOrder}
           />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Scalp log panel ───────────────────────────────────────────────────────────
+
+function ScalpLogPanel({
+  logs,
+  isActive,
+}: {
+  logs: Array<{ id: number; ts: number; msg: string; level: string }>;
+  isActive: boolean;
+}) {
+  const recent = logs.slice(0, 10);
+  const levelColor = (level: string): string => {
+    if (level === 'error') return '#f6465d';
+    if (level === 'warn')  return '#f0b90b';
+    if (level === 'success') return '#0ecb81';
+    return '#848e9c';
+  };
+  const formatTime = (ts: number) => new Date(ts).toLocaleTimeString('ko-KR', { hour12: false });
+
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      {/* Status bar */}
+      <div style={{
+        padding: '6px 10px',
+        borderBottom: '1px solid #2a2e39',
+        fontSize: '0.72rem',
+        color: isActive ? '#0ecb81' : '#5e6673',
+        fontWeight: 600,
+        flexShrink: 0,
+      }}>
+        {isActive ? '● 스캘핑 실행 중' : '○ 스캘핑 정지됨'}
+      </div>
+
+      {/* Log list */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '4px 0' }}>
+        {recent.length === 0 ? (
+          <div style={{ padding: '20px 12px', color: '#3a4455', fontSize: '0.8rem', textAlign: 'center' }}>
+            스캘핑 로그 없음
+          </div>
+        ) : (
+          recent.map(entry => (
+            <div key={entry.id} style={{
+              padding: '3px 10px',
+              borderBottom: '1px solid #1e2330',
+              display: 'flex',
+              gap: 6,
+              alignItems: 'flex-start',
+            }}>
+              <span style={{ fontSize: '0.65rem', color: '#3a4a60', flexShrink: 0, marginTop: 1, fontFamily: 'monospace' }}>
+                {formatTime(entry.ts)}
+              </span>
+              <span style={{ fontSize: '0.75rem', color: levelColor(entry.level), lineHeight: 1.4, wordBreak: 'break-word' }}>
+                {entry.msg}
+              </span>
+            </div>
+          ))
         )}
       </div>
     </div>
