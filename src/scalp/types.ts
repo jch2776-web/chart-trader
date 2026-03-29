@@ -90,6 +90,17 @@ export interface ScalpLimitOrderParams {
   timeInForce: 'GTC' | 'IOC';
 }
 
+/** Parameters for a stop/take-profit market order. */
+export interface ScalpStopOrderParams {
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  /** Trigger price for STOP_MARKET or TAKE_PROFIT_MARKET. */
+  stopPrice: number;
+  quantity: number;
+  reduceOnly: boolean;
+  orderType: 'STOP_MARKET' | 'TAKE_PROFIT_MARKET';
+}
+
 /**
  * Minimal broker interface supplied from App.tsx.
  * Decoupled from Binance SDK — callers adapt to this contract.
@@ -97,6 +108,8 @@ export interface ScalpLimitOrderParams {
  */
 export interface ScalpBrokerCallbacks {
   placeLimitOrder(params: ScalpLimitOrderParams): Promise<string>;
+  /** Place a STOP_MARKET or TAKE_PROFIT_MARKET reduce-only order. */
+  placeStopMarketOrder(params: ScalpStopOrderParams): Promise<string>;
   cancelOrder(orderId: string, symbol: string): Promise<void>;
 }
 

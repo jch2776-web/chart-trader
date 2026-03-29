@@ -10,7 +10,7 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { subscribeScalp, unsubscribeScalp } from '../lib/binanceScalpMarketData';
+import { subscribeScalp, unsubscribeScalp, getScalpSnapshot } from '../lib/binanceScalpMarketData';
 import type { ScalpMarketSnapshot } from '../lib/binanceScalpMarketData';
 import { connectScalpUserStream } from '../lib/binanceUserStreamScalp';
 import type { ScalpUserStreamConfig } from '../lib/binanceUserStreamScalp';
@@ -54,6 +54,8 @@ export interface UseScalpAutoTradeResult {
     breakerOpen: boolean;
     exposureUsd: number;
   };
+  /** True when the live user-data WebSocket is connected. Always false in paper mode. */
+  userStreamConnected: boolean;
   resetBreaker: () => void;
   clearLogs: () => void;
 }
@@ -65,6 +67,8 @@ function createPaperBroker(): ScalpBrokerCallbacks {
   return {
     placeLimitOrder: (params) =>
       Promise.resolve(`PAPER_${++orderSeq}_${params.symbol}_${params.side}`),
+    placeStopMarketOrder: (params) =>
+      Promise.resolve(`PAPER_STOP_${++orderSeq}_${params.symbol}_${params.orderType}`),
     cancelOrder: () => Promise.resolve(),
   };
 }
@@ -83,6 +87,7 @@ export function useScalpAutoTrade({
   const [logs, setLogs]              = useState<ScalpLog[]>([]);
   const [activeOrders, setActiveOrders] = useState<ScalpActiveOrder[]>([]);
   const [recentTelemetry, setRecentTelemetry] = useState<ScalpTelemetryEvent[]>([]);
+  const [userStreamConnected, setUserStreamConnected] = useState(false);
 
   // ── Refs (hot path never reads React state) ─────────────────────────────
   const isActiveRef  = useRef(false);
@@ -166,10 +171,12 @@ export function useScalpAutoTrade({
         telemRef.current,
         riskRef.current,
         (msg, level) => addLog(msg, level),
+        getScalpSnapshot,
       );
       addLog(`⚡ 스캘핑 시작 — ${mode === 'live' ? '실전' : '페이퍼'} | ${settings.symbols.length}개 심볼`, 'success');
     } else {
       execRef.current?.cancelAll();
+      setUserStreamConnected(false);
       addLog('⏹ 스캘핑 중단 — 미체결 주문 취소', 'warn');
     }
   }, [mode, settings.symbols.length, addLog]);
@@ -191,11 +198,12 @@ export function useScalpAutoTrade({
       ...userStream,
       handlers: {
         onOrderUpdate: (upd) => execRef.current?.onOrderUpdate(upd),
-        onReconnect:   () => addLog('↺ 유저 스트림 재연결', 'warn'),
+        onConnect:     () => { setUserStreamConnected(true);  addLog('✅ 유저 스트림 연결됨', 'success'); },
+        onReconnect:   () => { setUserStreamConnected(false); addLog('↺ 유저 스트림 재연결 중…', 'warn'); },
         onError:       (msg) => addLog(`유저 스트림 오류: ${msg}`, 'error'),
       },
     });
-    return stop;
+    return () => { setUserStreamConnected(false); stop(); };
   }, [isActive, mode, userStream, addLog]);
 
   // ── Tick: order timeout / reprice / UI refresh ───────────────────────────
@@ -223,6 +231,7 @@ export function useScalpAutoTrade({
     activeOrders,
     recentTelemetry,
     stats,
+    userStreamConnected,
     resetBreaker: () => { riskRef.current.resetBreaker(); addLog('✅ 차단기 수동 해제', 'success'); },
     clearLogs: () => setLogs([]),
   };

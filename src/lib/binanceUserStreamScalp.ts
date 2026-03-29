@@ -52,6 +52,8 @@ type RawUserMsg = RawOrderUpdate | RawAccountUpdate | { e: string };
 export interface ScalpUserStreamHandlers {
   onOrderUpdate?: (update: ScalpOrderUpdate) => void;
   onBalanceChange?: (asset: string, walletBalance: number) => void;
+  /** Called when the WebSocket connection is first established (or re-established). */
+  onConnect?: () => void;
   onReconnect?: () => void;
   onError?: (msg: string) => void;
 }
@@ -127,6 +129,7 @@ export function connectScalpUserStream(cfg: ScalpUserStreamConfig): () => void {
     }
 
     ws = new WebSocket(`${WS_BASE}/${listenKey}`);
+    ws.onopen  = () => { cfg.handlers.onConnect?.(); };
     ws.onmessage = (evt: MessageEvent<string>) => handleMessage(evt.data);
     ws.onclose = () => {
       if (stopped) return;

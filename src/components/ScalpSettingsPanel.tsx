@@ -228,9 +228,23 @@ interface Props {
   onClose: () => void;
   isActive: boolean;
   onToggleActive: (active: boolean) => void;
+  /** True when the live user-data WebSocket stream is connected. */
+  streamConnected?: boolean;
+  /** Summary stats from the running session (shown when active). */
+  sessionStats?: {
+    sessionTrades: number;
+    consecutiveLosses: number;
+    breakerOpen: boolean;
+    exposureUsd: number;
+  };
+  activeOrderCount?: number;
+  onResetBreaker?: () => void;
 }
 
-export function ScalpSettingsPanel({ settings, onSave, onClose, isActive, onToggleActive }: Props) {
+export function ScalpSettingsPanel({
+  settings, onSave, onClose, isActive, onToggleActive,
+  streamConnected, sessionStats, activeOrderCount, onResetBreaker,
+}: Props) {
   const [draft, setDraft] = useState<ScalpSettings>({ ...settings });
 
   function set<K extends keyof ScalpSettings>(key: K, value: ScalpSettings[K]) {
@@ -289,6 +303,47 @@ export function ScalpSettingsPanel({ settings, onSave, onClose, isActive, onTogg
             {isActive ? '⏹ 정지' : '▶ 시작'}
           </button>
         </div>
+
+        {/* Live session status (shown only when active) */}
+        {isActive && (
+          <div style={{ ...S.section, padding: 12, display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 8 }}>
+            <div style={{ textAlign: 'center' as const }}>
+              <div style={{ fontSize: 10, color: '#4a5a70', marginBottom: 2 }}>유저 스트림</div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: streamConnected ? '#0ecb81' : '#f6465d' }}>
+                {streamConnected ? '● 연결됨' : '○ 끊김'}
+              </div>
+            </div>
+            <div style={{ textAlign: 'center' as const }}>
+              <div style={{ fontSize: 10, color: '#4a5a70', marginBottom: 2 }}>활성 주문</div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: '#e6edf3' }}>{activeOrderCount ?? 0}</div>
+            </div>
+            <div style={{ textAlign: 'center' as const }}>
+              <div style={{ fontSize: 10, color: '#4a5a70', marginBottom: 2 }}>세션 진입</div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: '#e6edf3' }}>{sessionStats?.sessionTrades ?? 0}</div>
+            </div>
+            <div style={{ textAlign: 'center' as const }}>
+              <div style={{ fontSize: 10, color: '#4a5a70', marginBottom: 2 }}>노출 (USD)</div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: (sessionStats?.exposureUsd ?? 0) > 0 ? '#f0b90b' : '#e6edf3' }}>
+                ${(sessionStats?.exposureUsd ?? 0).toFixed(1)}
+              </div>
+            </div>
+            {sessionStats?.breakerOpen && (
+              <div style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 }}>
+                <span style={{ fontSize: 12, color: '#f6465d', fontWeight: 700 }}>
+                  ⛔ 연속 손실 차단기 동작 중 ({sessionStats.consecutiveLosses}회)
+                </span>
+                {onResetBreaker && (
+                  <button
+                    style={{ background: '#0ecb8122', border: '1px solid #0ecb8166', borderRadius: 4, color: '#0ecb81', fontSize: 11, padding: '3px 10px', cursor: 'pointer' }}
+                    onClick={onResetBreaker}
+                  >
+                    해제
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Symbols */}
         <div style={S.section}>

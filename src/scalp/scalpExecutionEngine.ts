@@ -3,10 +3,11 @@
  *
  * Design:
  *   1. Entry submitted as LIMIT GTC (post-only intent; exchange enforces maker).
- *   2. If not filled within entryTtlMs, reprice up to maxRepriceCount times.
+ *   2. If not filled within entryTtlMs, reprice up to maxRepriceCount times,
+ *      each time using the current best bid/ask from the market snapshot.
  *   3. After maxRepriceCount reprices, submit LIMIT IOC as last-resort fallback.
  *   4. If IOC misses, skip this candidate entirely.
- *   5. On full fill: attach reduce-only LIMIT TP and stop-market SL via broker.
+ *   5. On full fill: attach reduce-only LIMIT GTC TP + STOP_MARKET SL via broker.
  *   6. Partial fills: cancel remainder immediately; proceed with filled qty.
  *
  * All async operations delegate to ScalpBrokerCallbacks.
@@ -21,6 +22,7 @@ import type {
   ScalpOrderUpdate,
   ScalpBrokerCallbacks,
 } from './types';
+import type { ScalpMarketSnapshot } from '../lib/binanceScalpMarketData';
 import type { ScalpTelemetry } from './scalpTelemetry';
 import type { ScalpRiskEngine } from './scalpRiskEngine';
 import type { ScalpSettings } from './scalpSettings';
@@ -51,6 +53,8 @@ export function createScalpExecutionEngine(
   telemetry: ScalpTelemetry,
   risk: ScalpRiskEngine,
   onLog: (msg: string, level: 'info' | 'warn' | 'error') => void,
+  /** Returns the latest market snapshot for a symbol, or null if unavailable. */
+  getSnapshot: (symbol: string) => ScalpMarketSnapshot | null,
 ): ScalpExecutionEngine {
 
   // orderId → active order
@@ -80,32 +84,52 @@ export function createScalpExecutionEngine(
     const qty = order.filledQty;
     if (qty <= 0) return;
 
+    const exitSide = oppositeSide(ctx);
+    let tpOrderId = '';
+    let slOrderId = '';
+
     try {
-      // TP: reduce-only LIMIT IOC at tpRef
-      const tpOrderId = await broker.placeLimitOrder({
+      // TP: reduce-only LIMIT GTC (passive maker — saves taker fees on favourable moves)
+      tpOrderId = await broker.placeLimitOrder({
         symbol: ctx.symbol,
-        side: oppositeSide(ctx),
+        side: exitSide,
         price: ctx.takeProfitPrice,
         quantity: qty,
         reduceOnly: true,
         timeInForce: 'GTC',
       });
-      // SL: reduce-only LIMIT GTC at stopRef
-      // (In production this should be STOP_MARKET; using LIMIT as skeleton approximation)
-      const slOrderId = await broker.placeLimitOrder({
+    } catch (e) {
+      onLog(`[${ctx.symbol}] TP 주문 실패: ${e instanceof Error ? e.message : String(e)}`, 'error');
+    }
+
+    try {
+      // SL: reduce-only STOP_MARKET — triggers at market to prevent stop miss
+      slOrderId = await broker.placeStopMarketOrder({
         symbol: ctx.symbol,
-        side: oppositeSide(ctx),
-        price: ctx.stopPrice,
+        side: exitSide,
+        stopPrice: ctx.stopPrice,
         quantity: qty,
         reduceOnly: true,
-        timeInForce: 'GTC',
+        orderType: 'STOP_MARKET',
       });
-      order.tpOrderId = tpOrderId;
-      order.slOrderId = slOrderId;
-      telemetry.emit({ type: 'tpsl_attached', entryOrderId: order.orderId, tpOrderId, slOrderId, ts: Date.now() });
-      onLog(`[${ctx.symbol}] TP/SL 부착 완료 — TP=${ctx.takeProfitPrice.toFixed(4)} SL=${ctx.stopPrice.toFixed(4)}`, 'info');
     } catch (e) {
-      onLog(`[${ctx.symbol}] TP/SL 부착 실패: ${e instanceof Error ? e.message : String(e)}`, 'error');
+      onLog(`[${ctx.symbol}] SL 주문 실패 — 포지션 무보호 상태: ${e instanceof Error ? e.message : String(e)}`, 'error');
+    }
+
+    if (tpOrderId || slOrderId) {
+      order.tpOrderId = tpOrderId || undefined;
+      order.slOrderId = slOrderId || undefined;
+      telemetry.emit({
+        type: 'tpsl_attached',
+        entryOrderId: order.orderId,
+        tpOrderId: tpOrderId || '(실패)',
+        slOrderId:  slOrderId || '(실패)',
+        ts: Date.now(),
+      });
+      onLog(
+        `[${ctx.symbol}] TP/SL 부착 — TP=${tpOrderId ? ctx.takeProfitPrice.toFixed(4) : '실패'} SL=${slOrderId ? ctx.stopPrice.toFixed(4) : '실패'}`,
+        slOrderId ? 'info' : 'warn',
+      );
     }
   }
 
@@ -239,8 +263,13 @@ export function createScalpExecutionEngine(
 
       // TTL exceeded
       if (order.repriceCount < order.ctx.maxRepriceCount) {
-        // Reprice to current best price (caller must pass current snapshot; for now use same price offset)
-        const newPrice = order.ctx.submitPrice; // engine caller should inject live price
+        // Reprice to current live best bid/ask (maker-biased, one tick inside mid)
+        const snap = getSnapshot(order.ctx.symbol);
+        const newPrice = snap
+          ? (order.ctx.side === 'long'
+              ? snap.bid                         // join best bid queue
+              : snap.ask)                        // join best ask queue
+          : order.ctx.submitPrice;               // fallback: hold previous price
         void reprice(order, newPrice);
       } else {
         // All reprices exhausted

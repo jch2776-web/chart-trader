@@ -2085,8 +2085,32 @@ function AppInner() {
   });
   altAutoTradeSetActiveRef.current = altAutoTrade.setActive;
 
+  // ── Scalp listenKey helpers (USER_STREAM — only X-MBX-APIKEY required, no signature) ──
+  const scalpGetListenKey = React.useCallback(async (): Promise<string> => {
+    const key = binanceApiKey;
+    if (!key) throw new Error('API 키 없음');
+    const res = await fetch('https://fapi.binance.com/fapi/v1/listenKey', {
+      method: 'POST',
+      headers: { 'X-MBX-APIKEY': key },
+    });
+    if (!res.ok) throw new Error(`listenKey POST 실패: ${res.status}`);
+    const json = await res.json() as { listenKey?: string };
+    if (!json.listenKey) throw new Error('listenKey 응답 없음');
+    return json.listenKey;
+  }, [binanceApiKey]);
+
+  const scalpRenewListenKey = React.useCallback(async (lk: string): Promise<void> => {
+    const key = binanceApiKey;
+    if (!key) return;
+    await fetch(`https://fapi.binance.com/fapi/v1/listenKey`, {
+      method: 'PUT',
+      headers: { 'X-MBX-APIKEY': key, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ listenKey: lk }),
+    });
+  }, [binanceApiKey]);
+
   // ── Scalp auto-trade broker adapter ──────────────────────────────────────
-  // Wraps futuresPlaceOrder (returns void + onAck) into the ScalpBrokerCallbacks interface.
+  // Wraps futuresPlaceOrder / futuresPlaceTPSL into the ScalpBrokerCallbacks interface.
   const scalpBroker = React.useMemo(() => ({
     placeLimitOrder: (params: {
       symbol: string;
@@ -2110,9 +2134,29 @@ function AppInner() {
           opts,
         ).catch(reject);
       }),
+    placeStopMarketOrder: (params: {
+      symbol: string;
+      side: 'BUY' | 'SELL';
+      stopPrice: number;
+      quantity: number;
+      reduceOnly: boolean;
+      orderType: 'STOP_MARKET' | 'TAKE_PROFIT_MARKET';
+    }) =>
+      new Promise<string>((resolve, reject) => {
+        const isTP = params.orderType === 'TAKE_PROFIT_MARKET';
+        futuresPlaceTPSL(
+          params.symbol,
+          params.side,
+          params.quantity,
+          isTP ? params.stopPrice : undefined,
+          isTP ? undefined : params.stopPrice,
+          'BOTH',
+          { onPlacedOrders: (refs) => { const r = refs[0]; if (r) resolve(r.orderId); else reject(new Error('orderId 없음')); } },
+        ).catch(reject);
+      }),
     cancelOrder: (orderId: string, symbol: string) =>
       futuresCancelOrder(orderId, symbol),
-  }), [futuresPlaceOrder, futuresCancelOrder]);
+  }), [futuresPlaceOrder, futuresPlaceTPSL, futuresCancelOrder]);
 
   // ── Scalp auto-trade hook ─────────────────────────────────────────────────
   const scalpAutoTrade = useScalpAutoTrade({
@@ -2126,7 +2170,9 @@ function AppInner() {
       addLog(mappedType, `[스캘핑] ${msg}`);
     },
     broker: autoTradeMode === 'live' ? scalpBroker : undefined,
-    // userStream: wire in when listenKey helpers are available
+    userStream: autoTradeMode === 'live' && binanceApiKey
+      ? { getListenKey: scalpGetListenKey, renewListenKey: scalpRenewListenKey }
+      : undefined,
   });
 
   const tryAcquireAutoTradeLeaderLock = useCallback(async (): Promise<boolean> => {
@@ -4672,6 +4718,10 @@ function AppInner() {
           onClose={() => setShowScalpSettings(false)}
           isActive={scalpAutoTrade.isActive}
           onToggleActive={scalpAutoTrade.setActive}
+          streamConnected={scalpAutoTrade.userStreamConnected}
+          sessionStats={scalpAutoTrade.stats}
+          activeOrderCount={scalpAutoTrade.activeOrders.length}
+          onResetBreaker={scalpAutoTrade.resetBreaker}
         />
       )}
 
