@@ -59,6 +59,7 @@ export function ActivityLogPanel({ logs }: Props) {
             <span style={{ color: LOG_COLORS[log.type], fontSize: '0.85rem' }}>
               {log.type === 'signal' ? '⚡ ' : log.type === 'order' ? '✓ ' : log.type === 'error' ? '✕ ' : log.type === 'warn' ? '⚠ ' : '· '}
               {log.message}
+              {(log.repeatCount ?? 1) > 1 ? ` ×${log.repeatCount}` : ''}
             </span>
           </div>
         ))}

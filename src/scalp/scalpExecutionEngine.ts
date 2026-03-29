@@ -64,12 +64,20 @@ export function createScalpExecutionEngine(
   const _orders = new Map<string, ScalpActiveOrder>();
   // symbol → candidateId (one order per symbol at a time)
   const _symbolLock = new Map<string, string>();
+  // symbol → timestamp until which new entries are blocked after a broker error
+  const _errorCooldownUntil = new Map<string, number>();
   // tpOrderId → entry orderId (reverse index for sibling cancel)
   const _tpIndex = new Map<string, string>();
   // slOrderId → entry orderId (reverse index for sibling cancel)
   const _slIndex = new Map<string, string>();
   // orderIds currently in-flight for sibling cancel (dedup guard)
   const _siblingCancelInFlight = new Set<string>();
+  const ERROR_COOLDOWN_MS = 15_000;
+  // Global order throttle: prevents >2 broker calls/second across all symbols
+  const MIN_ORDER_INTERVAL_MS = 500;
+  let _lastOrderAt = 0;
+  // Stop guard: prevents late async broker responses from reviving a stopped session.
+  let _disposed = false;
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -156,6 +164,7 @@ export function createScalpExecutionEngine(
   // ── TP/SL attachment ───────────────────────────────────────────────────────
 
   async function attachTpSl(order: ScalpActiveOrder): Promise<void> {
+    if (_disposed) return;
     const { ctx } = order;
     const qty = order.filledQty;
     if (qty <= 0) return;
@@ -217,6 +226,7 @@ export function createScalpExecutionEngine(
   // ── Entry submission ───────────────────────────────────────────────────────
 
   async function submitEntry(ctx: ScalpOrderContext, ioc: boolean): Promise<void> {
+    if (_disposed) return;
     try {
       const orderId = await broker.placeLimitOrder({
         symbol: ctx.symbol,
@@ -226,6 +236,10 @@ export function createScalpExecutionEngine(
         reduceOnly: false,
         timeInForce: ioc ? 'IOC' : 'GTC',
       });
+      if (_disposed) {
+        broker.cancelOrder(orderId, ctx.symbol).catch(() => {});
+        return;
+      }
 
       const activeOrder: ScalpActiveOrder = {
         ctx,
@@ -238,13 +252,20 @@ export function createScalpExecutionEngine(
         lastUpdatedAt: Date.now(),
       };
       _orders.set(orderId, activeOrder);
-      _symbolLock.set(ctx.symbol, ctx.candidateId);
       risk.recordEntry(ctx.symbol);
       telemetry.emit({ type: 'order_submitted', ctx, orderId, ts: Date.now() });
       onLog(`[${ctx.symbol}] 주문 제출 — ${ioc ? 'IOC' : 'GTC'} ${side(ctx)} ${ctx.quantity} @ ${ctx.submitPrice.toFixed(4)}`, 'info');
     } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e);
+      const isMinNotionalError = errMsg.includes('-4164') || /notional/i.test(errMsg);
+      const cooldownMs = isMinNotionalError ? 60_000 : ERROR_COOLDOWN_MS;
+      const until = Date.now() + cooldownMs;
+      _errorCooldownUntil.set(ctx.symbol, until);
       _symbolLock.delete(ctx.symbol);
-      onLog(`[${ctx.symbol}] 주문 제출 실패: ${e instanceof Error ? e.message : String(e)}`, 'error');
+      onLog(
+        `[${ctx.symbol}] 주문 제출 실패: ${errMsg} — ${Math.ceil(cooldownMs / 1000)}초 쿨다운`,
+        'error',
+      );
     }
   }
 
@@ -268,17 +289,25 @@ export function createScalpExecutionEngine(
   // ── onSignal ───────────────────────────────────────────────────────────────
 
   function onSignal(candidate: ScalpCandidate, quantityUsd: number, settings: ScalpSettings): void {
+    if (_disposed) return;
+    const now = Date.now();
     // One active order per symbol at a time
     if (_symbolLock.has(candidate.symbol)) return;
+    const cooldownUntil = _errorCooldownUntil.get(candidate.symbol) ?? 0;
+    if (cooldownUntil > now) return;
+    if (cooldownUntil > 0) _errorCooldownUntil.delete(candidate.symbol);
+    if (now - _lastOrderAt < MIN_ORDER_INTERVAL_MS) return;
 
     const qty = quantityUsd / candidate.entryRef;
     if (qty <= 0) return;
+    const roundedQty = parseFloat(qty.toFixed(3));
+    if (roundedQty <= 0) return;
 
     const ctx: ScalpOrderContext = {
       candidateId: candidate.id,
       symbol: candidate.symbol,
       side: candidate.side,
-      quantity: parseFloat(qty.toFixed(3)), // rounded to reasonable precision
+      quantity: roundedQty, // rounded to reasonable precision
       submitPrice: candidate.entryRef,
       entryTtlMs: settings.entryTtlMs,
       maxRepriceCount: settings.maxRepriceCount,
@@ -286,6 +315,9 @@ export function createScalpExecutionEngine(
       takeProfitPrice: candidate.tpRef,
     };
 
+    _lastOrderAt = now;
+    // Acquire lock before async broker call to prevent duplicate orders from hot WS loop races.
+    _symbolLock.set(candidate.symbol, candidate.id);
     telemetry.emit({ type: 'signal_emitted', candidate, ts: Date.now() });
     void submitEntry(ctx, false);
   }
@@ -293,6 +325,7 @@ export function createScalpExecutionEngine(
   // ── onOrderUpdate ──────────────────────────────────────────────────────────
 
   function onOrderUpdate(update: ScalpOrderUpdate): void {
+    if (_disposed) return;
     // ── Path A: entry order update ──────────────────────────────────────────
     const entryOrder = _orders.get(update.orderId);
     if (entryOrder) {
@@ -312,7 +345,10 @@ export function createScalpExecutionEngine(
         risk.updateExposure(entryOrder.avgFillPrice * entryOrder.filledQty);
         telemetry.emit({ type: 'full_fill', orderId: update.orderId, qty: update.executedQty, price: update.avgPrice, ts: update.ts });
         onLog(`[${entryOrder.ctx.symbol}] 체결 완료 — ${entryOrder.filledQty} @ ${entryOrder.avgFillPrice.toFixed(4)}`, 'info');
-        void attachTpSl(entryOrder);
+        if (!entryOrder.tpslAttachStarted) {
+          entryOrder.tpslAttachStarted = true;
+          void attachTpSl(entryOrder);
+        }
 
       } else if (update.status === 'CANCELED' || update.status === 'REJECTED' || update.status === 'EXPIRED') {
         // Handle partial fill on cancel: proceed with filled qty if > 0
@@ -321,7 +357,10 @@ export function createScalpExecutionEngine(
           onLog(`[${entryOrder.ctx.symbol}] 부분 체결 후 취소 — 체결된 ${entryOrder.filledQty} 기준 TP/SL 부착`, 'warn');
           _symbolLock.delete(entryOrder.ctx.symbol);
           risk.updateExposure(entryOrder.avgFillPrice * entryOrder.filledQty);
-          void attachTpSl(entryOrder);
+          if (!entryOrder.tpslAttachStarted) {
+            entryOrder.tpslAttachStarted = true;
+            void attachTpSl(entryOrder);
+          }
         } else {
           const newState: ScalpOrderState = update.status === 'REJECTED' ? 'rejected' : 'canceled';
           setState(update.orderId, newState);
@@ -362,6 +401,7 @@ export function createScalpExecutionEngine(
   // ── tick ───────────────────────────────────────────────────────────────────
 
   function tick(): void {
+    if (_disposed) return;
     const now = Date.now();
     for (const [, order] of _orders) {
       if (order.state !== 'open' && order.state !== 'partially_filled') continue;
@@ -402,6 +442,7 @@ export function createScalpExecutionEngine(
   // ── cancelAll ─────────────────────────────────────────────────────────────
 
   function cancelAll(): void {
+    _disposed = true;
     const now = Date.now();
     for (const [, order] of _orders) {
       if (order.state === 'open' || order.state === 'partially_filled') {
@@ -419,6 +460,8 @@ export function createScalpExecutionEngine(
     }
     _orders.clear();
     _symbolLock.clear();
+    _errorCooldownUntil.clear();
+    _lastOrderAt = 0;
     _tpIndex.clear();
     _slIndex.clear();
     _siblingCancelInFlight.clear();

@@ -1,222 +1,248 @@
 /**
  * ScalpSettingsPanel — settings modal for the scalp auto-trade module.
- * Completely separate from the alt-auto settings modal.
+ * Style matches AutoTradeSettingsModal. Completely separate from alt-auto settings.
  */
 
 import { useState } from 'react';
 import type { ScalpSettings } from '../scalp/scalpSettings';
 import { DEFAULT_SCALP_SETTINGS } from '../scalp/scalpSettings';
 
-// ── Styles ────────────────────────────────────────────────────────────────────
+// ── Popular futures symbols for the picker ────────────────────────────────────
 
-const S = {
+const POPULAR_SYMBOLS = [
+  'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
+  'DOGEUSDT', 'ADAUSDT', 'AVAXUSDT', 'DOTUSDT', 'MATICUSDT',
+  'LTCUSDT', 'LINKUSDT', 'ATOMUSDT', 'NEARUSDT', 'AAVEUSDT',
+  'UNIUSDT', 'APTUSDT', 'ARBUSDT', 'OPUSDT', 'SUIUSDT',
+  'PEPEUSDT', 'WIFUSDT', 'TONUSDT', 'TRUMPUSDT', 'SHIBUSDT',
+];
+
+// ── Styles (matches AutoTradeSettingsModal) ───────────────────────────────────
+
+const s: Record<string, React.CSSProperties> = {
   overlay: {
-    position: 'fixed' as const,
-    inset: 0,
-    background: 'rgba(0,0,0,0.72)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 9100,
+    position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 9100,
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
   },
   modal: {
-    background: '#1a2232',
-    border: '1px solid #2d3a4e',
-    borderRadius: 10,
-    width: 560,
-    maxWidth: '96vw',
-    maxHeight: '90vh',
-    overflowY: 'auto' as const,
-    padding: 24,
-    color: '#c9d1d9',
-    fontFamily: 'Inter, system-ui, sans-serif',
-    fontSize: 13,
+    background: '#1e222d', border: '1px solid #2a2e39', borderRadius: 10,
+    width: 'min(520px, 96vw)', display: 'flex', flexDirection: 'column',
+    boxShadow: '0 12px 40px rgba(0,0,0,0.6)', overflow: 'hidden',
+    maxHeight: '92vh',
   },
   header: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 20,
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+    padding: '14px 20px', borderBottom: '1px solid #2a2e39', flexShrink: 0,
   },
-  title: {
-    fontSize: 16,
-    fontWeight: 700,
-    color: '#e6edf3',
-    display: 'flex',
-    alignItems: 'center',
-    gap: 8,
-  },
+  title: { color: '#d1d4dc', fontWeight: 700, fontSize: '1rem', display: 'flex', alignItems: 'center', gap: 8 },
   badge: {
-    background: '#f0b90b22',
-    border: '1px solid #f0b90b55',
-    color: '#f0b90b',
-    borderRadius: 4,
-    padding: '1px 7px',
-    fontSize: 10,
-    fontWeight: 600,
-    letterSpacing: '0.03em',
+    background: '#f0b90b22', border: '1px solid #f0b90b55', color: '#f0b90b',
+    borderRadius: 4, padding: '1px 7px', fontSize: '0.68rem', fontWeight: 600, letterSpacing: '0.03em',
   },
   closeBtn: {
-    background: 'none',
-    border: 'none',
-    color: '#6e7b8b',
-    fontSize: 20,
-    cursor: 'pointer',
-    lineHeight: 1,
-    padding: '0 4px',
+    background: 'none', border: 'none', color: '#5e6673', cursor: 'pointer',
+    fontSize: '1rem', padding: '4px 8px', borderRadius: 4,
+  },
+  modeBar: {
+    display: 'flex', borderBottom: '1px solid #2a2e39', flexShrink: 0,
+  },
+  modeBtn: {
+    flex: 1, background: 'none', border: 'none', cursor: 'pointer',
+    padding: '10px 0', fontSize: '0.85rem', fontWeight: 600,
+    color: '#5e6673', fontFamily: 'inherit', transition: 'all 0.15s',
+  },
+  modeBtnPaper: { color: '#0ecb81', borderBottom: '2px solid #0ecb81', background: 'rgba(14,203,129,0.05)' },
+  modeBtnLive:  { color: '#f6465d', borderBottom: '2px solid #f6465d', background: 'rgba(246,70,93,0.05)'  },
+  body: {
+    padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 16,
+    overflowY: 'auto', flex: 1,
   },
   section: {
-    marginBottom: 20,
-    background: '#1e2d42',
-    border: '1px solid #2d3a4e',
-    borderRadius: 8,
-    padding: 14,
+    display: 'flex', flexDirection: 'column', gap: 12,
   },
   sectionTitle: {
-    fontSize: 11,
-    fontWeight: 700,
-    color: '#8b9db0',
-    textTransform: 'uppercase' as const,
-    letterSpacing: '0.08em',
-    marginBottom: 12,
+    fontSize: '0.72rem', fontWeight: 700, color: '#5e6673',
+    textTransform: 'uppercase', letterSpacing: '0.08em',
   },
-  row: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 10,
-    marginBottom: 10,
-  },
-  label: {
-    flex: '0 0 180px',
-    color: '#8b9db0',
-    fontSize: 12,
-  },
-  input: {
-    flex: 1,
-    background: '#0d1117',
-    border: '1px solid #2d3a4e',
-    borderRadius: 5,
-    color: '#e6edf3',
-    padding: '5px 9px',
-    fontSize: 12,
-    fontFamily: 'monospace',
-    outline: 'none',
-    minWidth: 0,
-  },
+  fieldRow: { display: 'flex', flexDirection: 'column', gap: 5 },
+  label: { color: '#848e9c', fontSize: '0.8rem', fontWeight: 600 },
+  hint: { color: '#3a4558', fontSize: '0.74rem' },
+  numberInput: {
+    background: '#12151e', border: '1px solid #2a2e39', borderRadius: 5,
+    color: '#d1d4dc', fontSize: '0.92rem', padding: '6px 10px',
+    width: 100, fontFamily: '"SF Mono", Consolas, monospace', outline: 'none',
+    boxSizing: 'border-box',
+  } as React.CSSProperties,
+  unit: { color: '#5e6673', fontSize: '0.85rem' },
   select: {
-    flex: 1,
-    background: '#0d1117',
-    border: '1px solid #2d3a4e',
-    borderRadius: 5,
-    color: '#e6edf3',
-    padding: '5px 9px',
-    fontSize: 12,
-    outline: 'none',
+    background: '#12151e', border: '1px solid #2a2e39', borderRadius: 5,
+    color: '#d1d4dc', fontSize: '0.85rem', padding: '6px 10px',
+    outline: 'none', cursor: 'pointer',
   },
-  hint: {
-    fontSize: 11,
-    color: '#4a5a70',
-    marginTop: 3,
-    marginLeft: 190,
-    marginBottom: 6,
-    lineHeight: 1.5,
+  toggleChip: {
+    background: '#12151e', border: '1px solid #2a2e39', borderRadius: 5,
+    color: '#5e6673', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 600,
+    padding: '5px 12px', fontFamily: 'inherit', transition: 'all 0.15s',
   },
-  actions: {
-    display: 'flex',
-    gap: 8,
-    justifyContent: 'flex-end',
-    marginTop: 4,
+  toggleChipActive: {
+    borderColor: 'rgba(14,203,129,0.55)', color: '#0ecb81', background: 'rgba(14,203,129,0.1)',
+  },
+  toggleChipActiveLive: {
+    borderColor: 'rgba(246,70,93,0.55)', color: '#f6465d', background: 'rgba(246,70,93,0.1)',
+  },
+  divider: { height: 1, background: '#2a2e39', margin: '0 -20px' },
+  footer: {
+    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+    padding: '12px 20px', borderTop: '1px solid #2a2e39', flexShrink: 0,
+    background: '#1a1e28',
   },
   btnSave: {
-    background: '#0ecb81',
-    border: 'none',
-    borderRadius: 6,
-    color: '#0d1117',
-    fontWeight: 700,
-    fontSize: 13,
-    padding: '7px 20px',
-    cursor: 'pointer',
+    background: '#0ecb81', border: 'none', borderRadius: 6,
+    color: '#0d1117', fontWeight: 700, fontSize: '0.88rem',
+    padding: '7px 22px', cursor: 'pointer',
   },
   btnReset: {
-    background: '#1e2d42',
-    border: '1px solid #2d3a4e',
-    borderRadius: 6,
-    color: '#8b9db0',
-    fontSize: 12,
-    padding: '7px 14px',
-    cursor: 'pointer',
+    background: '#12151e', border: '1px solid #2a2e39', borderRadius: 6,
+    color: '#848e9c', fontSize: '0.8rem', padding: '7px 14px', cursor: 'pointer',
   },
   btnCancel: {
-    background: 'none',
-    border: '1px solid #2d3a4e',
-    borderRadius: 6,
-    color: '#6e7b8b',
-    fontSize: 12,
-    padding: '7px 14px',
-    cursor: 'pointer',
+    background: 'none', border: '1px solid #2a2e39', borderRadius: 6,
+    color: '#5e6673', fontSize: '0.8rem', padding: '7px 14px', cursor: 'pointer',
   },
 };
 
-// ── Helper sub-components ─────────────────────────────────────────────────────
+// ── Symbol picker ─────────────────────────────────────────────────────────────
 
-function NumRow({
-  label, hint, value, onChange, min, max, step,
-}: {
-  label: string;
-  hint?: string;
-  value: number;
-  onChange: (v: number) => void;
-  min?: number;
-  max?: number;
-  step?: number;
+function SymbolPicker({ symbols, onChange }: {
+  symbols: string[];
+  onChange: (s: string[]) => void;
+}) {
+  const [customInput, setCustomInput] = useState('');
+
+  const toggle = (sym: string) => {
+    onChange(
+      symbols.includes(sym)
+        ? symbols.filter(s => s !== sym)
+        : [...symbols, sym],
+    );
+  };
+
+  const addCustom = () => {
+    const sym = customInput.trim().toUpperCase();
+    if (sym && !symbols.includes(sym)) onChange([...symbols, sym]);
+    setCustomInput('');
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      {/* Selected symbols */}
+      {symbols.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+          {symbols.map(sym => (
+            <span
+              key={sym}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 4,
+                background: 'rgba(14,203,129,0.12)', border: '1px solid rgba(14,203,129,0.4)',
+                borderRadius: 4, padding: '2px 8px',
+                color: '#0ecb81', fontSize: '0.78rem', fontWeight: 600,
+                fontFamily: '"SF Mono", Consolas, monospace',
+              }}
+            >
+              {sym}
+              <button
+                onClick={() => toggle(sym)}
+                style={{ background: 'none', border: 'none', color: '#0ecb81', cursor: 'pointer', padding: '0 1px', lineHeight: 1, fontSize: '0.9rem' }}
+              >×</button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Popular symbols grid */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+        {POPULAR_SYMBOLS.map(sym => {
+          const active = symbols.includes(sym);
+          return (
+            <button
+              key={sym}
+              onClick={() => toggle(sym)}
+              style={{
+                ...(active
+                  ? { ...s.toggleChip, borderColor: 'rgba(14,203,129,0.55)', color: '#0ecb81', background: 'rgba(14,203,129,0.1)' }
+                  : s.toggleChip),
+                fontSize: '0.72rem', padding: '3px 8px',
+              }}
+            >
+              {sym.replace('USDT', '')}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Custom input */}
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+        <input
+          style={{ ...s.numberInput, width: '100%', maxWidth: 180, fontSize: '0.82rem' }}
+          placeholder="커스텀 심볼 (예: BTCUSDT)"
+          value={customInput}
+          onChange={e => setCustomInput(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') addCustom(); }}
+        />
+        <button
+          onClick={addCustom}
+          style={{ ...s.toggleChip, padding: '6px 14px', flexShrink: 0 }}
+        >
+          + 추가
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Field helpers ─────────────────────────────────────────────────────────────
+
+function NumField({ label, hint, value, onChange, min, max, step, unit }: {
+  label: string; hint?: string; value: number; onChange: (v: number) => void;
+  min?: number; max?: number; step?: number; unit?: string;
 }) {
   return (
-    <>
-      <div style={S.row}>
-        <span style={S.label}>{label}</span>
+    <div style={s.fieldRow}>
+      <label style={s.label}>{label}</label>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <input
           type="number"
-          style={S.input}
+          style={s.numberInput}
           value={value}
           min={min}
           max={max}
           step={step ?? 1}
-          onChange={e => {
-            const v = parseFloat(e.target.value);
-            if (!isNaN(v)) onChange(v);
-          }}
+          onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) onChange(v); }}
         />
+        {unit && <span style={s.unit}>{unit}</span>}
       </div>
-      {hint && <div style={S.hint}>{hint}</div>}
-    </>
+      {hint && <div style={s.hint}>{hint}</div>}
+    </div>
   );
 }
 
-function SelectRow<T extends string>({
-  label, hint, value, options, onChange,
-}: {
-  label: string;
-  hint?: string;
-  value: T;
+function SelectField<T extends string>({ label, hint, value, options, onChange }: {
+  label: string; hint?: string; value: T;
   options: { value: T; label: string }[];
   onChange: (v: T) => void;
 }) {
   return (
-    <>
-      <div style={S.row}>
-        <span style={S.label}>{label}</span>
-        <select
-          style={S.select}
-          value={value}
-          onChange={e => onChange(e.target.value as T)}
-        >
-          {options.map(o => (
-            <option key={o.value} value={o.value}>{o.label}</option>
-          ))}
-        </select>
-      </div>
-      {hint && <div style={S.hint}>{hint}</div>}
-    </>
+    <div style={s.fieldRow}>
+      <label style={s.label}>{label}</label>
+      <select
+        style={s.select}
+        value={value}
+        onChange={e => onChange(e.target.value as T)}
+      >
+        {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+      </select>
+      {hint && <div style={s.hint}>{hint}</div>}
+    </div>
   );
 }
 
@@ -224,13 +250,16 @@ function SelectRow<T extends string>({
 
 interface Props {
   settings: ScalpSettings;
+  mode: 'paper' | 'live';
   onSave: (s: ScalpSettings) => void;
+  onModeChange: (mode: 'paper' | 'live') => void;
   onClose: () => void;
   isActive: boolean;
   onToggleActive: (active: boolean) => void;
   /** True when the live user-data WebSocket stream is connected. */
   streamConnected?: boolean;
-  /** Summary stats from the running session (shown when active). */
+  /** Timestamp of last market data tick (null = no data yet). */
+  lastMarketTickAt?: number | null;
   sessionStats?: {
     sessionTrades: number;
     consecutiveLosses: number;
@@ -242,282 +271,298 @@ interface Props {
 }
 
 export function ScalpSettingsPanel({
-  settings, onSave, onClose, isActive, onToggleActive,
-  streamConnected, sessionStats, activeOrderCount, onResetBreaker,
+  settings, mode, onSave, onModeChange, onClose,
+  isActive, onToggleActive,
+  streamConnected, lastMarketTickAt, sessionStats, activeOrderCount, onResetBreaker,
 }: Props) {
   const [draft, setDraft] = useState<ScalpSettings>({ ...settings });
+  const isLive = mode === 'live';
 
   function set<K extends keyof ScalpSettings>(key: K, value: ScalpSettings[K]) {
     setDraft(prev => ({ ...prev, [key]: value }));
   }
 
-  function handleSave() {
-    onSave(draft);
-    onClose();
-  }
+  function handleSave() { onSave(draft); onClose(); }
+  function handleReset() { setDraft({ ...DEFAULT_SCALP_SETTINGS }); }
 
-  function handleReset() {
-    setDraft({ ...DEFAULT_SCALP_SETTINGS });
-  }
-
-  const symbolsText = draft.symbols.join(', ');
+  // Data feed age indicator
+  const now = Date.now();
+  const tickAgeMs = isActive && lastMarketTickAt ? now - lastMarketTickAt : null;
+  const dataLabel = !isActive
+    ? '—'
+    : tickAgeMs === null
+      ? '대기 중…'
+      : tickAgeMs < 1000
+        ? '● 실시간'
+        : tickAgeMs < 5000
+          ? `${(tickAgeMs / 1000).toFixed(1)}초 전`
+          : `⚠ ${(tickAgeMs / 1000).toFixed(0)}초 전 (지연)`;
+  const dataColor = !isActive ? '#3a4558' : tickAgeMs === null ? '#5e6673' : tickAgeMs < 2000 ? '#0ecb81' : '#f6465d';
 
   return (
-    <div style={S.overlay} onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <div style={S.modal}>
+    <div style={s.overlay} onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div style={s.modal}>
 
         {/* Header */}
-        <div style={S.header}>
-          <div style={S.title}>
-            <span>⚡ 스캘핑 자동매매 설정</span>
-            <span style={S.badge}>SCALP</span>
+        <div style={{ ...s.header, background: isLive ? 'rgba(246,70,93,0.06)' : 'rgba(14,203,129,0.05)' }}>
+          <div style={s.title}>
+            <span>⚡ 스캘핑 자동매매</span>
+            <span style={s.badge}>SCALP</span>
           </div>
-          <button style={S.closeBtn} onClick={onClose}>✕</button>
+          <button style={s.closeBtn} onClick={onClose}>✕</button>
         </div>
 
-        {/* Start/Stop toggle */}
-        <div style={{ ...S.section, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div>
-            <div style={{ fontWeight: 700, color: '#e6edf3', marginBottom: 3 }}>
-              스캘핑 세션
-            </div>
-            <div style={{ fontSize: 11, color: '#4a5a70', lineHeight: 1.5 }}>
-              {isActive
-                ? '실행 중 — 설정 저장 후 다음 세션에 적용됩니다'
-                : '정지됨 — 저장 후 아래 버튼 또는 툴바 [▶ 스캘핑 시작]으로 세션을 시작하세요'}
-            </div>
-            <div style={{ fontSize: 10, color: '#3a4a5a', marginTop: 4 }}>
-              이 패널은 상세 설정/상태 확인용입니다. 시작/정지는 툴바에서도 바로 가능합니다.
-            </div>
-          </div>
+        {/* Paper / Live mode selector */}
+        <div style={s.modeBar}>
           <button
-            style={{
-              background: isActive ? '#f6465d22' : '#0ecb8122',
-              border: `1px solid ${isActive ? '#f6465d66' : '#0ecb8166'}`,
-              borderRadius: 6,
-              color: isActive ? '#f6465d' : '#0ecb81',
-              fontWeight: 700,
-              fontSize: 13,
-              padding: '8px 18px',
-              cursor: 'pointer',
-            }}
-            onClick={() => onToggleActive(!isActive)}
+            style={{ ...s.modeBtn, ...(mode === 'paper' ? s.modeBtnPaper : {}) }}
+            onClick={() => !isActive && onModeChange('paper')}
+            title={isActive ? '실행 중에는 모드 변경 불가' : '페이퍼 모드 (모의)'}
           >
-            {isActive ? '⏹ 정지' : '▶ 시작'}
+            📄 페이퍼 (모의)
+          </button>
+          <button
+            style={{ ...s.modeBtn, ...(mode === 'live' ? s.modeBtnLive : {}) }}
+            onClick={() => !isActive && onModeChange('live')}
+            title={isActive ? '실행 중에는 모드 변경 불가' : '실전 모드 (실제 주문)'}
+          >
+            ⚡ 실전 (Live)
           </button>
         </div>
 
-        {/* Live session status (shown only when active) */}
-        {isActive && (
-          <div style={{ ...S.section, padding: 12, display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 8 }}>
-            <div style={{ textAlign: 'center' as const }}>
-              <div style={{ fontSize: 10, color: '#4a5a70', marginBottom: 2 }}>유저 스트림</div>
-              <div style={{ fontSize: 12, fontWeight: 700, color: streamConnected ? '#0ecb81' : '#f6465d' }}>
-                {streamConnected ? '● 연결됨' : '○ 끊김'}
+        <div style={s.body}>
+
+          {/* ── Session control ─────────────────────────────────────── */}
+          <div style={{
+            background: isLive ? 'rgba(246,70,93,0.05)' : 'rgba(14,203,129,0.04)',
+            border: `1px solid ${isLive ? 'rgba(246,70,93,0.15)' : 'rgba(14,203,129,0.12)'}`,
+            borderRadius: 8, padding: '12px 14px',
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12,
+          }}>
+            <div>
+              <div style={{ fontWeight: 700, color: '#d1d4dc', fontSize: '0.88rem', marginBottom: 3 }}>
+                스캘핑 세션 {isLive ? '(실전)' : '(페이퍼)'}
+              </div>
+              <div style={{ fontSize: '0.74rem', color: '#5e6673', lineHeight: 1.5 }}>
+                {isActive
+                  ? '실행 중 — 설정 저장 후 다음 세션에 적용됩니다'
+                  : '정지됨 — 저장 후 아래 버튼 또는 툴바에서 시작'}
+              </div>
+              <div style={{ fontSize: '0.7rem', color: '#3a4558', marginTop: 2 }}>
+                이 패널은 상세 설정 / 상태 확인용입니다. 시작/정지는 툴바 버튼에서도 가능합니다.
               </div>
             </div>
-            <div style={{ textAlign: 'center' as const }}>
-              <div style={{ fontSize: 10, color: '#4a5a70', marginBottom: 2 }}>활성 주문</div>
-              <div style={{ fontSize: 12, fontWeight: 700, color: '#e6edf3' }}>{activeOrderCount ?? 0}</div>
+            <button
+              style={{
+                background: isActive ? 'rgba(246,70,93,0.15)' : isLive ? 'rgba(246,70,93,0.12)' : 'rgba(14,203,129,0.12)',
+                border: `1px solid ${isActive ? '#f6465d66' : isLive ? '#f6465d44' : '#0ecb8144'}`,
+                borderRadius: 6, color: isActive ? '#f6465d' : isLive ? '#f6465d' : '#0ecb81',
+                fontWeight: 700, fontSize: '0.88rem', padding: '8px 18px', cursor: 'pointer', flexShrink: 0,
+              }}
+              onClick={() => onToggleActive(!isActive)}
+            >
+              {isActive ? '⏹ 정지' : '▶ 시작'}
+            </button>
+          </div>
+
+          {/* ── Live session status (active only) ──────────────────── */}
+          {isActive && (
+            <div style={{
+              display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)',
+              gap: 8, background: '#12151e', border: '1px solid #2a2e39',
+              borderRadius: 8, padding: '10px 12px',
+            }}>
+              <StatusCell
+                label="마켓 데이터"
+                value={dataLabel}
+                valueColor={dataColor}
+              />
+              <StatusCell
+                label={mode === 'live' ? '유저 스트림' : '브로커'}
+                value={mode === 'live'
+                  ? (streamConnected ? '● 연결됨' : '○ 재연결 중')
+                  : 'PAPER'}
+                valueColor={mode === 'live' ? (streamConnected ? '#0ecb81' : '#f6465d') : '#0ecb81'}
+              />
+              <StatusCell label="활성 주문" value={String(activeOrderCount ?? 0)} />
+              <StatusCell label="세션 진입" value={String(sessionStats?.sessionTrades ?? 0)} />
+              <StatusCell
+                label="노출 (USD)"
+                value={`$${(sessionStats?.exposureUsd ?? 0).toFixed(1)}`}
+                valueColor={(sessionStats?.exposureUsd ?? 0) > 0 ? '#f0b90b' : undefined}
+              />
+              <StatusCell
+                label="연속 손실"
+                value={String(sessionStats?.consecutiveLosses ?? 0)}
+                valueColor={(sessionStats?.consecutiveLosses ?? 0) > 0 ? '#f6465d' : undefined}
+              />
+              {sessionStats?.breakerOpen && (
+                <div style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingTop: 6, borderTop: '1px solid #2a2e39' }}>
+                  <span style={{ fontSize: '0.8rem', color: '#f6465d', fontWeight: 700 }}>
+                    ⛔ 연속 손실 차단기 동작 중 ({sessionStats.consecutiveLosses}회)
+                  </span>
+                  {onResetBreaker && (
+                    <button
+                      onClick={onResetBreaker}
+                      style={{ background: 'rgba(14,203,129,0.12)', border: '1px solid rgba(14,203,129,0.4)', borderRadius: 4, color: '#0ecb81', fontSize: '0.75rem', padding: '3px 10px', cursor: 'pointer' }}
+                    >해제</button>
+                  )}
+                </div>
+              )}
             </div>
-            <div style={{ textAlign: 'center' as const }}>
-              <div style={{ fontSize: 10, color: '#4a5a70', marginBottom: 2 }}>세션 진입</div>
-              <div style={{ fontSize: 12, fontWeight: 700, color: '#e6edf3' }}>{sessionStats?.sessionTrades ?? 0}</div>
-            </div>
-            <div style={{ textAlign: 'center' as const }}>
-              <div style={{ fontSize: 10, color: '#4a5a70', marginBottom: 2 }}>노출 (USD)</div>
-              <div style={{ fontSize: 12, fontWeight: 700, color: (sessionStats?.exposureUsd ?? 0) > 0 ? '#f0b90b' : '#e6edf3' }}>
-                ${(sessionStats?.exposureUsd ?? 0).toFixed(1)}
+          )}
+
+          {/* ── Live mode note ─────────────────────────────────────── */}
+          {isLive && !isActive && (
+            <div style={{ background: 'rgba(246,70,93,0.05)', border: '1px solid rgba(246,70,93,0.15)', borderRadius: 6, padding: '8px 12px' }}>
+              <div style={{ fontSize: '0.77rem', color: '#f6465d', fontWeight: 700, marginBottom: 3 }}>⚡ 실전 모드</div>
+              <div style={{ fontSize: '0.73rem', color: '#848e9c', lineHeight: 1.5 }}>
+                API 키가 설정되어 있어야 실제 주문이 발생합니다. 유저 스트림은 시작 후 자동 연결됩니다. 페이퍼 모드에서는 유저 스트림 없이도 동작합니다.
               </div>
             </div>
-            {sessionStats?.breakerOpen && (
-              <div style={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 }}>
-                <span style={{ fontSize: 12, color: '#f6465d', fontWeight: 700 }}>
-                  ⛔ 연속 손실 차단기 동작 중 ({sessionStats.consecutiveLosses}회)
-                </span>
-                {onResetBreaker && (
-                  <button
-                    style={{ background: '#0ecb8122', border: '1px solid #0ecb8166', borderRadius: 4, color: '#0ecb81', fontSize: 11, padding: '3px 10px', cursor: 'pointer' }}
-                    onClick={onResetBreaker}
-                  >
-                    해제
-                  </button>
-                )}
-              </div>
+          )}
+
+          <div style={s.divider} />
+
+          {/* ── Symbols ────────────────────────────────────────────── */}
+          <div style={s.section}>
+            <div style={s.sectionTitle}>거래 심볼</div>
+            <SymbolPicker
+              symbols={draft.symbols}
+              onChange={syms => set('symbols', syms)}
+            />
+            {draft.symbols.length === 0 && (
+              <div style={{ fontSize: '0.74rem', color: '#f6465d' }}>⚠ 심볼을 하나 이상 선택해야 시작 가능합니다</div>
             )}
           </div>
-        )}
 
-        {/* Symbols */}
-        <div style={S.section}>
-          <div style={S.sectionTitle}>거래 심볼</div>
-          <div style={{ ...S.row, alignItems: 'flex-start' }}>
-            <span style={{ ...S.label, paddingTop: 5 }}>심볼 목록</span>
-            <textarea
-              style={{
-                ...S.input,
-                height: 60,
-                resize: 'vertical',
-                fontFamily: 'monospace',
-                lineHeight: 1.5,
-              }}
-              value={symbolsText}
-              placeholder="BTCUSDT, ETHUSDT, SOLUSDT"
-              onChange={e => {
-                const syms = e.target.value
-                  .split(/[,\n]+/)
-                  .map(s => s.trim().toUpperCase())
-                  .filter(Boolean);
-                set('symbols', syms);
-              }}
-            />
+          <div style={s.divider} />
+
+          {/* ── Execution ──────────────────────────────────────────── */}
+          <div style={s.section}>
+            <div style={s.sectionTitle}>주문 실행</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <NumField label="레버리지" value={draft.leverage} min={1} max={125} unit="×" onChange={v => set('leverage', v)} />
+              <div style={s.fieldRow}>
+                <label style={s.label}>마진 방식</label>
+                <select style={s.select} value={draft.marginType} onChange={e => set('marginType', e.target.value as 'ISOLATED' | 'CROSSED')}>
+                  <option value="ISOLATED">ISOLATED (격리)</option>
+                  <option value="CROSSED">CROSSED (교차)</option>
+                </select>
+              </div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <NumField label="트레이드당 최대 손실" hint="수량 × 스탑 거리 기준" value={draft.maxPerTradeRiskUsd} min={1} step={1} unit="USD" onChange={v => set('maxPerTradeRiskUsd', v)} />
+              <NumField label="총 노출 한도" hint="전체 포지션 노셔널 합" value={draft.maxOpenExposureUsd} min={10} step={10} unit="USD" onChange={v => set('maxOpenExposureUsd', v)} />
+            </div>
+            <div style={s.fieldRow}>
+              <label style={s.label}>최소주문금액 사전검증</label>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  onClick={() => set('precheckMinNotional', true)}
+                  style={{
+                    ...s.toggleChip,
+                    ...(draft.precheckMinNotional
+                      ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive)
+                      : {}),
+                  }}
+                >
+                  ON
+                </button>
+                <button
+                  onClick={() => set('precheckMinNotional', false)}
+                  style={{
+                    ...s.toggleChip,
+                    ...(!draft.precheckMinNotional
+                      ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive)
+                      : {}),
+                  }}
+                >
+                  OFF
+                </button>
+              </div>
+              <div style={s.hint}>
+                ON이면 심볼별 최소 notional 미충족 주문을 제출 전에 차단합니다.
+              </div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <NumField label="진입 TTL" hint="미체결 후 재호가 대기" value={draft.entryTtlMs} min={500} step={500} unit="ms" onChange={v => set('entryTtlMs', v)} />
+              <NumField label="최대 재호가 횟수" hint="소진 후 IOC 1회" value={draft.maxRepriceCount} min={0} max={5} onChange={v => set('maxRepriceCount', v)} />
+            </div>
           </div>
-          <div style={S.hint}>쉼표 또는 줄바꿈으로 구분. 선물(USDT) 페어만 유효.</div>
+
+          <div style={s.divider} />
+
+          {/* ── Signal ─────────────────────────────────────────────── */}
+          <div style={s.section}>
+            <div style={s.sectionTitle}>신호 설정</div>
+            <SelectField
+              label="신호 모드"
+              hint="momentum=매수세 추종 / revert=극단 역추세 / both=둘 다"
+              value={draft.signalMode}
+              options={[
+                { value: 'both',     label: '둘 다 (both)' },
+                { value: 'momentum', label: 'Momentum만' },
+                { value: 'revert',   label: 'Revert (역추세)만' },
+              ]}
+              onChange={v => set('signalMode', v)}
+            />
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <NumField label="최소 호가 불균형" hint="|매수-매도| / 합계" value={draft.minImbalance} min={0.05} max={0.9} step={0.05} onChange={v => set('minImbalance', v)} />
+              <NumField label="최소 체결 압력" hint="2초 롤링 비율 불균형" value={draft.minTradePressure} min={0.05} max={0.9} step={0.05} onChange={v => set('minTradePressure', v)} />
+            </div>
+          </div>
+
+          <div style={s.divider} />
+
+          {/* ── Risk gates ─────────────────────────────────────────── */}
+          <div style={s.section}>
+            <div style={s.sectionTitle}>리스크 게이트</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <NumField label="최대 스프레드" hint="초과 시 진입 차단" value={draft.maxSpreadBps} min={0.5} max={20} step={0.5} unit="bps" onChange={v => set('maxSpreadBps', v)} />
+              <NumField label="최소 뎁스" hint="10bps 내 매수잔량 (0=OFF)" value={draft.minDepthUsd} min={0} step={10000} unit="USD" onChange={v => set('minDepthUsd', v)} />
+              <NumField label="최대 데이터 지연" hint="Staleness 초과 시 차단" value={draft.maxLatencyMs} min={100} max={5000} step={100} unit="ms" onChange={v => set('maxLatencyMs', v)} />
+              <NumField label="심볼 쿨다운" hint="거래 종료 후 재진입 대기" value={draft.symbolCooldownMs} min={1000} step={5000} unit="ms" onChange={v => set('symbolCooldownMs', v)} />
+              <NumField label="연속 손실 차단" hint="N회 이상 시 신규 진입 차단" value={draft.consecutiveLossBreaker} min={1} max={20} unit="회" onChange={v => set('consecutiveLossBreaker', v)} />
+              <NumField label="세션 최대 진입" hint="세션 내 누적 진입 한도" value={draft.maxDailyTrades} min={1} max={500} unit="회" onChange={v => set('maxDailyTrades', v)} />
+            </div>
+          </div>
+
         </div>
 
-        {/* Execution */}
-        <div style={S.section}>
-          <div style={S.sectionTitle}>주문 실행</div>
-          <NumRow label="레버리지 (배)" value={draft.leverage} min={1} max={125} onChange={v => set('leverage', v)} />
-          <SelectRow
-            label="마진 방식"
-            value={draft.marginType}
-            options={[
-              { value: 'ISOLATED', label: 'ISOLATED (격리)' },
-              { value: 'CROSSED',  label: 'CROSSED (교차)'  },
-            ]}
-            onChange={v => set('marginType', v)}
-          />
-          <NumRow
-            label="트레이드당 최대 손실 (USD)"
-            hint="손실 허용액 = 수량 × 스탑 거리. 실제 손실 한도."
-            value={draft.maxPerTradeRiskUsd}
-            min={1}
-            step={1}
-            onChange={v => set('maxPerTradeRiskUsd', v)}
-          />
-          <NumRow
-            label="총 노출 한도 (USD)"
-            hint="모든 스캘핑 포지션 노셔널 합산 한도."
-            value={draft.maxOpenExposureUsd}
-            min={10}
-            step={10}
-            onChange={v => set('maxOpenExposureUsd', v)}
-          />
-          <NumRow
-            label="진입주문 TTL (ms)"
-            hint="지정가 미체결 후 재호가 대기 시간."
-            value={draft.entryTtlMs}
-            min={500}
-            step={500}
-            onChange={v => set('entryTtlMs', v)}
-          />
-          <NumRow
-            label="최대 재호가 횟수"
-            hint="재호가 소진 후 IOC 한 번 시도, 실패 시 해당 후보 건너뜀."
-            value={draft.maxRepriceCount}
-            min={0}
-            max={5}
-            onChange={v => set('maxRepriceCount', v)}
-          />
+        {/* Footer */}
+        <div style={s.footer}>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button style={s.btnReset} onClick={handleReset}>초기화</button>
+            <button style={s.btnCancel} onClick={onClose}>취소</button>
+          </div>
+          <button
+            style={{ ...s.btnSave, ...(isLive ? { background: '#f6465d', color: '#fff' } : {}) }}
+            onClick={handleSave}
+          >
+            저장{isActive ? '' : ' 후 시작 가능'}
+          </button>
         </div>
 
-        {/* Signal */}
-        <div style={S.section}>
-          <div style={S.sectionTitle}>신호 설정</div>
-          <SelectRow
-            label="신호 모드"
-            hint="momentum=매수세 추종, revert=극단 흐름 역추세, both=둘 다."
-            value={draft.signalMode}
-            options={[
-              { value: 'both',     label: '둘 다 (both)'           },
-              { value: 'momentum', label: 'Micro-Momentum만'       },
-              { value: 'revert',   label: 'Micro-Revert (역추세)만' },
-            ]}
-            onChange={v => set('signalMode', v)}
-          />
-          <NumRow
-            label="최소 호가 불균형"
-            hint="|매수잔량 - 매도잔량| / 합계. 0.20 = 20% 이상 쏠림."
-            value={draft.minImbalance}
-            min={0.05}
-            max={0.9}
-            step={0.05}
-            onChange={v => set('minImbalance', v)}
-          />
-          <NumRow
-            label="최소 체결 압력"
-            hint="2초 롤링 체결 매수/매도 비율 불균형. 0.20 = 20% 이상."
-            value={draft.minTradePressure}
-            min={0.05}
-            max={0.9}
-            step={0.05}
-            onChange={v => set('minTradePressure', v)}
-          />
-        </div>
-
-        {/* Risk gates */}
-        <div style={S.section}>
-          <div style={S.sectionTitle}>리스크 게이트</div>
-          <NumRow
-            label="최대 스프레드 (bps)"
-            hint="bid-ask 스프레드가 이 값 초과 시 진입 차단."
-            value={draft.maxSpreadBps}
-            min={0.5}
-            max={20}
-            step={0.5}
-            onChange={v => set('maxSpreadBps', v)}
-          />
-          <NumRow
-            label="최소 뎁스 (USD)"
-            hint="중간가 기준 10bps 내 매수 잔량. 0 = 비활성화."
-            value={draft.minDepthUsd}
-            min={0}
-            step={10000}
-            onChange={v => set('minDepthUsd', v)}
-          />
-          <NumRow
-            label="최대 데이터 지연 (ms)"
-            hint="마켓 데이터 staleness 초과 시 차단."
-            value={draft.maxLatencyMs}
-            min={100}
-            max={5000}
-            step={100}
-            onChange={v => set('maxLatencyMs', v)}
-          />
-          <NumRow
-            label="심볼 쿨다운 (ms)"
-            hint="거래 종료 후 동일 심볼 재진입 대기 시간."
-            value={draft.symbolCooldownMs}
-            min={1000}
-            step={5000}
-            onChange={v => set('symbolCooldownMs', v)}
-          />
-          <NumRow
-            label="연속 손실 차단 (회)"
-            hint="연속 손실이 이 횟수 이상이면 모든 신규 진입 차단."
-            value={draft.consecutiveLossBreaker}
-            min={1}
-            max={20}
-            onChange={v => set('consecutiveLossBreaker', v)}
-          />
-          <NumRow
-            label="세션 최대 거래 수"
-            hint="세션 내 누적 진입 횟수 한도."
-            value={draft.maxDailyTrades}
-            min={1}
-            max={500}
-            onChange={v => set('maxDailyTrades', v)}
-          />
-        </div>
-
-        {/* Actions */}
-        <div style={S.actions}>
-          <button style={S.btnReset} onClick={handleReset}>초기화</button>
-          <button style={S.btnCancel} onClick={onClose}>취소</button>
-          <button style={S.btnSave} onClick={handleSave}>저장</button>
-        </div>
       </div>
     </div>
   );
 }
+
+// ── StatusCell ────────────────────────────────────────────────────────────────
+
+function StatusCell({ label, value, valueColor }: { label: string; value: string; valueColor?: string }) {
+  return (
+    <div style={{ textAlign: 'center' as const }}>
+      <div style={{ fontSize: '0.65rem', color: '#3a4558', fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase' as const, marginBottom: 2 }}>
+        {label}
+      </div>
+      <div style={{ fontSize: '0.8rem', fontWeight: 700, color: valueColor ?? '#d1d4dc', fontFamily: '"SF Mono", Consolas, monospace' }}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+// ── Need React for CSSProperties ──────────────────────────────────────────────
+import React from 'react';

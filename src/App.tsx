@@ -79,6 +79,10 @@ function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
 
+function normalizeBurstMessage(msg: string): string {
+  return msg.trim().replace(/\s+/g, ' ');
+}
+
 function coinLabel(symbol: string): string {
   return symbol.replace(/USDT$/i, '');
 }
@@ -480,8 +484,14 @@ function AppInner() {
   const scalpSettingsRef = React.useRef(scalpSettings);
   scalpSettingsRef.current = scalpSettings;
   const [showScalpSettings, setShowScalpSettings] = useState(false);
+  /** Independent scalp mode — separate from alt-auto `autoTradeMode`. Persisted to localStorage. */
+  const [scalpMode, setScalpModeState] = useState<'paper' | 'live'>(
+    () => (localStorage.getItem('scalp_mode') as 'paper' | 'live') ?? 'paper',
+  );
   /** true = hedge/dual-side mode; false = one-way. Read once when API keys are available. */
   const scalpPositionModeRef = React.useRef(false);
+  /** Symbol-level setup cache to avoid redundant leverage/margin API calls per scalp order. */
+  const scalpOrderSetupCacheRef = React.useRef<Record<string, { leverage: number; marginType: 'CROSSED' | 'ISOLATED' }>>({});
 
   // ── 실험실 자동설정 프리셋 ────────────────────────────────────────────────
   const [labAutoPresets, setLabAutoPresets] = useState<LabAutoPreset[]>(() => {
@@ -552,10 +562,38 @@ function AppInner() {
   const updateActiveFnRef = useRef<((id: string, active: boolean) => void) | null>(null);
 
   const addLog = useCallback((type: ActivityLog['type'], message: string) => {
-    setLogs(prev => [
-      ...prev,
-      { id: uid(), timestamp: Date.now(), type, message },
-    ].slice(-200));
+    const now = Date.now();
+    setLogs(prev => {
+      const nextNorm = normalizeBurstMessage(message);
+      // Collapse duplicates even when there are interleaved logs between them.
+      let matchIndex = -1;
+      for (let i = prev.length - 1; i >= 0; i -= 1) {
+        const item = prev[i];
+        if (item.type !== type) continue;
+        if (now - item.timestamp > 20_000) break;
+        if (normalizeBurstMessage(item.message) === nextNorm) {
+          matchIndex = i;
+          break;
+        }
+      }
+      if (matchIndex >= 0) {
+        const matched = prev[matchIndex];
+        const merged: ActivityLog = {
+          ...matched,
+          timestamp: now,
+          repeatCount: (matched.repeatCount ?? 1) + 1,
+        };
+        return [
+          ...prev.slice(0, matchIndex),
+          ...prev.slice(matchIndex + 1),
+          merged,
+        ].slice(-200);
+      }
+      return [
+        ...prev,
+        { id: uid(), timestamp: now, type, message, repeatCount: 1 },
+      ].slice(-200);
+    });
   }, []);
 
   const appendAltLifecycleDebug = useCallback((event: Record<string, unknown>) => {
@@ -2138,13 +2176,37 @@ function AppInner() {
       timeInForce: 'GTC' | 'IOC';
     }) =>
       new Promise<string>((resolve, reject) => {
-        const opts: PlaceOrderOptions = { onAck: (ack) => resolve(ack.orderId) };
+        const desiredLeverage = scalpSettingsRef.current.leverage;
+        const desiredMarginType = scalpSettingsRef.current.marginType;
+        const setupCacheKey = params.symbol;
+        const cachedSetup = scalpOrderSetupCacheRef.current[setupCacheKey];
+        const needsSetup = !params.reduceOnly && (!cachedSetup
+          || cachedSetup.leverage !== desiredLeverage
+          || cachedSetup.marginType !== desiredMarginType);
+        const opts: PlaceOrderOptions = {
+          skipRefresh: true,
+          skipLeverageSetup: !needsSetup,
+          skipMarginTypeSetup: !needsSetup,
+          onAck: (ack) => {
+            if (!ack.orderId) {
+              reject(new Error('orderId 없음'));
+              return;
+            }
+            if (!params.reduceOnly) {
+              scalpOrderSetupCacheRef.current[setupCacheKey] = {
+                leverage: desiredLeverage,
+                marginType: desiredMarginType,
+              };
+            }
+            resolve(ack.orderId);
+          },
+        };
         futuresPlaceOrder(
           params.side,
           params.price,
           params.quantity,
-          scalpSettingsRef.current.leverage,
-          scalpSettingsRef.current.marginType,
+          desiredLeverage,
+          desiredMarginType,
           params.reduceOnly,
           params.symbol,
           params.timeInForce,
@@ -2185,7 +2247,8 @@ function AppInner() {
   // ── Scalp auto-trade hook ─────────────────────────────────────────────────
   const scalpAutoTrade = useScalpAutoTrade({
     settings: scalpSettings,
-    mode: autoTradeMode,
+    mode: scalpMode,
+    availableMarginUsdt: scalpMode === 'live' ? futuresMarginBalance : paperTrading.balance,
     onLog: (msg, level) => {
       if (level === 'info') return;
       const mappedType: import('./types/trade').ActivityLog['type'] =
@@ -2193,26 +2256,30 @@ function AppInner() {
         level === 'warn'  ? 'warn'  : 'info';
       addLog(mappedType, `[스캘핑] ${msg}`);
     },
-    broker: autoTradeMode === 'live' ? scalpBroker : undefined,
-    userStream: autoTradeMode === 'live' && binanceApiKey
+    broker: scalpMode === 'live' ? scalpBroker : undefined,
+    userStream: scalpMode === 'live' && binanceApiKey
       ? { getListenKey: scalpGetListenKey, renewListenKey: scalpRenewListenKey }
       : undefined,
   });
 
   // ── Scalp direct start/stop (validates before calling setActive) ──────────
-  const handleToggleScalp = useCallback(() => {
-    if (!scalpAutoTrade.isActive) {
+  const setScalpActive = useCallback((active: boolean) => {
+    if (active === scalpAutoTrade.isActive) return;
+    if (active) {
       if (scalpSettings.symbols.length === 0) {
         addLog('warn', '[스캘핑] 시작 불가: 심볼을 먼저 설정하세요 (⚙ 스캘핑설정)');
         return;
       }
-      if (autoTradeMode === 'live' && !binanceApiKey) {
-        addLog('warn', '[스캘핑] 시작 불가: 실전 모드에서 API 키가 필요합니다');
+      if (scalpMode === 'live' && !binanceApiKey) {
+        addLog('warn', '[스캘핑] 시작 불가: 실전 모드에서 API 키가 필요합니다 (우측 패널 > 계좌 탭)');
         return;
       }
     }
-    scalpAutoTrade.setActive(!scalpAutoTrade.isActive);
-  }, [scalpAutoTrade, scalpSettings.symbols.length, autoTradeMode, binanceApiKey, addLog]);
+    scalpAutoTrade.setActive(active);
+  }, [scalpAutoTrade, scalpSettings.symbols.length, scalpMode, binanceApiKey, addLog]);
+  const handleToggleScalp = useCallback(() => {
+    setScalpActive(!scalpAutoTrade.isActive);
+  }, [setScalpActive, scalpAutoTrade.isActive]);
 
   const tryAcquireAutoTradeLeaderLock = useCallback(async (): Promise<boolean> => {
     const lockDocRef = autoTradeLeaderLockDocRef.current;
@@ -4705,7 +4772,7 @@ function AppInner() {
         onOpenScalpSettings={() => setShowScalpSettings(true)}
         onToggleScalp={handleToggleScalp}
         isScalpActive={scalpAutoTrade.isActive}
-        scalpMode={autoTradeMode}
+        scalpMode={scalpMode}
         scalpActiveOrderCount={scalpAutoTrade.activeOrders.length}
         scalpBreakOpen={scalpAutoTrade.stats.breakerOpen}
         scalpStreamConnected={scalpAutoTrade.userStreamConnected}
@@ -4717,6 +4784,7 @@ function AppInner() {
           maxSpreadBps: scalpSettings.maxSpreadBps,
           minDepthUsd: scalpSettings.minDepthUsd,
           maxPerTradeRiskUsd: scalpSettings.maxPerTradeRiskUsd,
+          lastMarketTickAt: scalpAutoTrade.lastMarketTickAt,
         }}
         isAutoTradeActive={altAutoTrade.isActive}
         autoTradeScanning={altAutoTrade.scanning}
@@ -4766,14 +4834,21 @@ function AppInner() {
       {showScalpSettings && (
         <ScalpSettingsPanel
           settings={scalpSettings}
+          mode={scalpMode}
           onSave={(s) => {
             setScalpSettingsState(s);
             saveScalpSettings(s);
           }}
+          onModeChange={(m) => {
+            if (scalpAutoTrade.isActive) return; // no mode switch while running
+            setScalpModeState(m);
+            localStorage.setItem('scalp_mode', m);
+          }}
           onClose={() => setShowScalpSettings(false)}
           isActive={scalpAutoTrade.isActive}
-          onToggleActive={scalpAutoTrade.setActive}
+          onToggleActive={setScalpActive}
           streamConnected={scalpAutoTrade.userStreamConnected}
+          lastMarketTickAt={scalpAutoTrade.lastMarketTickAt}
           sessionStats={scalpAutoTrade.stats}
           activeOrderCount={scalpAutoTrade.activeOrders.length}
           onResetBreaker={scalpAutoTrade.resetBreaker}

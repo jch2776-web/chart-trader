@@ -23,4 +23,5 @@ export interface ActivityLog {
   timestamp: number;
   type: 'info' | 'signal' | 'order' | 'error' | 'warn';
   message: string;
+  repeatCount?: number;
 }

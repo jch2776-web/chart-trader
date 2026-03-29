@@ -72,6 +72,7 @@ export function ErrorNotificationBell({ logs, onClear }: Props) {
   const badgeBg     = hasError ? '#ef5350' : '#e8b73a';
 
   const shown = logs.slice(-MAX_SHOWN).reverse();
+  const totalEvents = logs.reduce((sum, l) => sum + (l.repeatCount ?? 1), 0);
 
   return (
     <div style={{ position: 'relative', flexShrink: 0 }}>
@@ -117,7 +118,7 @@ export function ErrorNotificationBell({ logs, onClear }: Props) {
             background: 'rgba(30,34,45,0.95)', flexShrink: 0,
           }}>
             <span style={{ color: '#d1d4dc', fontWeight: 700, fontSize: '0.85rem' }}>
-              🔔 알림 {logs.length > 0 ? `(${logs.length}건)` : ''}
+              🔔 알림 {logs.length > 0 ? `(${totalEvents}건)` : ''}
             </span>
             {logs.length > 0 && (
               <button
@@ -150,6 +151,11 @@ export function ErrorNotificationBell({ logs, onClear }: Props) {
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ color: TYPE_COLOR[log.type], fontSize: '0.79rem', lineHeight: 1.5, wordBreak: 'break-all' }}>
                       {log.message}
+                      {(log.repeatCount ?? 1) > 1 && (
+                        <span style={{ marginLeft: 6, color: '#848e9c', fontSize: '0.72rem' }}>
+                          ×{log.repeatCount}
+                        </span>
+                      )}
                     </div>
                     <div style={{ color: '#3a4558', fontSize: '0.71rem', marginTop: 2 }}>
                       {new Date(log.timestamp).toLocaleTimeString('ko-KR')}

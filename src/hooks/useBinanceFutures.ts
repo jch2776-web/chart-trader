@@ -47,6 +47,12 @@ export interface PlaceOrderOptions {
   orderType?: 'LIMIT' | 'MARKET';
   newClientOrderId?: string;
   onAck?: (ack: PlaceOrderAck) => void;
+  /** Skip leverage setup call for this order (used by high-frequency scalping path). */
+  skipLeverageSetup?: boolean;
+  /** Skip margin type setup call for this order (used by high-frequency scalping path). */
+  skipMarginTypeSetup?: boolean;
+  /** Skip post-order fetchData refresh and rely on regular poll/user stream updates. */
+  skipRefresh?: boolean;
 }
 
 function loadClientSlMap(): ClientSlMap {
@@ -138,18 +144,27 @@ async function fetchSigned<T>(
   weight = 1,
   scope: 'signed' | 'enrich' = 'signed',
 ): Promise<T> {
-  const query = new URLSearchParams(
-    Object.fromEntries(
-      [...Object.entries(params).map(([k, v]) => [k, String(v)]),
-       ['timestamp', String(Date.now())]],
-    ),
-  );
-  const sig = hmacSha256(apiSecret, query.toString());
-  query.set('signature', sig);
-  const res = await governedBinanceFetch(`${BASE}${path}?${query}`, {
-    method,
-    headers: { 'X-MBX-APIKEY': apiKey },
-  }, {
+  const signedParams = { ...params };
+  // Under governor backpressure, signed requests can be delayed; widen default recvWindow.
+  if (signedParams.recvWindow == null) signedParams.recvWindow = 60000;
+  const makeSignedUrl = () => {
+    const query = new URLSearchParams(
+      Object.fromEntries(
+        [...Object.entries(signedParams).map(([k, v]) => [k, String(v)]),
+         ['timestamp', String(Date.now())]],
+      ),
+    );
+    const sig = hmacSha256(apiSecret, query.toString());
+    query.set('signature', sig);
+    return `${BASE}${path}?${query}`;
+  };
+  const res = await governedBinanceFetch(
+    makeSignedUrl,
+    () => ({
+      method,
+      headers: { 'X-MBX-APIKEY': apiKey },
+    }),
+    {
     weight,
     scope,
     label: `${method}:${path}`,
@@ -631,31 +646,35 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
     if (!reduceOnly) {
       // 1. Set leverage (best-effort — Binance rejects if a position already exists
       //    and the requested leverage is lower than the current position's leverage)
-      try {
-        await fetchSigned(
-          '/fapi/v1/leverage',
-          key,
-          secret,
-          { symbol: sym, leverage, recvWindow: 10000 },
-          'POST',
-          signedWeight('/fapi/v1/leverage', true),
-          'signed',
-        );
-      } catch { /* proceed with the exchange's current leverage setting */ }
+      if (!options?.skipLeverageSetup) {
+        try {
+          await fetchSigned(
+            '/fapi/v1/leverage',
+            key,
+            secret,
+            { symbol: sym, leverage, recvWindow: 10000 },
+            'POST',
+            signedWeight('/fapi/v1/leverage', true),
+            'signed',
+          );
+        } catch { /* proceed with the exchange's current leverage setting */ }
+      }
 
       // 2. Set margin type (best-effort — Binance rejects changes while a position is open,
       //    error -4046 "No need to change", -4048 "Cannot change with open position", etc.)
-      try {
-        await fetchSigned(
-          '/fapi/v1/marginType',
-          key,
-          secret,
-          { symbol: sym, marginType, recvWindow: 10000 },
-          'POST',
-          signedWeight('/fapi/v1/marginType', true),
-          'signed',
-        );
-      } catch { /* proceed with the exchange's current margin type */ }
+      if (!options?.skipMarginTypeSetup) {
+        try {
+          await fetchSigned(
+            '/fapi/v1/marginType',
+            key,
+            secret,
+            { symbol: sym, marginType, recvWindow: 10000 },
+            'POST',
+            signedWeight('/fapi/v1/marginType', true),
+            'signed',
+          );
+        } catch { /* proceed with the exchange's current margin type */ }
+      }
     }
 
     // 3. Fetch precision info and round price/quantity to valid steps
@@ -708,8 +727,10 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
     });
 
     // 4. Refresh — short delay so the exchange has time to register the order
-    await new Promise(resolve => setTimeout(resolve, 600));
-    await fetchData();
+    if (!options?.skipRefresh) {
+      await new Promise(resolve => setTimeout(resolve, 600));
+      await fetchData();
+    }
   }, [fetchData]);
 
   // ── Cancel an order ──────────────────────────────────────────────────────────

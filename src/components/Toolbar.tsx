@@ -55,6 +55,7 @@ interface Props {
     maxSpreadBps: number;
     minDepthUsd: number;
     maxPerTradeRiskUsd: number;
+    lastMarketTickAt: number | null;
   };
   // Notification bell
   errorLogs?: ActivityLog[];
@@ -517,6 +518,13 @@ export function Toolbar({
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
             <Stat label="심볼" value={`${scalpStats?.symbolCount ?? 0}개`} />
             <Stat label="신호 모드" value={scalpStats?.signalMode ?? '—'} />
+            {isScalpActive && (() => {
+              const ts = scalpStats?.lastMarketTickAt;
+              const age = ts ? Date.now() - ts : null;
+              const label = age === null ? '대기 중' : age < 1000 ? '● 실시간' : `${(age / 1000).toFixed(1)}초 전`;
+              const color = age === null ? '#5e6673' : age < 2000 ? '#0ecb81' : '#f6465d';
+              return <Stat label="마켓 데이터" value={label} valueColor={color} />;
+            })()}
             <Stat label="최대 스프레드" value={scalpStats ? `${scalpStats.maxSpreadBps}bps` : '—'} />
             <Stat label="최소 뎁스" value={scalpStats ? (scalpStats.minDepthUsd > 0 ? `$${(scalpStats.minDepthUsd / 1000).toFixed(0)}k` : 'OFF') : '—'} />
             <Stat label="최대 리스크" value={scalpStats ? `$${scalpStats.maxPerTradeRiskUsd}` : '—'} />

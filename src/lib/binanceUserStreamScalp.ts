@@ -17,6 +17,7 @@ import type { ScalpOrderUpdate } from '../scalp/types';
 const WS_BASE      = 'wss://fstream.binance.com/ws';
 const RENEW_MS     = 30 * 60 * 1_000; // Binance requires keep-alive every ≤60 min
 const RECONNECT_MS = 5_000;
+const RECONNECT_MAX_MS = 180_000;
 
 // ── Payload types ─────────────────────────────────────────────────────────────
 
@@ -79,6 +80,7 @@ export function connectScalpUserStream(cfg: ScalpUserStreamConfig): () => void {
   let renewTimer: ReturnType<typeof setInterval> | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
+  let reconnectDelayMs = RECONNECT_MS;
 
   function parseOrderUpdate(raw: RawOrderUpdate): ScalpOrderUpdate {
     const o = raw.o;
@@ -122,9 +124,14 @@ export function connectScalpUserStream(cfg: ScalpUserStreamConfig): () => void {
     if (stopped) return;
     try {
       listenKey = await cfg.getListenKey();
+      reconnectDelayMs = RECONNECT_MS;
     } catch (e) {
-      cfg.handlers.onError?.(`listenKey 발급 실패: ${e instanceof Error ? e.message : String(e)}`);
-      if (!stopped) reconnectTimer = setTimeout(() => { void connect(); }, RECONNECT_MS);
+      const msg = e instanceof Error ? e.message : String(e);
+      cfg.handlers.onError?.(`listenKey 발급 실패: ${msg}`);
+      if (msg.includes('418')) reconnectDelayMs = Math.max(reconnectDelayMs, 120_000);
+      else if (msg.includes('429')) reconnectDelayMs = Math.max(reconnectDelayMs, 30_000);
+      else reconnectDelayMs = Math.min(RECONNECT_MAX_MS, Math.round(reconnectDelayMs * 1.5));
+      if (!stopped) reconnectTimer = setTimeout(() => { void connect(); }, reconnectDelayMs);
       return;
     }
 
@@ -134,7 +141,8 @@ export function connectScalpUserStream(cfg: ScalpUserStreamConfig): () => void {
     ws.onclose = () => {
       if (stopped) return;
       cfg.handlers.onReconnect?.();
-      reconnectTimer = setTimeout(() => { void connect(); }, RECONNECT_MS);
+      reconnectDelayMs = Math.min(RECONNECT_MAX_MS, Math.round(reconnectDelayMs * 1.25));
+      reconnectTimer = setTimeout(() => { void connect(); }, reconnectDelayMs);
     };
     ws.onerror = () => { ws?.close(); };
 

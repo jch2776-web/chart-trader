@@ -163,11 +163,17 @@ function releaseBudget() {
   inFlight = Math.max(0, inFlight - 1);
 }
 
-export async function governedBinanceFetch(input: string, init: RequestInit | undefined, opts: GovernorFetchOptions): Promise<Response> {
+export async function governedBinanceFetch(
+  input: string | (() => string),
+  init: RequestInit | (() => RequestInit | undefined) | undefined,
+  opts: GovernorFetchOptions,
+): Promise<Response> {
   const weight = Math.max(1, Math.round(opts.weight || 1));
   await acquireBudget(weight, opts.scope, opts.label);
   try {
-    const res = await fetch(input, init);
+    const resolvedInput = typeof input === 'function' ? input() : input;
+    const resolvedInit = typeof init === 'function' ? init() : init;
+    const res = await fetch(resolvedInput, resolvedInit);
 
     const usedHeader = res.headers.get('x-mbx-used-weight-1m') || res.headers.get('X-MBX-USED-WEIGHT-1M');
     const usedParsed = Number(usedHeader);

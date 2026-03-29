@@ -77,6 +77,8 @@ export interface ScalpActiveOrder {
   slOrderId?: string;
   /** Order ID of the attached take-profit order (set after full fill). */
   tpOrderId?: string;
+  /** Guard: prevent duplicate TP/SL attachment on repeated FILLED updates. */
+  tpslAttachStarted?: boolean;
 }
 
 // ── Broker interface ──────────────────────────────────────────────────────────

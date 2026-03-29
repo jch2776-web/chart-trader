@@ -18,6 +18,8 @@ export interface ScalpSettings {
   maxPerTradeRiskUsd: number;
   /** Maximum total open notional exposure across all scalp positions (USD). */
   maxOpenExposureUsd: number;
+  /** Precheck symbol min-notional before submitting entry orders. */
+  precheckMinNotional: boolean;
   /** How long entry limit orders stay open before cancel (ms). */
   entryTtlMs: number;
   /** Maximum reprice attempts before skipping. Each reprice resets TTL. */
@@ -53,6 +55,7 @@ export const DEFAULT_SCALP_SETTINGS: ScalpSettings = {
   marginType: 'ISOLATED',
   maxPerTradeRiskUsd: 10,
   maxOpenExposureUsd: 100,
+  precheckMinNotional: true,
   entryTtlMs: 3_000,
   maxRepriceCount: 2,
   signalMode: 'both',
