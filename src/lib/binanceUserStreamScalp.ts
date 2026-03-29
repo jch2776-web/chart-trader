@@ -81,6 +81,16 @@ export function connectScalpUserStream(cfg: ScalpUserStreamConfig): () => void {
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
   let reconnectDelayMs = RECONNECT_MS;
+  let lastOpenAt = 0;
+  let consecutiveEarlyClose = 0;
+
+  function isListenKeyExpiredMsg(msg: string): boolean {
+    const m = msg.toLowerCase();
+    return (
+      m.includes('listenkey') &&
+      (m.includes('expired') || m.includes('not found') || m.includes('invalid') || m.includes('-1125'))
+    );
+  }
 
   function parseOrderUpdate(raw: RawOrderUpdate): ScalpOrderUpdate {
     const o = raw.o;
@@ -117,13 +127,20 @@ export function connectScalpUserStream(cfg: ScalpUserStreamConfig): () => void {
       for (const b of au.a.B) {
         cfg.handlers.onBalanceChange?.(b.a, parseFloat(b.wb));
       }
+    } else if ((msg as { e?: string }).e === 'listenKeyExpired') {
+      cfg.handlers.onError?.('listenKey 만료 감지 — 재발급 후 재연결');
+      listenKey = '';
+      ws?.close();
     }
   }
 
   async function connect(): Promise<void> {
     if (stopped) return;
     try {
-      listenKey = await cfg.getListenKey();
+      // Reuse existing listenKey across reconnects to avoid listenKey POST floods.
+      if (!listenKey) {
+        listenKey = await cfg.getListenKey();
+      }
       reconnectDelayMs = RECONNECT_MS;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -135,11 +152,39 @@ export function connectScalpUserStream(cfg: ScalpUserStreamConfig): () => void {
       return;
     }
 
+    if (ws) {
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onclose = null;
+      ws.onerror = null;
+      try {
+        ws.close();
+      } catch (e) {
+        void e;
+      }
+      ws = null;
+    }
+
     ws = new WebSocket(`${WS_BASE}/${listenKey}`);
-    ws.onopen  = () => { cfg.handlers.onConnect?.(); };
+    ws.onopen  = () => {
+      lastOpenAt = Date.now();
+      consecutiveEarlyClose = 0;
+      cfg.handlers.onConnect?.();
+    };
     ws.onmessage = (evt: MessageEvent<string>) => handleMessage(evt.data);
     ws.onclose = () => {
       if (stopped) return;
+      const now = Date.now();
+      if (lastOpenAt > 0 && now - lastOpenAt < 2_000) {
+        consecutiveEarlyClose += 1;
+      } else {
+        consecutiveEarlyClose = 0;
+      }
+      // Likely stale/invalid key loop: force key refresh after repeated fast closes.
+      if (consecutiveEarlyClose >= 3) {
+        listenKey = '';
+        consecutiveEarlyClose = 0;
+      }
       cfg.handlers.onReconnect?.();
       reconnectDelayMs = Math.min(RECONNECT_MAX_MS, Math.round(reconnectDelayMs * 1.25));
       reconnectTimer = setTimeout(() => { void connect(); }, reconnectDelayMs);
@@ -151,7 +196,12 @@ export function connectScalpUserStream(cfg: ScalpUserStreamConfig): () => void {
     renewTimer = setInterval(() => {
       if (stopped || !listenKey) return;
       cfg.renewListenKey(listenKey).catch(e => {
-        cfg.handlers.onError?.(`listenKey 갱신 실패: ${e instanceof Error ? e.message : String(e)}`);
+        const msg = e instanceof Error ? e.message : String(e);
+        cfg.handlers.onError?.(`listenKey 갱신 실패: ${msg}`);
+        if (isListenKeyExpiredMsg(msg)) {
+          listenKey = '';
+          ws?.close();
+        }
       });
     }, RENEW_MS);
   }

@@ -29,6 +29,14 @@ const ENTRY_MID_OFFSET = 0.3; // enter 30% of half-spread inside mid
 const STOP_SPREAD_MULT = 3.0;
 /** TP distance as a multiple of stop distance. */
 const TP_RR            = 1.5;
+/** Assumed round-trip fee/slippage budget in bps (conservative live scalar). */
+const ROUND_TRIP_FEE_BPS = 12;
+/** Extra safety spread/slippage buffer (bps on underlying price). */
+const FEE_SAFETY_BUFFER_BPS = 2;
+/** Minimum target net ROI on margin after fees (bps). */
+const MIN_NET_ROI_ON_MARGIN_BPS = 22;
+/** Floor for stop distance on underlying move to avoid ultra-tight stopouts. */
+const MIN_STOP_DISTANCE_BPS = 10;
 /** TTL for momentum signals (ms). */
 const MOMENTUM_TTL_MS  = 3_000;
 /** TTL for revert signals (ms). */
@@ -40,6 +48,25 @@ const REVERT_PRESSURE_THRESHOLD = 0.55;
 
 function clamp01(v: number): number {
   return Math.max(0, Math.min(1, v));
+}
+
+function applyFeeAwareTp(
+  side: 'long' | 'short',
+  entryRef: number,
+  stopDist: number,
+  leverage: number,
+): number {
+  const lev = Math.max(1, leverage);
+  const roundTripFeeRate = ROUND_TRIP_FEE_BPS / 10_000;
+  const safetyRate = FEE_SAFETY_BUFFER_BPS / 10_000;
+  // Convert required net ROI-on-margin target to underlying price move requirement.
+  const minNetMoveRate = (MIN_NET_ROI_ON_MARGIN_BPS / 10_000) / lev;
+  const feeAwareMove = entryRef * (roundTripFeeRate + safetyRate + minNetMoveRate);
+  const rrMove = stopDist * TP_RR;
+  const minMove = Math.max(rrMove, feeAwareMove);
+  return side === 'long'
+    ? entryRef + minMove
+    : entryRef - minMove;
 }
 
 /** Normalise an imbalance value [0, 1] → signal strength [0, 1]. */
@@ -78,9 +105,11 @@ function evalMicroMomentum(
   const entryRef   = side === 'long'
     ? microMid - halfSpread * ENTRY_MID_OFFSET  // slightly below mid for maker fill
     : microMid + halfSpread * ENTRY_MID_OFFSET;
-  const stopDist   = halfSpread * STOP_SPREAD_MULT;
+  const rawStopDist = halfSpread * STOP_SPREAD_MULT;
+  const stopFloor = entryRef * (MIN_STOP_DISTANCE_BPS / 10_000);
+  const stopDist   = Math.max(rawStopDist, stopFloor);
   const stopRef    = side === 'long' ? entryRef - stopDist : entryRef + stopDist;
-  const tpRef      = side === 'long' ? entryRef + stopDist * TP_RR : entryRef - stopDist * TP_RR;
+  const tpRef      = applyFeeAwareTp(side, entryRef, stopDist, settings.leverage);
 
   const score = clamp01(
     scoreImbalance(bookImbalance) * 0.45 +
@@ -136,9 +165,11 @@ function evalMicroRevert(
   const entryRef   = side === 'long'
     ? microMid - halfSpread * ENTRY_MID_OFFSET
     : microMid + halfSpread * ENTRY_MID_OFFSET;
-  const stopDist = halfSpread * STOP_SPREAD_MULT;
+  const rawStopDist = halfSpread * STOP_SPREAD_MULT;
+  const stopFloor = entryRef * (MIN_STOP_DISTANCE_BPS / 10_000);
+  const stopDist = Math.max(rawStopDist, stopFloor);
   const stopRef  = side === 'long' ? entryRef - stopDist : entryRef + stopDist;
-  const tpRef    = side === 'long' ? entryRef + stopDist * TP_RR : entryRef - stopDist * TP_RR;
+  const tpRef    = applyFeeAwareTp(side, entryRef, stopDist, settings.leverage);
 
   const score = clamp01(
     scorePressure(tradePressure)  * 0.50 +

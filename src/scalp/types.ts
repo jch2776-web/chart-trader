@@ -79,6 +79,18 @@ export interface ScalpActiveOrder {
   tpOrderId?: string;
   /** Guard: prevent duplicate TP/SL attachment on repeated FILLED updates. */
   tpslAttachStarted?: boolean;
+  /** Guard: prevent concurrent TP/SL attach retries. */
+  tpslAttachInFlight?: boolean;
+  /** Last protection attach attempt timestamp. */
+  lastProtectionAttemptAt?: number;
+  /** Number of protection attach retries performed. */
+  protectionRetryCount?: number;
+  /** True after entry exposure has been booked into risk engine. */
+  exposureBooked?: boolean;
+  /** True when fill was recovered from live position snapshot (WS fill event missing). */
+  filledRecoveredByPositionCheck?: boolean;
+  /** Timestamp when live position snapshot first showed no open position for this order. */
+  positionAbsentSince?: number;
 }
 
 // ── Broker interface ──────────────────────────────────────────────────────────
@@ -113,6 +125,14 @@ export interface ScalpBrokerCallbacks {
   /** Place a STOP_MARKET or TAKE_PROFIT_MARKET reduce-only order. */
   placeStopMarketOrder(params: ScalpStopOrderParams): Promise<string>;
   cancelOrder(orderId: string, symbol: string): Promise<void>;
+  /**
+   * Optional live snapshot fallback:
+   * Returns currently open position for symbol+side (if any), used to recover missed FILLED events.
+   */
+  getOpenPosition?: (
+    symbol: string,
+    side: 'long' | 'short',
+  ) => { qty: number; entryPrice?: number } | null;
 }
 
 // ── Telemetry ─────────────────────────────────────────────────────────────────

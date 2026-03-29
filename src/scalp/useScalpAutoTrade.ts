@@ -424,9 +424,19 @@ export function useScalpAutoTrade({
     isActiveRef.current = active;
 
     if (active) {
+      // Defensive cleanup for stale disposed engine references after forced stops.
+      if (execRef.current) {
+        execRef.current.cancelAll();
+        execRef.current = null;
+      }
       // Fresh engines per session
       riskRef.current  = createScalpRiskEngine();
       telemRef.current = createScalpTelemetry();
+      setUserStreamConnected(false);
+      streamLogCooldownRef.current = { connect: 0, reconnect: 0, error: 0 };
+      streamStateRef.current = 'unknown';
+      lastMarketTickAtRef.current = null;
+      setLastMarketTickAt(null);
 
       let activeBroker: ScalpBrokerCallbacks;
       if (mode === 'live' && brokerRef.current) {
@@ -448,7 +458,9 @@ export function useScalpAutoTrade({
       );
       addLog(`⚡ 스캘핑 시작 — ${mode === 'live' ? '실전' : '페이퍼'} | ${settings.symbols.length}개 심볼`, 'success');
     } else {
-      execRef.current?.cancelAll();
+      const exec = execRef.current;
+      execRef.current = null;
+      exec?.cancelAll();
       paperBrokerRef.current = null;
       setUserStreamConnected(false);
       streamLogCooldownRef.current = { connect: 0, reconnect: 0, error: 0 };
@@ -491,9 +503,12 @@ export function useScalpAutoTrade({
 
   // ── User stream ──────────────────────────────────────────────────────────
   useEffect(() => {
-    if (!isActive || !userStream || mode !== 'live') return;
+    const getListenKey = userStream?.getListenKey;
+    const renewListenKey = userStream?.renewListenKey;
+    if (!isActive || !getListenKey || !renewListenKey || mode !== 'live') return;
     const stop = connectScalpUserStream({
-      ...userStream,
+      getListenKey,
+      renewListenKey,
       handlers: {
         onOrderUpdate: (upd) => execRef.current?.onOrderUpdate(upd),
         onConnect:     () => {
@@ -529,7 +544,7 @@ export function useScalpAutoTrade({
       streamStateRef.current = 'unknown';
       stop();
     };
-  }, [isActive, mode, userStream, addLog]);
+  }, [isActive, mode, userStream?.getListenKey, userStream?.renewListenKey, addLog]);
 
   // ── Tick: order timeout / reprice / UI refresh / paper simulation ────────
   useEffect(() => {

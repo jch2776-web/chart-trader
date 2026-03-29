@@ -2149,6 +2149,13 @@ function AppInner() {
     });
   }, [binanceApiKey]);
 
+  const scalpUserStreamConfig = React.useMemo(
+    () => (scalpMode === 'live' && binanceApiKey
+      ? { getListenKey: scalpGetListenKey, renewListenKey: scalpRenewListenKey }
+      : undefined),
+    [scalpMode, binanceApiKey, scalpGetListenKey, scalpRenewListenKey],
+  );
+
   // ── Scalp position mode (one-way vs hedge) ───────────────────────────────
   // Read once when live API keys are available. Used to derive positionSide for TP/SL orders.
   React.useEffect(() => {
@@ -2237,9 +2244,33 @@ function AppInner() {
           isTP ? params.stopPrice : undefined,
           isTP ? undefined : params.stopPrice,
           positionSide,
-          { onPlacedOrders: (refs) => { const r = refs[0]; if (r) resolve(r.orderId); else reject(new Error('orderId 없음')); } },
+          {
+            allowClosePositionFallback: true,
+            onPlacedOrders: (refs) => { const r = refs[0]; if (r) resolve(r.orderId); else reject(new Error('orderId 없음')); },
+          },
         ).catch(reject);
       }),
+    getOpenPosition: (symbol: string, side: 'long' | 'short') => {
+      const rows = futuresAllPositionsRef.current.filter(p => p.symbol === symbol && Math.abs(p.positionAmt ?? 0) > 0);
+      if (rows.length === 0) return null;
+      const isDual = scalpPositionModeRef.current;
+      if (isDual) {
+        const ps = side === 'long' ? 'LONG' : 'SHORT';
+        const row = rows.find(p => p.positionSide === ps && Math.abs(p.positionAmt ?? 0) > 0);
+        if (!row) return null;
+        const qty = Math.abs(row.positionAmt ?? 0);
+        if (qty <= 0) return null;
+        return { qty, entryPrice: row.entryPrice > 0 ? row.entryPrice : undefined };
+      }
+      const row = rows.find(p => p.positionSide === 'BOTH') ?? rows[0];
+      if (!row) return null;
+      const amt = row.positionAmt ?? 0;
+      if (side === 'long' && amt <= 0) return null;
+      if (side === 'short' && amt >= 0) return null;
+      const qty = Math.abs(amt);
+      if (qty <= 0) return null;
+      return { qty, entryPrice: row.entryPrice > 0 ? row.entryPrice : undefined };
+    },
     cancelOrder: (orderId: string, symbol: string) =>
       futuresCancelOrder(orderId, symbol),
   }), [futuresPlaceOrder, futuresPlaceTPSL, futuresCancelOrder]);
@@ -2257,9 +2288,7 @@ function AppInner() {
       addLog(mappedType, `[스캘핑] ${msg}`);
     },
     broker: scalpMode === 'live' ? scalpBroker : undefined,
-    userStream: scalpMode === 'live' && binanceApiKey
-      ? { getListenKey: scalpGetListenKey, renewListenKey: scalpRenewListenKey }
-      : undefined,
+    userStream: scalpUserStreamConfig,
   });
 
   // ── Scalp direct start/stop (validates before calling setActive) ──────────

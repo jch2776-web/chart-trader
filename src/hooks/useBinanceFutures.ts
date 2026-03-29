@@ -28,6 +28,8 @@ export interface PlacedTPSLOrderRef {
 
 export interface PlaceTPSLOptions {
   onPlacedOrders?: (orders: PlacedTPSLOrderRef[]) => void;
+  /** One-way mode only: allow closePosition=true fallback for STOP/TP market orders. */
+  allowClosePositionFallback?: boolean;
 }
 
 export interface PlaceOrderAck {
@@ -855,6 +857,17 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
       if (direct2) { pushPlaced(direct2, 'TP'); return; }
       const direct3 = await tryOrder({ ...closingParams, type: 'TAKE_PROFIT_MARKET', stopPrice: priceStr, workingType: 'MARK_PRICE' });
       if (direct3) { pushPlaced(direct3, 'TP'); return; }
+      if (!isHedge && options?.allowClosePositionFallback) {
+        const closePos = await tryOrder({
+          symbol,
+          side: closeSide,
+          type: 'TAKE_PROFIT_MARKET',
+          stopPrice: priceStr,
+          closePosition: 'true',
+          recvWindow: 10000,
+        });
+        if (closePos) { pushPlaced(closePos, 'TP'); return; }
+      }
       // 신규 정책(-4120) 계정: Algo 조건부 주문으로 재시도
       try {
         const algo = await fetchSigned('/fapi/v1/algoOrder', key, secret, {
@@ -882,6 +895,17 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
       if (direct2) { pushPlaced(direct2, 'SL'); return; }
       const direct3 = await tryOrder({ ...closingParams, type: 'STOP_MARKET', stopPrice: priceStr, workingType: 'MARK_PRICE' });
       if (direct3) { pushPlaced(direct3, 'SL'); return; }
+      if (!isHedge && options?.allowClosePositionFallback) {
+        const closePos = await tryOrder({
+          symbol,
+          side: closeSide,
+          type: 'STOP_MARKET',
+          stopPrice: priceStr,
+          closePosition: 'true',
+          recvWindow: 10000,
+        });
+        if (closePos) { pushPlaced(closePos, 'SL'); return; }
+      }
       try {
         const algo = await fetchSigned('/fapi/v1/algoOrder', key, secret, {
           ...closingParams,
