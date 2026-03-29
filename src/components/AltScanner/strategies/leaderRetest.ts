@@ -1,17 +1,15 @@
 /**
- * Leader-Retest Strategy (v2)
+ * Leader-Retest Strategy
  *
- * Finds coins where price broke out of a key SR level some bars ago
- * and has now pulled back to retest that level WITH CONFIRMATION.
+ * Scans for coins that broke out of a key SR level and have since pulled back
+ * to retest it with confirmation. Active scan path:
  *
- * v2 changes vs v1:
- *  - detectRetest: no longer accepts "close near level" alone.
- *    Requires a historical bar where low <= level+tol AND close >= level
- *    (touched the level but closed back above it = retest confirmed).
- *  - 4H uptrend filter: for LONG, EMA20 > EMA50 on 4H must hold.
- *  - Default maxBars reduced 12 → 8 (tighter recency).
+ *   buildRetestCandidates()  — detects all qualifying retest setups per symbol
+ *   scoreRetestCandidate()   — ranks each candidate (leader / pullback / location scores)
+ *   buildLeaderRetestOrderPlan() — constructs entry zone, ideal entry, TP1, hardStop
+ *   CandidateStatus          — TRIGGERED (price in zone) | PENDING (zone not yet reached) | INVALID
  *
- * Completely separate from the legacy breakout strategy.
+ * Completely separate from the breakout strategy.
  */
 
 import type { Candle } from '../../../types/candle';
@@ -101,125 +99,6 @@ function closedOnly(candles: Candle[], intervalMs: number): Candle[] {
   const last = candles[candles.length - 1];
   const isClosed = (last.time + intervalMs) <= (Date.now() - SAFETY_MS);
   return isClosed ? candles : candles.slice(0, -1);
-}
-
-// ── Retest detection ───────────────────────────────────────────────────────
-
-interface RetestResult {
-  level: number;
-  direction: 'long' | 'short';
-}
-
-/**
- * @deprecated Use buildRetestCandidates (features/retestCandidates.ts) instead.
- *
- * v2 detectRetest: requires confirmed retest candle.
- *
- * LONG conditions:
- *  1. A breakout candle exists in [n-maxBars .. n-minBars] range
- *     (prev.close < level, bar.close > level)
- *  2. At least one bar AFTER the breakout has:
- *     - low  <= level + tol  (touched the level from above)
- *     - close >= level       (closed back above = retest confirmed)
- *  3. Current close (n-1) >= level - tol  (still holding, not broken down)
- *
- * SHORT is the exact mirror.
- */
-// @ts-expect-error TS6133 — retained for reference; not called in current v2 path
-function detectRetest(
-  closed: Candle[],
-  dir: 'long' | 'short',
-  atr: number,
-  srLevels: LevelZone[],
-  opts: Required<RetestOptions>,
-): RetestResult | null {
-  const n = closed.length;
-  if (n < 15) return null;
-
-  const currentClose = closed[n - 1].close;
-  const tol = atr * opts.toleranceAtr;
-  const searchStart = Math.max(1, n - opts.maxBars);
-  const searchEnd   = n - opts.minBars;
-  if (searchEnd < searchStart) return null;
-
-  if (dir === 'long') {
-    const candidates = srLevels
-      .filter(z => z.kind === 'resistance' && z.score >= 20)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 8);
-
-    for (const zone of candidates) {
-      const level = zone.centerPrice;
-
-      // 1. Find breakout candle in the search window
-      let breakoutIdx = -1;
-      for (let i = searchStart; i <= searchEnd; i++) {
-        if (closed[i - 1].close < level - atr * 0.05 && closed[i].close > level + atr * 0.1) {
-          breakoutIdx = i;
-          break;
-        }
-      }
-      if (breakoutIdx < 0) continue;
-
-      // 2. Confirmed retest: any bar after the breakout where
-      //    low touched level AND close reclaimed it
-      let confirmed = false;
-      for (let i = breakoutIdx + 1; i < n; i++) {
-        const bar = closed[i];
-        if (bar.low <= level + tol && bar.close >= level) {
-          confirmed = true;
-          break;
-        }
-      }
-      if (!confirmed) continue;
-
-      // 3. Current close still at or above level (not blown through),
-      //    and hasn't overshot too far above the level
-      if (currentClose < level - tol) continue;
-      if (currentClose > level + atr * opts.maxOvershootAtr) continue;
-
-      return { level, direction: 'long' };
-    }
-  } else {
-    const candidates = srLevels
-      .filter(z => z.kind === 'support' && z.score >= 20)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 8);
-
-    for (const zone of candidates) {
-      const level = zone.centerPrice;
-
-      // 1. Find breakout candle (broke below support)
-      let breakoutIdx = -1;
-      for (let i = searchStart; i <= searchEnd; i++) {
-        if (closed[i - 1].close > level + atr * 0.05 && closed[i].close < level - atr * 0.1) {
-          breakoutIdx = i;
-          break;
-        }
-      }
-      if (breakoutIdx < 0) continue;
-
-      // 2. Confirmed retest: high touched level AND close reclaimed below
-      let confirmed = false;
-      for (let i = breakoutIdx + 1; i < n; i++) {
-        const bar = closed[i];
-        if (bar.high >= level - tol && bar.close <= level) {
-          confirmed = true;
-          break;
-        }
-      }
-      if (!confirmed) continue;
-
-      // 3. Current close still at or below level,
-      //    and hasn't overshot too far below the level
-      if (currentClose > level + tol) continue;
-      if (currentClose < level - atr * opts.maxOvershootAtr) continue;
-
-      return { level, direction: 'short' };
-    }
-  }
-
-  return null;
 }
 
 // ── Universe RS helpers ────────────────────────────────────────────────────

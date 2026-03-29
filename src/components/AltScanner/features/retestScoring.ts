@@ -190,10 +190,11 @@ function normalizeRS(rs: number): number {
 
 /**
  * Volume z-score → [0, 1].
- * z = 0 → 0.0,  z = 3 → 1.0,  z < 0 → 0.0
+ * z = 0 → 0.0,  z = 2 → 1.0,  z < 0 → 0.0
+ * (Threshold lowered from 3 to 2: real breakout candles are typically 1–2z)
  */
 function normalizeVolZ(z: number): number {
-  return clamp01(z / 3);
+  return clamp01(z / 2);
 }
 
 /**
@@ -207,31 +208,33 @@ function normalizePullbackVolRatio(ratio: number): number {
 
 /**
  * Turnover acceleration → [0, 1].
- * accel = 1.0 (doubled)  → 1.0
- * accel = 0.0 (flat)     → 0.5
- * accel = -0.5 (halved)  → 0.0
+ * accel = +0.5 (50 % growth) → 1.0
+ * accel =  0.0 (flat)        → 0.5
+ * accel = -0.5 (halved)      → 0.0
+ * (Range tightened from 1.5 span to 1.0 span: +50 % growth is a meaningful signal)
  */
 function normalizeTurnoverAccel(accel: number): number {
-  return clamp01((accel + 0.5) / 1.5);
+  return clamp01(accel + 0.5);
 }
 
 /**
- * Air-R [0, AIR_R_CAP=3] → [0, 1].
- * airR = 0 → 0.0,  airR = 3 → 1.0
+ * Air-R → [0, 1].
+ * airR = 0 → 0.0,  airR = 2 → 1.0
+ * (Threshold lowered from 3R to 2R: 2R of clear space is a strong setup)
  */
 function normalizeAirR(air: number): number {
-  return clamp01(air / 3);
+  return clamp01(air / 2);
 }
 
 /**
  * AVWAP breakout field → [0, 1].
  * avwapBreakout is signed: positive = price on favorable side of AVWAP.
- * +1.5 ATR above (long) or below (short) = full score.
- * At AVWAP (0) = 0.33.  On wrong side = approaches 0.
+ *   v = +1 ATR (favorable side) → 1.0
+ *   v =  0 ATR (at AVWAP)       → 0.5  (neutral)
+ *   v = -1 ATR (wrong side)     → 0.0
  */
 function normalizeAvwapBreakout(v: number): number {
-  // Linear: (-1.5 ATR → 0, 0 → 0.33, +1.5 ATR → 1.0)
-  return clamp01((v + 1.5) / 3);
+  return clamp01((v + 1) / 2);
 }
 
 // ── Sub-score calculations ─────────────────────────────────────────────────────

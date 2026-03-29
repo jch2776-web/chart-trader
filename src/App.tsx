@@ -55,6 +55,11 @@ import { useSoundPlayer } from './hooks/useSoundPlayer';
 import { SoundSettingsModal } from './components/SoundSettingsModal';
 import { AutoTradeSettingsModal, DEFAULT_AUTO_TRADE_SETTINGS, DEFAULT_LIVE_AUTO_TRADE_SETTINGS } from './components/AutoTradeSettingsModal';
 import type { AutoTradeSettings, LabAutoPreset } from './components/AutoTradeSettingsModal';
+import { ScalpSettingsPanel } from './components/ScalpSettingsPanel';
+import { useScalpAutoTrade } from './scalp/useScalpAutoTrade';
+import { loadScalpSettings, saveScalpSettings } from './scalp/scalpSettings';
+import type { ScalpSettings } from './scalp/scalpSettings';
+import type { PlaceOrderOptions } from './hooks/useBinanceFutures';
 import { db, isFirebaseConfigured } from './lib/firebase';
 import { doc, onSnapshot, runTransaction } from 'firebase/firestore';
 
@@ -469,6 +474,12 @@ function AppInner() {
   }, [liveAutoTradeSettings]);
 
   const [showAutoTradeSettings, setShowAutoTradeSettings] = useState(false);
+
+  // ── Scalp auto-trade settings ─────────────────────────────────────────
+  const [scalpSettings, setScalpSettingsState] = useState<ScalpSettings>(() => loadScalpSettings());
+  const scalpSettingsRef = React.useRef(scalpSettings);
+  scalpSettingsRef.current = scalpSettings;
+  const [showScalpSettings, setShowScalpSettings] = useState(false);
 
   // ── 실험실 자동설정 프리셋 ────────────────────────────────────────────────
   const [labAutoPresets, setLabAutoPresets] = useState<LabAutoPreset[]>(() => {
@@ -2051,7 +2062,7 @@ function AppInner() {
     },
     breakoutDirection: activeAutoTradeSettings.breakoutDirection ?? 'both',
     minCandidateScore: activeAutoTradeSettings.minCandidateScore ?? (
-      activeAutoTradeSettings.strategyId === 'leader-retest' ? 70 :
+      activeAutoTradeSettings.strategyId === 'leader-retest' ? 65 :
       activeAutoTradeSettings.strategyId === 'fvg-poc-ema72' ? 75 : 90
     ),
     breakoutMaxBarsAfterTrigger: activeAutoTradeSettings.breakoutMaxBarsAfterTrigger ?? 0,
@@ -2073,6 +2084,50 @@ function AppInner() {
     })(),
   });
   altAutoTradeSetActiveRef.current = altAutoTrade.setActive;
+
+  // ── Scalp auto-trade broker adapter ──────────────────────────────────────
+  // Wraps futuresPlaceOrder (returns void + onAck) into the ScalpBrokerCallbacks interface.
+  const scalpBroker = React.useMemo(() => ({
+    placeLimitOrder: (params: {
+      symbol: string;
+      side: 'BUY' | 'SELL';
+      price: number;
+      quantity: number;
+      reduceOnly: boolean;
+      timeInForce: 'GTC' | 'IOC';
+    }) =>
+      new Promise<string>((resolve, reject) => {
+        const opts: PlaceOrderOptions = { onAck: (ack) => resolve(ack.orderId) };
+        futuresPlaceOrder(
+          params.side,
+          params.price,
+          params.quantity,
+          scalpSettingsRef.current.leverage,
+          scalpSettingsRef.current.marginType,
+          params.reduceOnly,
+          params.symbol,
+          params.timeInForce,
+          opts,
+        ).catch(reject);
+      }),
+    cancelOrder: (orderId: string, symbol: string) =>
+      futuresCancelOrder(orderId, symbol),
+  }), [futuresPlaceOrder, futuresCancelOrder]);
+
+  // ── Scalp auto-trade hook ─────────────────────────────────────────────────
+  const scalpAutoTrade = useScalpAutoTrade({
+    settings: scalpSettings,
+    mode: autoTradeMode,
+    onLog: (msg, level) => {
+      if (level === 'info') return;
+      const mappedType: import('./types/trade').ActivityLog['type'] =
+        level === 'error' ? 'error' :
+        level === 'warn'  ? 'warn'  : 'info';
+      addLog(mappedType, `[스캘핑] ${msg}`);
+    },
+    broker: autoTradeMode === 'live' ? scalpBroker : undefined,
+    // userStream: wire in when listenKey helpers are available
+  });
 
   const tryAcquireAutoTradeLeaderLock = useCallback(async (): Promise<boolean> => {
     const lockDocRef = autoTradeLeaderLockDocRef.current;
@@ -4560,6 +4615,8 @@ function AppInner() {
         onOpenAltScanner={() => { setAltScannerSnapshotMeta(undefined); setShowAltScanner(true); }}
         onOpenSoundSettings={() => setShowSoundSettings(true)}
         onOpenAutoTradeSettings={() => setShowAutoTradeSettings(true)}
+        onOpenScalpSettings={() => setShowScalpSettings(true)}
+        isScalpActive={scalpAutoTrade.isActive}
         isAutoTradeActive={altAutoTrade.isActive}
         autoTradeScanning={altAutoTrade.scanning}
         autoScanProgress={altAutoTrade.scanProgress ?? undefined}
@@ -4602,6 +4659,19 @@ function AppInner() {
           initialTab={autoTradeMode}
           labAutoPresets={labAutoPresets}
           onDeletePreset={(id) => setLabAutoPresets(prev => prev.filter(p => p.id !== id))}
+        />
+      )}
+
+      {showScalpSettings && (
+        <ScalpSettingsPanel
+          settings={scalpSettings}
+          onSave={(s) => {
+            setScalpSettingsState(s);
+            saveScalpSettings(s);
+          }}
+          onClose={() => setShowScalpSettings(false)}
+          isActive={scalpAutoTrade.isActive}
+          onToggleActive={scalpAutoTrade.setActive}
         />
       )}
 

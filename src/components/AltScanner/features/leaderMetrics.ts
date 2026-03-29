@@ -17,9 +17,10 @@ export const RS_DEFAULT_PERIOD = 14;
 
 /**
  * Scaling factor applied to the raw return difference before clamping to [-1, 1].
- * A raw diff of 1/RS_SCALE (≈ 20 %) maps to ±1.
+ * A raw diff of 1/RS_SCALE (≈ 12.5 %) maps to ±1.
+ * Raised from 5 → 8 so that realistic 5–10 % outperformance registers meaningfully.
  */
-const RS_SCALE = 5;
+const RS_SCALE = 8;
 
 /** Recent-window length for turnover acceleration. */
 export const TURNOVER_RECENT_BARS = 5;

@@ -127,7 +127,7 @@ export interface AutoTradeSettings {
   maxEntryDriftPct?: number;         // max allowed drift from plannedEntry before skipping (default 1.0%, 0 = disable)
   maxBreakoutExtensionPct?: number;  // max allowed extension of confirmed candle close beyond trigger line (default 0.6%, 0 = disable)
   // Candidate score threshold for auto-entry
-  // Breakout default 90 · leader-retest default 70 (max ~84) · fvg-poc-ema72 default 75
+  // Breakout default 90 · leader-retest default 65 (정규화 재보정 후 60~75대 분포) · fvg-poc-ema72 default 75
   minCandidateScore?: number;
   // Strategy selection (default 'breakout' — preserves existing behavior)
   strategyId?: 'breakout' | 'leader-retest' | 'fvg-poc-ema72';
@@ -593,7 +593,7 @@ function SettingsEditor({
               style={{ ...s.toggleChip, ...((draft.strategyId ?? 'breakout') === sid ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
               onClick={() => {
                 set('strategyId', sid);
-                if (sid === 'leader-retest') set('minCandidateScore', 70);
+                if (sid === 'leader-retest') set('minCandidateScore', 65);
                 if (sid === 'fvg-poc-ema72') set('minCandidateScore', 75);
                 if (sid === 'breakout') {
                   set('minCandidateScore', 90);
@@ -854,8 +854,8 @@ function SettingsEditor({
           <input
             type="number"
             min={50} max={100} step={1}
-            value={draft.minCandidateScore ?? (isLeaderRetest ? 70 : isFvg ? 75 : 90)}
-            onChange={e => set('minCandidateScore', Math.max(50, Math.min(100, parseInt(e.target.value) || (isLeaderRetest ? 70 : isFvg ? 75 : 90))))}
+            value={draft.minCandidateScore ?? (isLeaderRetest ? 65 : isFvg ? 75 : 90)}
+            onChange={e => set('minCandidateScore', Math.max(50, Math.min(100, parseInt(e.target.value) || (isLeaderRetest ? 65 : isFvg ? 75 : 90))))}
             style={s.numberInput}
           />
           <span style={s.unit}>점</span>
@@ -863,7 +863,7 @@ function SettingsEditor({
         <span style={s.hint}>
           이 점수 이상인 후보만 자동 진입합니다.{' '}
           {(draft.strategyId ?? 'breakout') === 'leader-retest'
-            ? '리더-리테스트 스코어는 구조적으로 40~80점 범위 — 70점 내외 권장. 전략 전환 시 자동 조정됩니다.'
+            ? '정규화 재보정 후 좋은 후보는 60~70대가 흔해집니다. 65점 내외를 기본 자동매매 컷으로 권장. 전략 전환 시 자동 조정됩니다.'
             : (draft.strategyId ?? 'breakout') === 'fvg-poc-ema72'
             ? 'FVG POC 스코어는 40~80점 범위 — 75점 내외 권장. 전략 전환 시 자동 조정됩니다.'
             : '기존 돌파 스코어는 0~100점 분포 — 기본 90점. 낮출수록 후보 증가, 높일수록 고품질 집중.'}
@@ -1183,7 +1183,7 @@ export function AutoTradeSettingsModal({ paperSettings, liveSettings, onSave, on
                           <span style={{ fontSize: '0.78rem', color: '#d1d4dc', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{preset.name}</span>
                           <span style={{ fontSize: '0.62rem', color: badgeColor, background: badgeBg, border: `1px solid ${badgeColor}44`, borderRadius: 3, padding: '1px 5px', flexShrink: 0 }}>{stratLabel}</span>
                         </div>
-                        <div style={{ fontSize: '0.65rem', color: '#5e6673' }}>{savedDate} 저장 · {preset.settings.leverage}x · 리스크 {preset.settings.riskPct}% · 최소 {preset.settings.minCandidateScore ?? (preset.settings.strategyId === 'leader-retest' ? 70 : preset.settings.strategyId === 'fvg-poc-ema72' ? 75 : 90)}점</div>
+                        <div style={{ fontSize: '0.65rem', color: '#5e6673' }}>{savedDate} 저장 · {preset.settings.leverage}x · 리스크 {preset.settings.riskPct}% · 최소 {preset.settings.minCandidateScore ?? (preset.settings.strategyId === 'leader-retest' ? 65 : preset.settings.strategyId === 'fvg-poc-ema72' ? 75 : 90)}점</div>
                       </div>
                       {appliedPresetId === preset.id ? (
                         <span style={{ fontSize: '0.72rem', padding: '3px 10px', border: '1px solid rgba(14,203,129,0.5)', borderRadius: 4, background: 'rgba(14,203,129,0.12)', color: '#0ecb81', flexShrink: 0, fontWeight: 700 }}>

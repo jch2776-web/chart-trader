@@ -27,6 +27,8 @@ interface Props {
   onOpenAltScanner?: () => void;
   onOpenSoundSettings?: () => void;
   onOpenAutoTradeSettings?: () => void;
+  onOpenScalpSettings?: () => void;
+  isScalpActive?: boolean;
   isAutoTradeActive?: boolean;
   autoTradeScanning?: boolean;
   autoScanProgress?: { interval: string; done: number; total: number };
@@ -62,8 +64,8 @@ export function Toolbar({
   fontSize, onFontSizeChange, activeColor, onActiveColorChange,
   isMultiMode, onToggleMultiMode, isPaperMode, onTogglePaperMode,
   indicators, onToggleIndicator,
-  onOpenBoard, onOpenUserBoard, onOpenSecurityFaq, onOpenAltScanner, onOpenSoundSettings, onOpenAutoTradeSettings,
-  isAutoTradeActive, autoTradeScanning, onToggleAutoTrade, onTriggerAutoTradeNow,
+  onOpenBoard, onOpenUserBoard, onOpenSecurityFaq, onOpenAltScanner, onOpenSoundSettings, onOpenAutoTradeSettings, onOpenScalpSettings,
+  isAutoTradeActive, isScalpActive, autoTradeScanning, onToggleAutoTrade, onTriggerAutoTradeNow,
   autoTradeMode = 'paper', autoTradeCadenceMinutes = 60, onChangeAutoTradeMode,
   autoScanProgress,
   isMobile, mobilePanel, onToggleMobilePanel,
@@ -338,6 +340,18 @@ export function Toolbar({
         title={`자동매매 진입 설정 (레버리지 · 마진 · 무인 스캔 주기: ${cadenceLabel})`}
       >
         ⚙ 자동설정
+      </button>
+
+      {/* Scalp auto-trade settings button */}
+      <button
+        style={{
+          ...styles.featureBtn,
+          ...(isScalpActive ? { background: '#f0b90b22', border: '1px solid #f0b90b55', color: '#f0b90b' } : {}),
+        }}
+        onClick={onOpenScalpSettings}
+        title="초단타 스캘핑 자동매매 설정"
+      >
+        ⚡ 스캘핑
       </button>
 
       {/* User board button */}
