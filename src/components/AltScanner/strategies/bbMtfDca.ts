@@ -21,7 +21,7 @@
  */
 
 import type { Candle } from '../../../types/candle';
-import type { HlineDrawing, Drawing } from '../../../types/drawing';
+import type { HlineDrawing, BoxDrawing, BoxCorner, Drawing } from '../../../types/drawing';
 import type {
   ScanCandidate, ScanInterval, ScanDirection, ScanOptions,
   DrawingGroups, CandidateStatus,
@@ -136,19 +136,23 @@ function calcBB(candles: Candle[], period: number, stdDev: number): { upper: num
 
 // ── Drawing helpers ───────────────────────────────────────────────────────────
 
+interface BbBands { upper: number; middle: number; lower: number }
+
 function buildBbMtfDrawings(
   symbol: string,
   entryPrice: number,
   sl: number,
   tp1: number,
   tp2: number,
-  bbMiddle1h: number,
-  bbLower1h: number,
+  bb15m: BbBands,
+  bb1h: BbBands,
   rescueLevels: number[],
+  candles: Candle[],
 ): DrawingGroups {
-  const R = Math.abs(entryPrice - sl);
+  const R  = Math.abs(entryPrice - sl);
   const rr = R > 0 ? Math.abs(tp2 - entryPrice) / R : 0;
 
+  // ── entryLines: 핵심 진입/청산 레벨 (항상 표시) ──────────────────────────
   const entryLines: Drawing[] = [
     {
       id: uid(), type: 'hline', ticker: symbol, price: entryPrice,
@@ -156,44 +160,89 @@ function buildBbMtfDrawings(
       memo: `① ▲ 롱 BB MTF 딥 진입 · RR≈${rr.toFixed(1)}`,
     } satisfies HlineDrawing,
     {
-      id: uid(), type: 'hline', ticker: symbol, price: sl,
-      color: '#f6465d',
-      memo: `④ SL ${fmt(sl)} · ATR×${DEFAULT_BB_MTF_OPTIONS.slAtr}`,
-    } satisfies HlineDrawing,
-    {
       id: uid(), type: 'hline', ticker: symbol, price: tp1,
       color: '#0ecb81',
-      memo: `② TP1 ${fmt(tp1)} · 15m BB 중심선 (SMA20)`,
+      memo: `② TP1 ${fmt(tp1)} · 15m BB 중심선 복귀`,
     } satisfies HlineDrawing,
     {
       id: uid(), type: 'hline', ticker: symbol, price: tp2,
       color: '#00b4a0',
       memo: `③ TP2 ${fmt(tp2)} · RR≈${rr.toFixed(1)}`,
     } satisfies HlineDrawing,
+    {
+      id: uid(), type: 'hline', ticker: symbol, price: sl,
+      color: '#f6465d',
+      memo: `④ SL ${fmt(sl)} · ATR×1.5`,
+    } satisfies HlineDrawing,
   ];
 
+  // ── breakout: BB 밴드 컨텍스트 + 구출레벨 (항상 표시) ─────────────────────
+
+  // 15m BB 밴드 배경 박스 (SMA20 ± 2σ 구간을 면적으로 시각화)
+  const t1 = candles[0].time;
+  const t2 = candles[candles.length - 1].time;
+  const bbBoxCorners: BoxCorner[] = [
+    { pos: 'TL', time: t1, price: bb15m.upper },
+    { pos: 'TR', time: t2, price: bb15m.upper },
+    { pos: 'BR', time: t2, price: bb15m.lower },
+    { pos: 'BL', time: t1, price: bb15m.lower },
+  ];
+  const bbBandBox: BoxDrawing = {
+    id: uid(), type: 'box', ticker: symbol,
+    p1: { time: t1, price: bb15m.upper },
+    p2: { time: t2, price: bb15m.lower },
+    corners: bbBoxCorners,
+    topPrice: bb15m.upper,
+    bottomPrice: bb15m.lower,
+    color: 'rgba(56,189,248,0.07)',
+    memo: `BB 밴드 구간 (15m SMA${DEFAULT_BB_MTF_OPTIONS.bbPeriod}±${DEFAULT_BB_MTF_OPTIONS.bbStdDev}σ)`,
+  };
+
+  // 15m BB 하단선 — 침범 트리거 (가장 중요)
+  const bb15mLowerLine: HlineDrawing = {
+    id: uid(), type: 'hline', ticker: symbol, price: bb15m.lower,
+    color: '#38bdf8',
+    memo: `⑦ 15m BB 하단 ← 침범 트리거 (SMA${DEFAULT_BB_MTF_OPTIONS.bbPeriod}−${DEFAULT_BB_MTF_OPTIONS.bbStdDev}σ)`,
+  };
+
+  // 15m BB 상단선 — 반등 목표 참고
+  const bb15mUpperLine: HlineDrawing = {
+    id: uid(), type: 'hline', ticker: symbol, price: bb15m.upper,
+    color: 'rgba(14,203,129,0.50)',
+    memo: `⑧ 15m BB 상단 ${fmt(bb15m.upper)} · 반등 목표`,
+  };
+
+  // 1h BB 하단선 — 컨텍스트 침범 레벨
+  const bb1hLowerLine: HlineDrawing = {
+    id: uid(), type: 'hline', ticker: symbol, price: bb1h.lower,
+    color: 'rgba(59,139,235,0.70)',
+    memo: `⑨ 1h BB 하단 ${fmt(bb1h.lower)} ← 컨텍스트 침범`,
+  };
+
+  // 구출 DCA 레벨
   const rescueLines: Drawing[] = rescueLevels.map((level, i) => ({
     id: uid(), type: 'hline', ticker: symbol, price: level,
     color: 'rgba(155,89,182,0.80)',
     memo: `⑤ 구출DCA ${i + 1}단계 ${fmt(level)}`,
   } satisfies HlineDrawing));
 
-  const contextLines: Drawing[] = [
+  // ── dimSR: 상세 모드에서만 표시되는 추가 컨텍스트 ──────────────────────────
+  const dimSR: Drawing[] = [
     {
-      id: uid(), type: 'hline', ticker: symbol, price: bbMiddle1h,
-      color: 'rgba(240,185,11,0.45)',
-      memo: `⑦ 1h BB 중심선 ${fmt(bbMiddle1h)}`,
+      id: uid(), type: 'hline', ticker: symbol, price: bb1h.middle,
+      color: 'rgba(240,185,11,0.35)',
+      memo: `1h BB 중심선 ${fmt(bb1h.middle)}`,
     } satisfies HlineDrawing,
     {
-      id: uid(), type: 'hline', ticker: symbol, price: bbLower1h,
-      color: 'rgba(59,139,235,0.55)',
-      memo: `⑧ 1h BB 하단 ${fmt(bbLower1h)} (컨텍스트 침범)`,
+      id: uid(), type: 'hline', ticker: symbol, price: bb1h.upper,
+      color: 'rgba(14,203,129,0.25)',
+      memo: `1h BB 상단 ${fmt(bb1h.upper)}`,
     } satisfies HlineDrawing,
   ];
 
   return {
-    breakout: [...contextLines, ...rescueLines],
-    dimSR: [],
+    breakout: [bbBandBox, bb15mLowerLine, bb15mUpperLine, bb1hLowerLine, ...rescueLines],
+    dimSR,
     topSR: [],
     hvn: [],
     entryLines,
@@ -303,7 +352,7 @@ async function scanSymbolBbMtf(
 
   const drawingGroups = buildBbMtfDrawings(
     symbol, entryPrice, sl, tp1, tp2,
-    bb1h.middle, bb1h.lower, rescueLevels,
+    bb15m, bb1h, rescueLevels, closedM15,
   );
 
   return {
