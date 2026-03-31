@@ -9,6 +9,8 @@ import { runLeaderRetestScan, createLeaderRetestScan } from './strategies/leader
 import type { RetestOptions } from './strategies/leaderRetest';
 import type { OrderPlan } from './features/orderPlan';
 import { runFvgPocEma72Scan } from './strategies/fvgPocEma72';
+import { runBbMtfDcaScan, createBbMtfDcaScan } from './strategies/bbMtfDca';
+import type { BbMtfOptions } from './strategies/bbMtfDca';
 import { useBinanceWS } from '../../hooks/useBinanceWS';
 import { revalidateCandidate } from './validateSignal';
 import { fetchBinanceKlinesCached } from '../../lib/binanceKlineCache';
@@ -86,6 +88,8 @@ interface Props {
   liveAutoSettings?: AutoEntryHints;
   /** Retest scan options — when provided, manual scan uses these instead of DEFAULT_RETEST_OPTIONS */
   retestOptions?: RetestOptions;
+  /** BB MTF DCA options — when provided, manual scan uses these instead of defaults */
+  bbMtfOptions?: BbMtfOptions;
 }
 
 type LevelMode = 'core' | 'all';
@@ -806,7 +810,12 @@ function TradingInfoPanel({
       {/* Row 2: 4 explanation blocks */}
       <div style={S.blockRow}>
         <InfoBlock icon="📌" title="진입 조건">
-          {c.strategyId === 'fvg-poc-ema72' ? (
+          {c.strategyId === 'bb-mtf-dca' ? (
+            <>
+              <div>1h+15m 이중 BB 하단 침범 딥 진입</div>
+              <div>MA 필터 · 낙도 방지 · LIMIT 전용</div>
+            </>
+          ) : c.strategyId === 'fvg-poc-ema72' ? (
             <>
               <div>FVG POC × EMA72 수렴 진입</div>
               <div>EMA72 방향 추세 필터 적용</div>
@@ -824,7 +833,12 @@ function TradingInfoPanel({
           )}
         </InfoBlock>
         <InfoBlock icon="🛡" title="손절 기준">
-          {c.strategyId === 'fvg-poc-ema72' ? (
+          {c.strategyId === 'bb-mtf-dca' ? (
+            <>
+              <div><b>진입가 − ATR×1.5 구조적 손절</b></div>
+              <div>구출DCA 최대 {c.bbMtfRescueLevels?.length ?? 2}단계 내 파산방지</div>
+            </>
+          ) : c.strategyId === 'fvg-poc-ema72' ? (
             <>
               <div><b>ATR×1.5 기반 구조적 손절</b></div>
               <div>FVG 구간 이탈 시 손절 강화</div>
@@ -842,7 +856,14 @@ function TradingInfoPanel({
           )}
         </InfoBlock>
         <InfoBlock icon="🔍" title="분석 근거">
-          {c.strategyId === 'fvg-poc-ema72' ? (
+          {c.strategyId === 'bb-mtf-dca' ? (
+            <>
+              <div>1h 침범 <b style={{ color: '#3b8beb' }}>{c.bbMtfH1BreachPct?.toFixed(2) ?? '?'}%</b> · 15m 침범 <b style={{ color: '#3b8beb' }}>{c.bbMtfM15BreachPct?.toFixed(2) ?? '?'}%</b></div>
+              {c.bbMtfRescueLevels && c.bbMtfRescueLevels.length > 0 && (
+                <div>구출레벨 {c.bbMtfRescueLevels.map(l => pf(l)).join(' / ')}</div>
+              )}
+            </>
+          ) : c.strategyId === 'fvg-poc-ema72' ? (
             <>
               <div>SR 레벨 <b>{c.srLevels.length}개</b> · HVN <b>{c.hvnZones.length}개</b></div>
               {(c as any).pocPrice != null && (
@@ -964,7 +985,7 @@ function InfoBlock({ icon, title, children }: { icon: string; title: string; chi
 export function AltScannerModal({
   symbols, initialCandidates, onCandidatesChange, onClose, onOpenInMain,
   onPaperTrade, onLiveTrade, snapshotMeta, paperBalance,
-  paperAutoSettings, liveAutoSettings, retestOptions,
+  paperAutoSettings, liveAutoSettings, retestOptions, bbMtfOptions,
 }: Props) {
   const [showFAQ, setShowFAQ]           = useState(false);
   const [scanInterval, setScanInterval] = useState<ScanInterval>('1h');
@@ -1163,6 +1184,7 @@ export function AltScannerModal({
     const scanFn = strategy === 'leader-retest'
       ? (retestOptions ? createLeaderRetestScan(retestOptions) : runLeaderRetestScan)
       : strategy === 'fvg-poc-ema72' ? runFvgPocEma72Scan
+      : strategy === 'bb-mtf-dca' ? (bbMtfOptions ? createBbMtfDcaScan(bbMtfOptions) : runBbMtfDcaScan)
       : runBreakoutScan;
     try {
       await scanFn(symbols, scanInterval, direction,
@@ -1242,6 +1264,7 @@ export function AltScannerModal({
       const autoScanFn = strategy === 'leader-retest'
         ? (retestOptions ? createLeaderRetestScan(retestOptions) : runLeaderRetestScan)
         : strategy === 'fvg-poc-ema72' ? runFvgPocEma72Scan
+        : strategy === 'bb-mtf-dca' ? (bbMtfOptions ? createBbMtfDcaScan(bbMtfOptions) : runBbMtfDcaScan)
         : runBreakoutScan;
       try {
         await autoScanFn(
@@ -1466,6 +1489,7 @@ export function AltScannerModal({
               { id: 'breakout', label: '기존 돌파' },
               { id: 'leader-retest', label: '리더-리테스트' },
               { id: 'fvg-poc-ema72', label: 'FVG POC + EMA72' },
+              { id: 'bb-mtf-dca', label: 'BB MTF DCA' },
             ]).map(s => (
               <button key={s.id}
                 style={{ ...S.ctrlBtn, ...(strategy === s.id ? S.ctrlActive : {}) }}

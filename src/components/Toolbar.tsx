@@ -24,6 +24,8 @@ interface Props {
   onOpenBoard: () => void;
   onOpenUserBoard?: () => void;
   onOpenSecurityFaq?: () => void;
+  onOpenAltFaq?: () => void;
+  onOpenScalpFaq?: () => void;
   onOpenAltScanner?: () => void;
   onOpenSoundSettings?: () => void;
   onOpenAutoTradeSettings?: () => void;
@@ -81,7 +83,7 @@ export function Toolbar({
   fontSize, onFontSizeChange, activeColor, onActiveColorChange,
   isMultiMode, onToggleMultiMode, isPaperMode, onTogglePaperMode,
   indicators, onToggleIndicator,
-  onOpenBoard, onOpenUserBoard, onOpenSecurityFaq, onOpenAltScanner, onOpenSoundSettings, onOpenAutoTradeSettings, onOpenScalpSettings,
+  onOpenBoard, onOpenUserBoard, onOpenSecurityFaq, onOpenAltFaq, onOpenScalpFaq, onOpenAltScanner, onOpenSoundSettings, onOpenAutoTradeSettings, onOpenScalpSettings,
   onToggleScalp,
   isAutoTradeActive, isScalpActive, autoTradeScanning, onToggleAutoTrade, onTriggerAutoTradeNow,
   autoTradeMode = 'paper', autoTradeCadenceMinutes = 60, onChangeAutoTradeMode,
@@ -154,7 +156,38 @@ export function Toolbar({
   }
 
   return (
-    <div style={styles.toolbar}>
+    <div style={styles.toolbarWrapper}>
+
+      {/* ── Top bar: board / community links ──────────────────────────────── */}
+      <div style={styles.topBar}>
+        <button style={styles.topBarBtn} onClick={onOpenBoard} title="도형 게시판">
+          📋 도형게시판
+        </button>
+        <div style={{ flex: 1 }} />
+        {onOpenAltFaq && (
+          <button style={styles.topBarBtn} onClick={onOpenAltFaq} title="ALT추천 스캐너 FAQ">
+            📋 알트FAQ
+          </button>
+        )}
+        {onOpenScalpFaq && (
+          <button style={styles.topBarBtn} onClick={onOpenScalpFaq} title="스캘핑 자동매매 FAQ">
+            ⚡ 스캘핑FAQ
+          </button>
+        )}
+        {onOpenUserBoard && (
+          <button style={styles.topBarBtn} onClick={onOpenUserBoard} title="유저 게시판">
+            💬 유저게시판
+          </button>
+        )}
+        {onOpenSecurityFaq && (
+          <button style={styles.topBarBtn} onClick={onOpenSecurityFaq} title="보안 FAQ">
+            🔒 보안FAQ
+          </button>
+        )}
+      </div>
+
+      {/* ── Main toolbar ───────────────────────────────────────────────────── */}
+      <div style={styles.toolbar}>
       {/* Mobile panel nav buttons — shown at front of toolbar on mobile */}
       {isMobile && (
         <>
@@ -334,24 +367,6 @@ export function Toolbar({
         📄 모의거래
       </button>
 
-      {/* Board button */}
-      <button
-        style={styles.featureBtn}
-        onClick={onOpenBoard}
-        title="도형 게시판"
-      >
-        📋 도형게시판
-      </button>
-
-      {/* Alt scanner button */}
-      <button
-        style={styles.featureBtn}
-        onClick={onOpenAltScanner}
-        title="알트추천 (돌파 스캐너)"
-      >
-        🔍 알트추천
-      </button>
-
       {/* Auto trade mode toggle [모의] [실전] */}
       {onChangeAutoTradeMode && (
         <div style={{ display: 'flex', gap: 2, flexShrink: 0 }}>
@@ -404,6 +419,17 @@ export function Toolbar({
           title="지금 즉시 스캔 실행"
           style={{ ...styles.featureBtn, ...styles.featureBtnYellow }}
         >▶ 즉시실행</button>
+      )}
+
+      {/* Alt scanner button */}
+      {onOpenAltScanner && (
+        <button
+          style={styles.featureBtn}
+          onClick={onOpenAltScanner}
+          title="알트추천 (돌파 스캐너) — 수동 스캔 및 FAQ"
+        >
+          🔍 알트추천
+        </button>
       )}
 
       {/* Auto trade settings button */}
@@ -544,24 +570,6 @@ export function Toolbar({
         </div>
       )}
 
-      {/* User board button */}
-      <button
-        style={styles.featureBtn}
-        onClick={onOpenUserBoard}
-        title="유저 게시판"
-      >
-        💬 유저게시판
-      </button>
-
-      {/* Security FAQ button */}
-      <button
-        style={styles.featureBtn}
-        onClick={onOpenSecurityFaq}
-        title="보안 FAQ"
-      >
-        🔒 보안FAQ
-      </button>
-
       {/* ── Realtime account stats ────────────────── */}
       {isPaperMode ? (
         paperBalance != null && (
@@ -661,6 +669,7 @@ export function Toolbar({
         logs={errorLogs}
         onClear={onClearErrors ?? (() => {})}
       />
+      </div>
     </div>
   );
 }
@@ -679,10 +688,39 @@ function Stat({ label, value, valueColor }: { label: string; value: string; valu
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  toolbar: {
-    height: 40,
+  toolbarWrapper: {
+    display: 'flex',
+    flexDirection: 'column',
     background: '#1e222d',
     borderBottom: '1px solid #2a2e39',
+    flexShrink: 0,
+  },
+  topBar: {
+    height: 26,
+    display: 'flex',
+    alignItems: 'center',
+    padding: '0 8px',
+    gap: 2,
+    borderBottom: '1px solid #1a1e2b',
+    flexShrink: 0,
+    background: '#181c27',
+  },
+  topBarBtn: {
+    background: 'none',
+    border: 'none',
+    color: '#5e6673',
+    cursor: 'pointer',
+    fontSize: '0.72rem',
+    padding: '0 8px',
+    height: 20,
+    borderRadius: 3,
+    fontFamily: 'inherit',
+    whiteSpace: 'nowrap',
+    flexShrink: 0,
+    transition: 'color 0.1s',
+  },
+  toolbar: {
+    height: 40,
     display: 'flex',
     alignItems: 'center',
     padding: '0 12px',

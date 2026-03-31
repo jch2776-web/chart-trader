@@ -101,7 +101,7 @@ export interface ScalpLimitOrderParams {
   price: number;
   quantity: number;
   reduceOnly: boolean;
-  timeInForce: 'GTC' | 'IOC';
+  timeInForce: 'GTC' | 'IOC' | 'GTX';
 }
 
 /** Parameters for a stop/take-profit market order. */
@@ -115,6 +115,12 @@ export interface ScalpStopOrderParams {
   orderType: 'STOP_MARKET' | 'TAKE_PROFIT_MARKET';
 }
 
+export interface ScalpOpenProtectionOrderRef {
+  orderId: string;
+  time?: number;
+  type?: string;
+}
+
 /**
  * Minimal broker interface supplied from App.tsx.
  * Decoupled from Binance SDK — callers adapt to this contract.
@@ -125,6 +131,14 @@ export interface ScalpBrokerCallbacks {
   /** Place a STOP_MARKET or TAKE_PROFIT_MARKET reduce-only order. */
   placeStopMarketOrder(params: ScalpStopOrderParams): Promise<string>;
   cancelOrder(orderId: string, symbol: string): Promise<void>;
+  /**
+   * Optional runtime guard for duplicate protection orders.
+   * Returns currently open TP/SL-like order refs for symbol+side.
+   */
+  getOpenProtectionOrders?: (
+    symbol: string,
+    side: 'long' | 'short',
+  ) => ScalpOpenProtectionOrderRef[];
   /**
    * Optional live snapshot fallback:
    * Returns currently open position for symbol+side (if any), used to recover missed FILLED events.

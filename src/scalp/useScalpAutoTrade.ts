@@ -87,6 +87,16 @@ export interface UseScalpAutoTradeProps {
   broker?: ScalpBrokerCallbacks;
   /** Required for live user stream. Omit to skip user stream (paper/polling). */
   userStream?: Omit<ScalpUserStreamConfig, 'handlers'>;
+  /**
+   * Called when an entry fills — allows App to record plannedTP/SL for trade history.
+   * Only fires in live mode (paper mode doesn't need this).
+   */
+  onPositionOpen?: (symbol: string, positionSide: 'LONG' | 'SHORT', plannedTP: number, plannedSL: number) => void;
+  /**
+   * Called when a TP or SL fills — allows App to set close reason hint for trade history.
+   * Only fires in live mode.
+   */
+  onPositionClose?: (symbol: string, positionSide: 'LONG' | 'SHORT', reason: 'tp' | 'sl') => void;
 }
 
 export interface UseScalpAutoTradeResult {
@@ -251,6 +261,8 @@ export function useScalpAutoTrade({
   onLog,
   broker,
   userStream,
+  onPositionOpen,
+  onPositionClose,
 }: UseScalpAutoTradeProps): UseScalpAutoTradeResult {
 
   const [isActive, setIsActiveState] = useState(false);
@@ -271,6 +283,10 @@ export function useScalpAutoTrade({
   onLogRef.current   = onLog;
   const availableMarginRef = useRef<number | null | undefined>(availableMarginUsdt);
   availableMarginRef.current = availableMarginUsdt;
+  const onPositionOpenRef  = useRef(onPositionOpen);
+  onPositionOpenRef.current  = onPositionOpen;
+  const onPositionCloseRef = useRef(onPositionClose);
+  onPositionCloseRef.current = onPositionClose;
   const symbolMinNotionalRef = useRef<Record<string, number>>({});
   const liveNotionalWarnUntilRef = useRef<Record<string, number>>({});
   const minNotionalLookupWarnUntilRef = useRef<Record<string, number>>({});
@@ -455,8 +471,15 @@ export function useScalpAutoTrade({
         (msg, level) => addLog(msg, level),
         getScalpSnapshot,
         () => settingsRef.current,
+        {
+          onPositionOpen:  (...args) => onPositionOpenRef.current?.(...args),
+          onPositionClose: (...args) => onPositionCloseRef.current?.(...args),
+        },
       );
       addLog(`⚡ 스캘핑 시작 — ${mode === 'live' ? '실전' : '페이퍼'} | ${settings.symbols.length}개 심볼`, 'success');
+      if (mode === 'live') {
+        addLog('진입 방식: LIMIT 포스트온리(기본 GTX), 시장가 강제 진입 비활성', 'success');
+      }
     } else {
       const exec = execRef.current;
       execRef.current = null;

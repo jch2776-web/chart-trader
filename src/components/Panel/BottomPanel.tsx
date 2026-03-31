@@ -138,6 +138,9 @@ interface UnifiedHistoryRow {
   exitPrice: number | null;
   pnl: number | null;
   fees: number | null;
+  feeOpenFillCount?: number | null;
+  feeCloseFillCount?: number | null;
+  feeOrderCount?: number | null;
   entryTime: number | null;
   exitTime: number;
   closeReason: UnifiedHistoryReason;
@@ -2295,6 +2298,9 @@ export function BottomPanel({
       exitPrice: h.exitPrice,
       pnl: h.pnl,
       fees: h.fees,
+      feeOpenFillCount: null,
+      feeCloseFillCount: null,
+      feeOrderCount: null,
       entryTime: h.entryTime,
       exitTime: h.exitTime,
       closeReason: h.closeReason,
@@ -2327,6 +2333,9 @@ export function BottomPanel({
       exitPrice: h.exitPrice,
       pnl: h.pnl,
       fees: h.fees,
+      feeOpenFillCount: h.feeOpenFillCount ?? null,
+      feeCloseFillCount: h.feeCloseFillCount ?? null,
+      feeOrderCount: h.feeOrderCount ?? null,
       entryTime: h.entryTime,
       exitTime: h.exitTime,
       closeReason: h.closeReason,
@@ -2440,6 +2449,9 @@ export function BottomPanel({
                 ? (h.entryPrice * h.qty / h.leverage)
                 : null;
               const roi = margin != null && margin > 0 && h.pnl != null ? (h.pnl / margin) * 100 : null;
+              const feeAbs = h.fees != null ? Math.abs(h.fees) : null;
+              const netPnl = h.pnl != null ? h.pnl - (feeAbs ?? 0) : null;
+              const netRoi = margin != null && margin > 0 && netPnl != null ? (netPnl / margin) * 100 : null;
               const pnlText = h.pnl != null ? `${h.pnl >= 0 ? '+' : ''}${h.pnl.toFixed(4)}` : '-';
               return [
                 { value: h.symbol },
@@ -2452,6 +2464,8 @@ export function BottomPanel({
                 { value: pnlText, color: h.pnl != null ? (h.pnl >= 0 ? 'green' : 'red') : 'gray', bold: true, align: 'right' },
                 { value: roi != null ? `${roi >= 0 ? '+' : ''}${roi.toFixed(2)}%` : '-', color: roi != null ? (roi >= 0 ? 'green' : 'red') : 'gray', align: 'right' },
                 { value: h.fees != null ? `-${h.fees.toFixed(4)}` : '-', color: 'orange', align: 'right' },
+                { value: netPnl != null ? `${netPnl >= 0 ? '+' : ''}${netPnl.toFixed(4)}` : '-', color: netPnl != null ? (netPnl >= 0 ? 'green' : 'red') : 'gray', align: 'right' },
+                { value: netRoi != null ? `${netRoi >= 0 ? '+' : ''}${netRoi.toFixed(2)}%` : '-', color: netRoi != null ? (netRoi >= 0 ? 'green' : 'red') : 'gray', align: 'right' },
                 { value: reasonLabel(h.closeReason), color: reasonColorByReason(h.closeReason) },
                 { value: h.interval ?? '—', align: 'center' },
                 { value: h.candidateScore != null ? h.candidateScore.toFixed(1) : '-', align: 'right' },
@@ -2469,7 +2483,7 @@ export function BottomPanel({
               { label: '레버리지', width: 8 }, { label: '투입마진(USDT)', width: 14 },
               { label: '진입가(USDT)', width: 14 }, { label: '청산가(USDT)', width: 14 },
               { label: '실현손익(USDT)', width: 16 }, { label: 'ROI(%)', width: 10 },
-              { label: '수수료(USDT)', width: 14 }, { label: '사유', width: 10 },
+              { label: '수수료(USDT)', width: 14 }, { label: '순손익(USDT)', width: 16 }, { label: '순ROI(%)', width: 10 }, { label: '사유', width: 10 },
               { label: '타임프레임', width: 10 },
               { label: 'Score', width: 8 }, { label: '계획TP', width: 12 }, { label: '계획SL', width: 12 },
               { label: '진입시간', width: 20 }, { label: '종료시간', width: 20 },
@@ -2554,7 +2568,11 @@ export function BottomPanel({
               ? (h.entryPrice * h.qty / h.leverage)
               : null;
             const roi = margin != null && margin > 0 && h.pnl != null ? (h.pnl / margin) * 100 : null;
+            const feeAbs = h.fees != null ? Math.abs(h.fees) : null;
+            const netPnl = h.pnl != null ? h.pnl - (feeAbs ?? 0) : null;
+            const netRoi = margin != null && margin > 0 && netPnl != null ? (netPnl / margin) * 100 : null;
             const pnlCol = h.pnl == null ? '#848e9c' : (h.pnl >= 0 ? '#0ecb81' : '#f6465d');
+            const netPnlCol = netPnl == null ? '#5d6776' : (netPnl >= 0 ? '#0ecb81' : '#f6465d');
             return (
               <tr key={h.id} style={s.tr}>
                 <td style={s.td}>
@@ -2588,13 +2606,29 @@ export function BottomPanel({
                 <td style={s.td}><div style={s.priceCell}><span>{h.entryPrice != null ? fmtPrice(h.entryPrice) : '—'}</span><span style={s.priceUnit}>USDT</span></div></td>
                 <td style={s.td}><div style={s.priceCell}><span>{h.exitPrice != null ? fmtPrice(h.exitPrice) : '—'}</span><span style={s.priceUnit}>USDT</span></div></td>
                 <td style={{ ...s.td, color: pnlCol, fontWeight: 700 }}>
-                  <div style={s.pnlCell}>
-                    <span>{h.pnl != null ? `${h.pnl >= 0 ? '+' : ''}${fmtPrice(h.pnl)} USDT` : '—'}</span>
-                    <span style={{ ...s.roiTag, color: pnlCol }}>{roi != null ? `${roi >= 0 ? '+' : ''}${roi.toFixed(2)}%` : '—'}</span>
+                  <div style={{ ...s.pnlCell, flexDirection: 'column', alignItems: 'flex-end', gap: 2 }}>
+                    <span>
+                      {h.pnl != null ? `${h.pnl >= 0 ? '+' : ''}${fmtPrice(h.pnl)} USDT` : '—'}
+                      <span style={{ ...s.roiTag, color: pnlCol, marginLeft: 4 }}>{roi != null ? `${roi >= 0 ? '+' : ''}${roi.toFixed(2)}%` : '—'}</span>
+                    </span>
+                    <span style={{ fontSize: '0.68rem', color: netPnlCol, fontWeight: 600 }}>
+                      순 {netPnl != null ? `${netPnl >= 0 ? '+' : ''}${fmtPrice(netPnl)} USDT` : '—'}
+                      <span style={{ marginLeft: 4 }}>{netRoi != null ? `${netRoi >= 0 ? '+' : ''}${netRoi.toFixed(2)}%` : '—'}</span>
+                    </span>
                   </div>
                 </td>
                 <td style={{ ...s.td, color: '#f59e42', fontSize: '0.73rem' }}>
-                  <div style={s.priceCell}><span>{h.fees != null ? `−${fmtPrice(h.fees)}` : '—'}</span><span style={s.priceUnit}>USDT</span></div>
+                  <div style={{ ...s.priceCell, flexDirection: 'column', alignItems: 'flex-end', gap: 2 }}>
+                    <span>
+                      {h.fees != null ? `−${fmtPrice(h.fees)}` : '—'}
+                      <span style={{ ...s.priceUnit, marginLeft: 4 }}>USDT</span>
+                    </span>
+                    {(h.feeOpenFillCount != null || h.feeCloseFillCount != null || h.feeOrderCount != null) && (
+                      <span style={{ fontSize: '0.66rem', color: '#8b97a7', whiteSpace: 'nowrap' }}>
+                        체결 O/C {h.feeOpenFillCount ?? '-'} / {h.feeCloseFillCount ?? '-'} · 주문 {h.feeOrderCount ?? '-'}
+                      </span>
+                    )}
+                  </div>
                 </td>
                 <td style={{ ...s.td, color: reasonColorByReason(h.closeReason), fontWeight: 600 }}>{reasonLabel(h.closeReason)}</td>
                 <td style={{ ...s.td, textAlign: 'center' }}>

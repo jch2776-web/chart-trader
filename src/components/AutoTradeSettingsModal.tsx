@@ -130,7 +130,7 @@ export interface AutoTradeSettings {
   // Breakout default 90 · leader-retest default 65 (정규화 재보정 후 60~75대 분포) · fvg-poc-ema72 default 75
   minCandidateScore?: number;
   // Strategy selection (default 'breakout' — preserves existing behavior)
-  strategyId?: 'breakout' | 'leader-retest' | 'fvg-poc-ema72';
+  strategyId?: 'breakout' | 'leader-retest' | 'fvg-poc-ema72' | 'bb-mtf-dca';
   // Leader-retest specific parameters (only used when strategyId === 'leader-retest')
   retestMinBars?: number;            // min bars since breakout (default 1)
   retestMaxBars?: number;            // max bars since breakout (default 12)
@@ -153,6 +153,15 @@ export interface AutoTradeSettings {
   fvgEmaPeriod?: number;
   fvgUniverseTopN?: number;
   fvgAutoDirection?: 'long' | 'short' | 'both';
+  // BB MTF Dip + Auto Rescue DCA specific (only used when strategyId === 'bb-mtf-dca')
+  bbMtfBbPeriod?: number;            // BB period (default 20)
+  bbMtfBbStdDev?: number;            // BB std dev multiplier (default 2.0)
+  bbMtfMaPeriod?: number;            // MA period for prevPrev filter (default 50)
+  bbMtfMaxMaDropPct?: number;        // max drop from MA fraction (default 0.06)
+  bbMtfSlAtr?: number;               // SL ATR multiplier (default 1.5)
+  bbMtfRescueCount?: number;         // number of rescue DCA levels (default 2)
+  bbMtfRescueSpacingAtr?: number;    // ATR spacing between rescue levels (default 1.0)
+  bbMtfMaxBudgetMultiplier?: number; // max total budget multiplier (default 3.10)
   // Risk gates (lab-compatible)
   maxSpreadBps?: number;             // leader-retest: block when bid-ask spread > N bps (0 = disable, default 4)
   maxRiskPct?: number;               // leader-retest: block when |entry-SL|/entry > N% (0 = disable, default 2.5)
@@ -286,6 +295,7 @@ function SettingsEditor({
   const cadenceFasterThanMinTf = cadence < minTfMinutes;
   const isLeaderRetest = (draft.strategyId ?? 'breakout') === 'leader-retest';
   const isFvg = (draft.strategyId ?? 'breakout') === 'fvg-poc-ema72';
+  const isBbMtf = (draft.strategyId ?? 'breakout') === 'bb-mtf-dca';
   return (
     <>
       {/* Leverage */}
@@ -587,7 +597,7 @@ function SettingsEditor({
       <div style={s.fieldRow}>
         <label style={s.label}>스캔 전략</label>
         <div style={{ display: 'flex', gap: 6 }}>
-          {(['breakout', 'leader-retest', 'fvg-poc-ema72'] as const).map(sid => (
+          {(['breakout', 'leader-retest', 'fvg-poc-ema72', 'bb-mtf-dca'] as const).map(sid => (
             <button
               key={sid}
               style={{ ...s.toggleChip, ...((draft.strategyId ?? 'breakout') === sid ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
@@ -595,6 +605,7 @@ function SettingsEditor({
                 set('strategyId', sid);
                 if (sid === 'leader-retest') set('minCandidateScore', 65);
                 if (sid === 'fvg-poc-ema72') set('minCandidateScore', 75);
+                if (sid === 'bb-mtf-dca') set('minCandidateScore', 55);
                 if (sid === 'breakout') {
                   set('minCandidateScore', 90);
                   // 실험실 기본값과 동일하게 맞춤 (0 = 비활성)
@@ -604,7 +615,7 @@ function SettingsEditor({
                 }
               }}
             >
-              {sid === 'breakout' ? '기존 돌파' : sid === 'leader-retest' ? '리더-리테스트' : 'FVG POC+EMA72'}
+              {sid === 'breakout' ? '기존 돌파' : sid === 'leader-retest' ? '리더-리테스트' : sid === 'fvg-poc-ema72' ? 'FVG POC+EMA72' : 'BB MTF DCA'}
             </button>
           ))}
         </div>
@@ -847,6 +858,72 @@ function SettingsEditor({
         </div>
       )}
 
+      {/* BB MTF DCA options */}
+      {isBbMtf && (
+        <div style={{ background: 'rgba(155,89,182,0.05)', border: '1px solid rgba(155,89,182,0.22)', borderRadius: 7, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ fontSize: '0.72rem', color: '#9b59b6', fontWeight: 700, marginBottom: 2 }}>BB MTF DCA 조건</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap' as const, gap: '8px 16px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>BB 기간</span>
+              <input type="number" min={5} max={100} step={1}
+                value={draft.bbMtfBbPeriod ?? 20}
+                onChange={e => set('bbMtfBbPeriod', Math.max(5, Math.min(100, parseInt(e.target.value) || 20)))}
+                style={{ ...s.numberInput, width: 52 }} />
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>BB 배수</span>
+              <input type="number" min={1.0} max={4.0} step={0.1}
+                value={draft.bbMtfBbStdDev ?? 2.0}
+                onChange={e => set('bbMtfBbStdDev', Math.max(1.0, Math.min(4.0, parseFloat(e.target.value) || 2.0)))}
+                style={{ ...s.numberInput, width: 52 }} />
+              <span style={s.unit}>σ</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>MA 기간</span>
+              <input type="number" min={10} max={200} step={5}
+                value={draft.bbMtfMaPeriod ?? 50}
+                onChange={e => set('bbMtfMaPeriod', Math.max(10, Math.min(200, parseInt(e.target.value) || 50)))}
+                style={{ ...s.numberInput, width: 52 }} />
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>낙도 허용</span>
+              <input type="number" min={1} max={20} step={1}
+                value={Math.round((draft.bbMtfMaxMaDropPct ?? 0.06) * 100)}
+                onChange={e => set('bbMtfMaxMaDropPct', Math.max(0.01, Math.min(0.20, (parseInt(e.target.value) || 6) / 100)))}
+                style={{ ...s.numberInput, width: 52 }} />
+              <span style={s.unit}>% 이내</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>SL ATR배수</span>
+              <input type="number" min={0.5} max={4.0} step={0.1}
+                value={draft.bbMtfSlAtr ?? 1.5}
+                onChange={e => set('bbMtfSlAtr', Math.max(0.5, Math.min(4.0, parseFloat(e.target.value) || 1.5)))}
+                style={{ ...s.numberInput, width: 52 }} />
+              <span style={s.unit}>×</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>구출 단계</span>
+              <input type="number" min={0} max={5} step={1}
+                value={draft.bbMtfRescueCount ?? 2}
+                onChange={e => set('bbMtfRescueCount', Math.max(0, Math.min(5, parseInt(e.target.value) || 2)))}
+                style={{ ...s.numberInput, width: 52 }} />
+              <span style={s.unit}>회</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>구출 간격</span>
+              <input type="number" min={0.5} max={3.0} step={0.1}
+                value={draft.bbMtfRescueSpacingAtr ?? 1.0}
+                onChange={e => set('bbMtfRescueSpacingAtr', Math.max(0.5, Math.min(3.0, parseFloat(e.target.value) || 1.0)))}
+                style={{ ...s.numberInput, width: 52 }} />
+              <span style={s.unit}>ATR</span>
+            </div>
+          </div>
+          <span style={s.hint}>
+            1h + 15m 볼린저 밴드 하단 이중 침범 시 LIMIT 딥 매수. BB 기간/배수·MA 필터·SL·구출DCA 단계 설정. 구출 단계=0이면 DCA 비활성.
+          </span>
+        </div>
+      )}
+
       {/* Min candidate score */}
       <div style={s.fieldRow}>
         <label style={s.label}>최소 진입 점수</label>
@@ -854,8 +931,8 @@ function SettingsEditor({
           <input
             type="number"
             min={50} max={100} step={1}
-            value={draft.minCandidateScore ?? (isLeaderRetest ? 65 : isFvg ? 75 : 90)}
-            onChange={e => set('minCandidateScore', Math.max(50, Math.min(100, parseInt(e.target.value) || (isLeaderRetest ? 65 : isFvg ? 75 : 90))))}
+            value={draft.minCandidateScore ?? (isLeaderRetest ? 65 : isFvg ? 75 : isBbMtf ? 55 : 90)}
+            onChange={e => set('minCandidateScore', Math.max(50, Math.min(100, parseInt(e.target.value) || (isLeaderRetest ? 65 : isFvg ? 75 : isBbMtf ? 55 : 90))))}
             style={s.numberInput}
           />
           <span style={s.unit}>점</span>
@@ -866,6 +943,8 @@ function SettingsEditor({
             ? '정규화 재보정 후 좋은 후보는 60~70대가 흔해집니다. 65점 내외를 기본 자동매매 컷으로 권장. 전략 전환 시 자동 조정됩니다.'
             : (draft.strategyId ?? 'breakout') === 'fvg-poc-ema72'
             ? 'FVG POC 스코어는 40~80점 범위 — 75점 내외 권장. 전략 전환 시 자동 조정됩니다.'
+            : (draft.strategyId ?? 'breakout') === 'bb-mtf-dca'
+            ? 'BB MTF DCA 스코어는 40~100점 — 55점 내외 권장. 침범 깊이가 깊을수록 높은 점수.'
             : '기존 돌파 스코어는 0~100점 분포 — 기본 90점. 낮출수록 후보 증가, 높일수록 고품질 집중.'}
         </span>
       </div>
@@ -1172,9 +1251,9 @@ export function AutoTradeSettingsModal({ paperSettings, liveSettings, onSave, on
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {labAutoPresets.map(preset => {
                   const sid = preset.strategyId;
-                  const badgeColor = sid === 'fvg-poc-ema72' ? '#f0b90b' : sid === 'leader-retest' ? '#9b59b6' : '#3b8beb';
-                  const badgeBg = sid === 'fvg-poc-ema72' ? 'rgba(240,185,11,0.12)' : sid === 'leader-retest' ? 'rgba(155,89,182,0.12)' : 'rgba(59,139,235,0.12)';
-                  const stratLabel = sid === 'fvg-poc-ema72' ? 'FVG POC+EMA72' : sid === 'leader-retest' ? '리더-리테스트' : '기존 돌파';
+                  const badgeColor = sid === 'fvg-poc-ema72' ? '#f0b90b' : sid === 'leader-retest' ? '#9b59b6' : sid === 'bb-mtf-dca' ? '#0ecb81' : '#3b8beb';
+                  const badgeBg = sid === 'fvg-poc-ema72' ? 'rgba(240,185,11,0.12)' : sid === 'leader-retest' ? 'rgba(155,89,182,0.12)' : sid === 'bb-mtf-dca' ? 'rgba(14,203,129,0.12)' : 'rgba(59,139,235,0.12)';
+                  const stratLabel = sid === 'fvg-poc-ema72' ? 'FVG POC+EMA72' : sid === 'leader-retest' ? '리더-리테스트' : sid === 'bb-mtf-dca' ? 'BB MTF DCA' : '기존 돌파';
                   const savedDate = new Date(preset.savedAt).toLocaleDateString('ko-KR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
                   return (
                     <div key={preset.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px', background: 'rgba(255,255,255,0.03)', borderRadius: 5, border: '1px solid rgba(255,255,255,0.06)' }}>
@@ -1183,7 +1262,7 @@ export function AutoTradeSettingsModal({ paperSettings, liveSettings, onSave, on
                           <span style={{ fontSize: '0.78rem', color: '#d1d4dc', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{preset.name}</span>
                           <span style={{ fontSize: '0.62rem', color: badgeColor, background: badgeBg, border: `1px solid ${badgeColor}44`, borderRadius: 3, padding: '1px 5px', flexShrink: 0 }}>{stratLabel}</span>
                         </div>
-                        <div style={{ fontSize: '0.65rem', color: '#5e6673' }}>{savedDate} 저장 · {preset.settings.leverage}x · 리스크 {preset.settings.riskPct}% · 최소 {preset.settings.minCandidateScore ?? (preset.settings.strategyId === 'leader-retest' ? 65 : preset.settings.strategyId === 'fvg-poc-ema72' ? 75 : 90)}점</div>
+                        <div style={{ fontSize: '0.65rem', color: '#5e6673' }}>{savedDate} 저장 · {preset.settings.leverage}x · 리스크 {preset.settings.riskPct}% · 최소 {preset.settings.minCandidateScore ?? (preset.settings.strategyId === 'leader-retest' ? 65 : preset.settings.strategyId === 'fvg-poc-ema72' ? 75 : preset.settings.strategyId === 'bb-mtf-dca' ? 55 : 90)}점</div>
                       </div>
                       {appliedPresetId === preset.id ? (
                         <span style={{ fontSize: '0.72rem', padding: '3px 10px', border: '1px solid rgba(14,203,129,0.5)', borderRadius: 4, background: 'rgba(14,203,129,0.12)', color: '#0ecb81', flexShrink: 0, fontWeight: 700 }}>

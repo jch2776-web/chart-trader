@@ -100,6 +100,20 @@ export interface ScanCandidate {
    * so the auto-trade hook and UI can log / filter by individual components.
    */
   scoreBreakdown?: RetestScoreBreakdown;
+
+  // ── BB MTF Dip + Auto Rescue DCA metadata (optional) ──────────────────────
+  /** 1h BB breach depth as % of lower band (bb-mtf-dca only) */
+  bbMtfH1BreachPct?: number;
+  /** 15m BB breach depth as % of lower band (bb-mtf-dca only) */
+  bbMtfM15BreachPct?: number;
+  /** 15m BB middle band price at scan time (= TP1) */
+  bbMtfMiddleBand?: number;
+  /** 15m BB upper band price at scan time */
+  bbMtfUpperBand?: number;
+  /** Rescue DCA entry prices in ascending order of distance from entry */
+  bbMtfRescueLevels?: number[];
+  /** Maximum budget multiplier (e.g. 3.10 = 3.1× initial notional) */
+  bbMtfMaxBudgetMultiplier?: number;
 }
 
 // ── Utilities ──────────────────────────────────────────────────────────────

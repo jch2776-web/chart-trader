@@ -30,6 +30,8 @@ export interface PlaceTPSLOptions {
   onPlacedOrders?: (orders: PlacedTPSLOrderRef[]) => void;
   /** One-way mode only: allow closePosition=true fallback for STOP/TP market orders. */
   allowClosePositionFallback?: boolean;
+  /** Skip post-order fetchData refresh (used by high-frequency scalping path). */
+  skipRefresh?: boolean;
 }
 
 export interface PlaceOrderAck {
@@ -637,7 +639,7 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
     marginType: 'CROSSED' | 'ISOLATED',
     reduceOnly = false,
     symbolOverride?: string,
-    timeInForce: 'GTC' | 'IOC' | 'FOK' = 'GTC',
+    timeInForce: 'GTC' | 'IOC' | 'FOK' | 'GTX' = 'GTC',
     options?: PlaceOrderOptions,
   ): Promise<void> => {
     const key = apiKeyRef.current;
@@ -930,8 +932,10 @@ export function useBinanceFutures(apiKey: string, apiSecret: string, ticker: str
     }
     await Promise.all(promises);
     options?.onPlacedOrders?.(placedRefs);
-    await new Promise(resolve => setTimeout(resolve, 600));
-    await fetchData();
+    if (!options?.skipRefresh) {
+      await new Promise(resolve => setTimeout(resolve, 600));
+      await fetchData();
+    }
   }, [fetchData]);
 
   const fetchUserTrades = useCallback(async (

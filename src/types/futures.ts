@@ -36,6 +36,9 @@ export interface LiveTradeHistoryEntry {
   exitPrice: number | null;
   pnl: number | null;
   fees: number | null;
+  feeOpenFillCount?: number | null;
+  feeCloseFillCount?: number | null;
+  feeOrderCount?: number | null;
   entryTime: number | null;
   exitTime: number;
   closeReason: LiveCloseReason;

@@ -5,6 +5,8 @@ import { createLeaderRetestScan } from '../components/AltScanner/strategies/lead
 import type { RetestOptions } from '../components/AltScanner/strategies/leaderRetest';
 import { createFvgPocEma72Scan } from '../components/AltScanner/strategies/fvgPocEma72';
 import type { FvgPocOptions } from '../components/AltScanner/strategies/fvgPocEma72';
+import { createBbMtfDcaScan } from '../components/AltScanner/strategies/bbMtfDca';
+import type { BbMtfOptions } from '../components/AltScanner/strategies/bbMtfDca';
 import type { ScanFn } from '../components/AltScanner/strategyTypes';
 import { getBinanceGovernorSnapshot } from '../lib/binanceRequestGovernor';
 import { subscribeBookTicker, getSpreadBps, unsubscribeBookTicker, getDepth10bpsUsd } from '../lib/binanceBookTicker';
@@ -135,6 +137,7 @@ export function useAltAutoTrade({
   retestOptions,
   retestAutoDirection,
   fvgOptions,
+  bbMtfOptions,
   breakoutDirection,
   minCandidateScore,
   breakoutMaxBarsAfterTrigger,
@@ -162,6 +165,8 @@ export function useAltAutoTrade({
   retestAutoDirection?: 'long' | 'both';
   /** FVG POC options — only used when strategyId === 'fvg-poc-ema72' */
   fvgOptions?: FvgPocOptions;
+  /** BB MTF DCA options — only used when strategyId === 'bb-mtf-dca' */
+  bbMtfOptions?: BbMtfOptions;
   /** Scan direction override for breakout auto-trade (default 'both') */
   breakoutDirection?: 'long' | 'short' | 'both';
   /** Minimum candidate score to qualify for auto-entry (default 90) */
@@ -236,8 +241,9 @@ export function useAltAutoTrade({
   const retestOptionsRef          = useRef(retestOptions);
   const retestAutoDirectionRef    = useRef<'long' | 'both'>(retestAutoDirection ?? 'long');
   const fvgOptionsRef             = useRef(fvgOptions);
+  const bbMtfOptionsRef           = useRef(bbMtfOptions);
   const breakoutDirectionRef      = useRef<'long' | 'short' | 'both'>(breakoutDirection ?? 'both');
-  const scoreThresholdRef         = useRef(minCandidateScore ?? (strategyId === 'leader-retest' ? 65 : strategyId === 'fvg-poc-ema72' ? 75 : 90));
+  const scoreThresholdRef         = useRef(minCandidateScore ?? (strategyId === 'leader-retest' ? 65 : strategyId === 'fvg-poc-ema72' ? 75 : strategyId === 'bb-mtf-dca' ? 55 : 90));
   const maxBarsAfterTriggerRef    = useRef(breakoutMaxBarsAfterTrigger ?? 0);
   const maxSpreadBpsRef           = useRef(maxSpreadBps ?? 4);
   const maxRiskPctRef             = useRef(maxRiskPct ?? 0.025);
@@ -261,8 +267,9 @@ export function useAltAutoTrade({
   retestOptionsRef.current        = retestOptions;
   retestAutoDirectionRef.current  = retestAutoDirection ?? 'long';
   fvgOptionsRef.current           = fvgOptions;
+  bbMtfOptionsRef.current         = bbMtfOptions;
   breakoutDirectionRef.current    = breakoutDirection ?? 'both';
-  scoreThresholdRef.current       = minCandidateScore ?? (strategyId === 'leader-retest' ? 65 : strategyId === 'fvg-poc-ema72' ? 75 : 90);
+  scoreThresholdRef.current       = minCandidateScore ?? (strategyId === 'leader-retest' ? 65 : strategyId === 'fvg-poc-ema72' ? 75 : strategyId === 'bb-mtf-dca' ? 55 : 90);
   maxBarsAfterTriggerRef.current  = breakoutMaxBarsAfterTrigger ?? 0;
   maxSpreadBpsRef.current         = maxSpreadBps ?? 4;
   maxRiskPctRef.current           = maxRiskPct ?? 0.025;
@@ -374,11 +381,15 @@ export function useAltAutoTrade({
         ? createLeaderRetestScan(retestOptionsRef.current)
         : strategyIdRef.current === 'fvg-poc-ema72'
         ? createFvgPocEma72Scan(fvgOptionsRef.current)
+        : strategyIdRef.current === 'bb-mtf-dca'
+        ? createBbMtfDcaScan(bbMtfOptionsRef.current)
         : runBreakoutScan;
       const scanDirection = strategyIdRef.current === 'leader-retest'
         ? retestAutoDirectionRef.current
         : strategyIdRef.current === 'fvg-poc-ema72'
         ? (fvgOptionsRef.current?.fvgDirection ?? 'both')
+        : strategyIdRef.current === 'bb-mtf-dca'
+        ? 'long'
         : breakoutDirectionRef.current;
       try {
         await activeScanFn(

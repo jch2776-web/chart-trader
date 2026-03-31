@@ -30,11 +30,11 @@ const STOP_SPREAD_MULT = 3.0;
 /** TP distance as a multiple of stop distance. */
 const TP_RR            = 1.5;
 /** Assumed round-trip fee/slippage budget in bps (conservative live scalar). */
-const ROUND_TRIP_FEE_BPS = 12;
+const ROUND_TRIP_FEE_BPS = 16;
 /** Extra safety spread/slippage buffer (bps on underlying price). */
-const FEE_SAFETY_BUFFER_BPS = 2;
+const FEE_SAFETY_BUFFER_BPS = 4;
 /** Minimum target net ROI on margin after fees (bps). */
-const MIN_NET_ROI_ON_MARGIN_BPS = 22;
+const MIN_NET_ROI_ON_MARGIN_BPS = 40;
 /** Floor for stop distance on underlying move to avoid ultra-tight stopouts. */
 const MIN_STOP_DISTANCE_BPS = 10;
 /** TTL for momentum signals (ms). */

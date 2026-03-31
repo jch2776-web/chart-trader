@@ -37,6 +37,8 @@ import { UserBoardModal } from './components/Board/UserBoardModal';
 import { DisclaimerModal, hasAgreedDisclaimer } from './components/Disclaimer/DisclaimerModal';
 import { SiteDisclaimerModal } from './components/Disclaimer/SiteDisclaimerModal';
 import { SecurityFaqModal } from './components/Security/SecurityFaqModal';
+import { AltScannerFAQ } from './components/AltScanner/AltScannerFAQ';
+import { ScalpFAQ } from './components/ScalpFAQ';
 import { AltScannerModal } from './components/AltScanner/AltScannerModal';
 import type { AltTradeParams } from './components/AltScanner/AltScannerModal';
 import { runBreakoutScan } from './components/AltScanner/breakoutScanner';
@@ -227,6 +229,7 @@ interface ManualFeeEnrichTask {
   rowId: string;
   symbol: string;
   direction: 'long' | 'short';
+  qty: number;
   entryTime: number | null;
   exitTime: number;
   attempts: number;
@@ -359,6 +362,8 @@ function AppInner() {
   const [showBoard, setShowBoard] = useState(false);
   const [showUserBoard, setShowUserBoard] = useState(false);
   const [showSecurityFaq, setShowSecurityFaq] = useState(false);
+  const [showAltFaq, setShowAltFaq] = useState(false);
+  const [showScalpFaq, setShowScalpFaq] = useState(false);
   const [showAltScanner, setShowAltScanner] = useState(false);
   // Per-interval cache: keeps results from all scanned intervals so reopening restores them
   const [altScanCandidatesCache, setAltScanCandidatesCache] = useState<Record<string, ScanCandidate[]>>({});
@@ -1009,6 +1014,8 @@ function AppInner() {
   const liveTrackedRef = useRef<Record<string, LiveTrackedAltPosition>>({});
   const manualLiveTrackedRef = useRef<Record<string, LiveTrackedAltPosition>>({});
   const liveCloseReasonHintRef = useRef<Record<string, LiveCloseReason>>({});
+  const scalpPlannedMapRef = useRef<Record<string, { plannedTP: number; plannedSL: number }>>({});
+  const liveManualCloseInFlightRef = useRef<Record<string, number>>({});
   const liveEntryFillRetryRef = useRef<Record<string, LiveEntryFillRetryState>>({});
   const liveHistoryEnrichQueueRef = useRef<Record<string, LiveHistoryEnrichTask>>({});
   const manualFeeQueueRef = useRef<Record<string, ManualFeeEnrichTask>>({});
@@ -2100,10 +2107,21 @@ function AppInner() {
       fvgUniverseTopN: activeAutoTradeSettings.fvgUniverseTopN,
       fvgDirection: activeAutoTradeSettings.fvgAutoDirection,
     },
+    bbMtfOptions: {
+      bbPeriod: activeAutoTradeSettings.bbMtfBbPeriod,
+      bbStdDev: activeAutoTradeSettings.bbMtfBbStdDev,
+      maPeriod: activeAutoTradeSettings.bbMtfMaPeriod,
+      maxMaDropPct: activeAutoTradeSettings.bbMtfMaxMaDropPct,
+      slAtr: activeAutoTradeSettings.bbMtfSlAtr,
+      rescueCount: activeAutoTradeSettings.bbMtfRescueCount,
+      rescueSpacingAtr: activeAutoTradeSettings.bbMtfRescueSpacingAtr,
+      maxBudgetMultiplier: activeAutoTradeSettings.bbMtfMaxBudgetMultiplier,
+    },
     breakoutDirection: activeAutoTradeSettings.breakoutDirection ?? 'both',
     minCandidateScore: activeAutoTradeSettings.minCandidateScore ?? (
       activeAutoTradeSettings.strategyId === 'leader-retest' ? 65 :
-      activeAutoTradeSettings.strategyId === 'fvg-poc-ema72' ? 75 : 90
+      activeAutoTradeSettings.strategyId === 'fvg-poc-ema72' ? 75 :
+      activeAutoTradeSettings.strategyId === 'bb-mtf-dca' ? 55 : 90
     ),
     breakoutMaxBarsAfterTrigger: activeAutoTradeSettings.breakoutMaxBarsAfterTrigger ?? 0,
     maxSpreadBps: activeAutoTradeSettings.maxSpreadBps ?? 4,
@@ -2180,7 +2198,7 @@ function AppInner() {
       price: number;
       quantity: number;
       reduceOnly: boolean;
-      timeInForce: 'GTC' | 'IOC';
+      timeInForce: 'GTC' | 'IOC' | 'GTX';
     }) =>
       new Promise<string>((resolve, reject) => {
         const desiredLeverage = scalpSettingsRef.current.leverage;
@@ -2246,6 +2264,7 @@ function AppInner() {
           positionSide,
           {
             allowClosePositionFallback: true,
+            skipRefresh: true,
             onPlacedOrders: (refs) => { const r = refs[0]; if (r) resolve(r.orderId); else reject(new Error('orderId 없음')); },
           },
         ).catch(reject);
@@ -2271,6 +2290,20 @@ function AppInner() {
       if (qty <= 0) return null;
       return { qty, entryPrice: row.entryPrice > 0 ? row.entryPrice : undefined };
     },
+    getOpenProtectionOrders: (symbol: string, side: 'long' | 'short') => {
+      const closeSide: 'BUY' | 'SELL' = side === 'long' ? 'SELL' : 'BUY';
+      const targetPositionSide = side === 'long' ? 'LONG' : 'SHORT';
+      const protectionTypes = new Set(['STOP', 'STOP_MARKET', 'TAKE_PROFIT', 'TAKE_PROFIT_MARKET']);
+      const rows = futuresAllOrdersRef.current.filter(o => {
+        if (o.symbol !== symbol) return false;
+        if (o.side !== closeSide) return false;
+        if (!protectionTypes.has(String(o.type).toUpperCase())) return false;
+        // Hedge mode: only match same position side. One-way mode can be BOTH/undefined.
+        if (o.positionSide && o.positionSide !== 'BOTH' && o.positionSide !== targetPositionSide) return false;
+        return true;
+      });
+      return rows.map(o => ({ orderId: String(o.orderId), time: o.time, type: o.type }));
+    },
     cancelOrder: (orderId: string, symbol: string) =>
       futuresCancelOrder(orderId, symbol),
   }), [futuresPlaceOrder, futuresPlaceTPSL, futuresCancelOrder]);
@@ -2281,7 +2314,16 @@ function AppInner() {
     mode: scalpMode,
     availableMarginUsdt: scalpMode === 'live' ? futuresMarginBalance : paperTrading.balance,
     onLog: (msg, level) => {
-      if (level === 'info') return;
+      if (level === 'info') {
+        // Keep noise low, but surface critical entry/fill lifecycle so users can
+        // understand why PnL occurred even when fills were recovered asynchronously.
+        const importantInfo =
+          msg.includes('체결 완료') ||
+          msg.includes('부분 체결 후 취소') ||
+          msg.includes('TP/SL 부착') ||
+          msg.includes('포지션 종료 감지');
+        if (!importantInfo) return;
+      }
       const mappedType: import('./types/trade').ActivityLog['type'] =
         level === 'error' ? 'error' :
         level === 'warn'  ? 'warn'  : 'info';
@@ -2289,6 +2331,13 @@ function AppInner() {
     },
     broker: scalpMode === 'live' ? scalpBroker : undefined,
     userStream: scalpUserStreamConfig,
+    onPositionOpen: (symbol, positionSide, plannedTP, plannedSL) => {
+      scalpPlannedMapRef.current[`${symbol}_${positionSide.toLowerCase()}`] = { plannedTP, plannedSL };
+      playEntrySound();
+    },
+    onPositionClose: (symbol, positionSide, reason) => {
+      liveCloseReasonHintRef.current[`${symbol}_${positionSide.toLowerCase()}`] = reason;
+    },
   });
 
   // ── Scalp direct start/stop (validates before calling setActive) ──────────
@@ -3902,6 +3951,9 @@ function AppInner() {
       };
 
       let fees: number | null = null;
+      let feeOpenFillCount: number | null = null;
+      let feeCloseFillCount: number | null = null;
+      let feeOrderCount: number | null = null;
       let tradeCloseReason: LiveCloseReason | null = null;
       let enrichedPnl: number | null = null;
       let enrichedExitPrice: number | null = null;
@@ -3912,6 +3964,13 @@ function AppInner() {
         let openRows = relevant.filter(t => t.side === openSide && t.time >= entryTime && t.time <= exitTime + 120000);
         if (openRowsByEntryOrder.length > 0) openRows = openRowsByEntryOrder;
         const closeRows = relevant.filter(t => t.side === closeSide && t.time >= entryTime && t.time <= exitTime + 120000);
+        feeOpenFillCount = openRows.length;
+        feeCloseFillCount = closeRows.length;
+        feeOrderCount = new Set(
+          [...openRows, ...closeRows]
+            .map(r => (r.orderId != null ? String(r.orderId) : ''))
+            .filter(v => v.length > 0),
+        ).size;
 
         // ── TP1 blend detection: total close fills may exceed tracked.qty when TP1 partially
         // closed the position before the final close. Use tp1OriginalQty from meta if available,
@@ -3969,6 +4028,9 @@ function AppInner() {
         ...h,
         entryTime:   entryTime ?? h.entryTime,
         fees:        fees ?? h.fees,
+        feeOpenFillCount: feeOpenFillCount ?? h.feeOpenFillCount ?? null,
+        feeCloseFillCount: feeCloseFillCount ?? h.feeCloseFillCount ?? null,
+        feeOrderCount: feeOrderCount ?? h.feeOrderCount ?? null,
         // Override pnl/exitPrice/qty/entryPrice when we have reliable fill data from Binance
         ...(enrichedPnl       != null ? { pnl:        enrichedPnl }       : {}),
         ...(enrichedExitPrice != null ? { exitPrice:  enrichedExitPrice }  : {}),
@@ -3988,6 +4050,7 @@ function AppInner() {
     rowId: string,
     symbol: string,
     direction: 'long' | 'short',
+    qty: number,
     entryTime: number | null,
     exitTime: number,
   ) => {
@@ -3996,18 +4059,55 @@ function AppInner() {
     const startTime = Math.max(0, (entryTime ?? exitTime - 7 * 24 * 60 * 60 * 1000) - 60_000);
     try {
       const trades = await futuresFetchUserTrades(symbol, startTime, exitTime + 120_000, 1000);
-      const relevant = trades.filter(t => t.symbol === symbol && t.time >= startTime && t.time <= exitTime + 120_000);
+      const relevant = trades
+        .filter(t => t.symbol === symbol && t.time >= startTime && t.time <= exitTime + 120_000)
+        .sort((a, b) => a.time - b.time);
       const openRows  = relevant.filter(t => t.side === openSide);
       const closeRows = relevant.filter(t => t.side === closeSide);
       if (!openRows.length && !closeRows.length) return;
-      const nonUsdt = [...openRows, ...closeRows].some(t => (t.commissionAsset ?? '').toUpperCase() !== 'USDT');
-      if (nonUsdt) return;
-      const fees = parseFloat((
-        openRows.reduce((s, t) => s + t.commission, 0) +
-        closeRows.reduce((s, t) => s + t.commission, 0)
-      ).toFixed(8));
+
+      // Consume fees up to the target qty to avoid summing unrelated same-symbol trades
+      // (e.g. during high-volume spikes with multiple scalp entries on the same symbol)
+      const consumeFee = (rows: FuturesUserTrade[], targetQty: number) => {
+        let remainQty = targetQty;
+        let fee = 0;
+        let coveredQty = 0;
+        let nonUsdt = false;
+        for (const row of rows) {
+          if (remainQty <= 1e-8) break;
+          const rowQty = Math.abs(row.qty);
+          if (rowQty <= 0) continue;
+          const usedQty = Math.min(remainQty, rowQty);
+          remainQty -= usedQty;
+          coveredQty += usedQty;
+          if ((row.commissionAsset ?? '').toUpperCase() !== 'USDT') nonUsdt = true;
+          fee += row.commission * (usedQty / rowQty);
+        }
+        return { fee, coveredQty, nonUsdt };
+      };
+
+      const targetQty = qty > 0 ? qty : Infinity;
+      const openFee  = consumeFee(openRows,  targetQty);
+      const closeFee = consumeFee(closeRows, targetQty);
+      if (openFee.nonUsdt || closeFee.nonUsdt) return;
+      // Require at least partial coverage on the close side
+      if (closeFee.coveredQty <= 0) return;
+      const fees = parseFloat((openFee.fee + closeFee.fee).toFixed(8));
+      const feeOpenFillCount = openRows.length;
+      const feeCloseFillCount = closeRows.length;
+      const feeOrderCount = new Set(
+        [...openRows, ...closeRows]
+          .map(r => (r.orderId != null ? String(r.orderId) : ''))
+          .filter(v => v.length > 0),
+      ).size;
       if (fees > 0) {
-        setLiveHistory(prev => prev.map(h => h.id === rowId ? { ...h, fees } : h));
+        setLiveHistory(prev => prev.map(h => h.id === rowId ? {
+          ...h,
+          fees,
+          feeOpenFillCount: feeOpenFillCount ?? h.feeOpenFillCount ?? null,
+          feeCloseFillCount: feeCloseFillCount ?? h.feeCloseFillCount ?? null,
+          feeOrderCount: feeOrderCount ?? h.feeOrderCount ?? null,
+        } : h));
       }
     } catch { /* keep null */ }
   }, [futuresFetchUserTrades]);
@@ -4022,7 +4122,7 @@ function AppInner() {
         if (now > task.deadlineAt || task.attempts >= 5) { delete queue[rowId]; continue; }
         if (task.running || now < task.nextAt) continue;
         task.running = true;
-        void enrichManualFee(task.rowId, task.symbol, task.direction, task.entryTime, task.exitTime)
+        void enrichManualFee(task.rowId, task.symbol, task.direction, task.qty, task.entryTime, task.exitTime)
           .finally(() => {
             const cur = manualFeeQueueRef.current[rowId];
             if (!cur) return;
@@ -4194,6 +4294,9 @@ function AppInner() {
         exitPrice,
         pnl,
         fees: null,
+        feeOpenFillCount: null,
+        feeCloseFillCount: null,
+        feeOrderCount: null,
         entryTime: tracked.entryTime ?? meta.liveEntryTime ?? null,
         exitTime,
         closeReason,
@@ -4327,6 +4430,7 @@ function AppInner() {
         ? tracked.markPrice
         : (markPricesMapRef.current[tracked.symbol] ?? null);
       const closeReason: LiveCloseReason = liveCloseReasonHintRef.current[key] ?? 'manual';
+      const scalpPlanned = scalpPlannedMapRef.current[key];
       const pnl = exitPrice != null
         ? parseFloat((((tracked.direction === 'long' ? exitPrice - tracked.entryPrice : tracked.entryPrice - exitPrice) * tracked.qty)).toFixed(8))
         : null;
@@ -4340,14 +4444,20 @@ function AppInner() {
         exitPrice,
         pnl,
         fees: null,
+        feeOpenFillCount: null,
+        feeCloseFillCount: null,
+        feeOrderCount: null,
         entryTime: tracked.entryTime ?? null,
         exitTime,
         closeReason,
         isAltTrade: false,
         entrySource: 'manual',
+        plannedTP: scalpPlanned?.plannedTP ?? null,
+        plannedSL: scalpPlanned?.plannedSL ?? null,
       });
       delete nextManual[key];
       delete liveCloseReasonHintRef.current[key];
+      delete scalpPlannedMapRef.current[key];
     }
 
     manualLiveTrackedRef.current = nextManual;
@@ -4361,6 +4471,7 @@ function AppInner() {
           rowId: row.id,
           symbol: row.symbol,
           direction: row.positionSide === 'LONG' ? 'long' : 'short',
+          qty: row.qty,
           entryTime: row.entryTime ?? null,
           exitTime: row.exitTime,
           attempts: 0,
@@ -4417,14 +4528,20 @@ function AppInner() {
     positionSide: 'LONG' | 'SHORT' | 'BOTH',
   ) => {
     const key = `${symbol}_${direction}`;
+    const inFlightAt = liveManualCloseInFlightRef.current[key] ?? 0;
+    if (Date.now() - inFlightAt < 8_000) {
+      throw new Error('이미 수동 청산 요청 처리 중입니다. 잠시 후 다시 확인하세요.');
+    }
+    liveManualCloseInFlightRef.current[key] = Date.now();
     const aliasKey = `${symbol}_${direction}`;
     const prevHint = liveCloseReasonHintRef.current[key];
     const prevAliasHint = liveCloseReasonHintRef.current[aliasKey];
     liveCloseReasonHintRef.current[key] = 'manual';
     liveCloseReasonHintRef.current[aliasKey] = 'manual';
     try {
+      addLog('info', `[ALT실전] ${symbol} 수동 시장가 청산 요청 (TP/SL 아님)`);
       await futuresCloseMarket(symbol, closeSide, qty, positionSide);
-      addLog('info', `[ALT실전] ${symbol} 수동 시장가 청산 요청 완료`);
+      addLog('info', `[ALT실전] ${symbol} 수동 시장가 청산 주문 완료 (TP/SL 아님)`);
     } catch (e) {
       if (prevHint) liveCloseReasonHintRef.current[key] = prevHint;
       else delete liveCloseReasonHintRef.current[key];
@@ -4432,6 +4549,8 @@ function AppInner() {
       else delete liveCloseReasonHintRef.current[aliasKey];
       addLog('error', `[ALT실전] ${symbol} 수동 시장가 청산 실패: ${e instanceof Error ? e.message : 'unknown'}`);
       throw e;
+    } finally {
+      delete liveManualCloseInFlightRef.current[key];
     }
   }, [addLog, futuresCloseMarket]);
 
@@ -4443,6 +4562,11 @@ function AppInner() {
     limitPrice: number,
   ) => {
     const key = `${symbol}_${direction}`;
+    const inFlightAt = liveManualCloseInFlightRef.current[key] ?? 0;
+    if (Date.now() - inFlightAt < 8_000) {
+      throw new Error('이미 수동 청산 요청 처리 중입니다. 잠시 후 다시 확인하세요.');
+    }
+    liveManualCloseInFlightRef.current[key] = Date.now();
     const aliasKey = `${symbol}_${direction}`;
     const metaSnapshot = liveAltMetaMapRef.current[key];
     if (metaSnapshot) {
@@ -4485,8 +4609,9 @@ function AppInner() {
     liveCloseReasonHintRef.current[key] = 'manual';
     liveCloseReasonHintRef.current[aliasKey] = 'manual';
     try {
+      addLog('info', `[ALT실전] ${symbol} 현재가(IOC) 수동 청산 요청 (TP/SL 아님)`);
       await futuresPlaceOrder(closeSide, limitPrice, qty, 1, 'ISOLATED', true, symbol, 'IOC');
-      addLog('info', `[ALT실전] ${symbol} 현재가(IOC) 청산 주문 완료 @ ${limitPrice}`);
+      addLog('info', `[ALT실전] ${symbol} 현재가(IOC) 수동 청산 주문 완료 @ ${limitPrice} (TP/SL 아님)`);
     } catch (e) {
       if (prevHint) liveCloseReasonHintRef.current[key] = prevHint;
       else delete liveCloseReasonHintRef.current[key];
@@ -4494,6 +4619,8 @@ function AppInner() {
       else delete liveCloseReasonHintRef.current[aliasKey];
       addLog('error', `[ALT실전] ${symbol} 현재가(IOC) 청산 실패: ${e instanceof Error ? e.message : 'unknown'}`);
       throw e;
+    } finally {
+      delete liveManualCloseInFlightRef.current[key];
     }
   }, [addLog, futuresPlaceOrder]);
 
@@ -4795,6 +4922,8 @@ function AppInner() {
         onOpenBoard={() => setShowBoard(true)}
         onOpenUserBoard={() => setShowUserBoard(true)}
         onOpenSecurityFaq={() => setShowSecurityFaq(true)}
+        onOpenAltFaq={() => setShowAltFaq(true)}
+        onOpenScalpFaq={() => setShowScalpFaq(true)}
         onOpenAltScanner={() => { setAltScannerSnapshotMeta(undefined); setShowAltScanner(true); }}
         onOpenSoundSettings={() => setShowSoundSettings(true)}
         onOpenAutoTradeSettings={() => setShowAutoTradeSettings(true)}
@@ -4925,6 +5054,14 @@ function AppInner() {
         <SecurityFaqModal onClose={() => setShowSecurityFaq(false)} />
       )}
 
+      {showAltFaq && (
+        <AltScannerFAQ onClose={() => setShowAltFaq(false)} />
+      )}
+
+      {showScalpFaq && (
+        <ScalpFAQ onClose={() => setShowScalpFaq(false)} />
+      )}
+
       {showAltScanner && (
         <AltScannerModal
           symbols={tickers.map(t => t.symbol)}
@@ -4962,6 +5099,16 @@ function AppInner() {
             toleranceAtr: activeAutoTradeSettings.retestToleranceAtr,
             maxOvershootAtr: activeAutoTradeSettings.retestMaxOvershootAtr,
             require4hTrend: activeAutoTradeSettings.retestRequire4hTrend,
+          }}
+          bbMtfOptions={{
+            bbPeriod: activeAutoTradeSettings.bbMtfBbPeriod,
+            bbStdDev: activeAutoTradeSettings.bbMtfBbStdDev,
+            maPeriod: activeAutoTradeSettings.bbMtfMaPeriod,
+            maxMaDropPct: activeAutoTradeSettings.bbMtfMaxMaDropPct,
+            slAtr: activeAutoTradeSettings.bbMtfSlAtr,
+            rescueCount: activeAutoTradeSettings.bbMtfRescueCount,
+            rescueSpacingAtr: activeAutoTradeSettings.bbMtfRescueSpacingAtr,
+            maxBudgetMultiplier: activeAutoTradeSettings.bbMtfMaxBudgetMultiplier,
           }}
         />
       )}
