@@ -2,22 +2,24 @@
  * BB MTF Dip + Auto Rescue DCA Strategy
  *
  * Entry conditions (LONG only):
- *   1. 1h candle closed below 1h Bollinger Band lower band  (H1 breach)
- *   2. 15m candle closed below 15m Bollinger Band lower band (M15 breach)
- *   3. prevPrev filter: closed[-3] > SMA(maPeriod) on 15m — avoids knife-catching
- *      in an established downtrend
- *   4. Knife-catching gate: closed[-1] > MA × (1 − maxMaDropPct) — rejects
- *      symbols that have already fallen too far from MA
+ *   1. Any of last breachLookback1h (default 3) 1h bars closed below 1h BB lower
+ *   2. Last closed 15m bar is below 15m BB lower
+ *   3. Fresh-breach guard: within the previous breachLookback15m (default 4) 15m bars,
+ *      at least ONE bar was still ABOVE the 15m BB lower.
+ *      → prevents buying into coins already stuck below BB for many bars
+ *   4. Knife-catching gate: close > MA(maPeriod) × (1 − maxMaDropPct)
+ *      → prevents entering free-fall (>maxMaDropPct% below MA)
+ *
+ * Previously-broken filters (removed):
+ *   - prevPrevM15.close < ma15m → null  ← too strict: always fails during real 1h breach
+ *   - prevM15.close < bb15m.lower * (1-ε) → null  ← only 1st breach bar passes; useless
  *
  * Execution:
- *   Entry  — LIMIT at 15m last closed price
+ *   Entry  — LIMIT at last 15m close (already below BB lower)
  *   SL     — entry − slAtr × ATR
- *   TP1    — 15m BB middle band (SMA(bbPeriod))
+ *   TP1    — 15m BB middle band (SMA(bbPeriod)) — mean reversion target
  *   TP2    — entry + 2R  (R = entry − SL)
- *   Rescue — up to rescueCount additional limit levels, spaced rescueSpacingAtr × ATR below entry
- *
- * Rescue DCA info is encoded in the ScanCandidate for display and auto-trade use.
- * Actual execution of rescue orders is handled by the auto-trade hook.
+ *   Rescue — up to rescueCount levels, each rescueSpacingAtr × ATR below entry
  */
 
 import type { Candle } from '../../../types/candle';
@@ -36,37 +38,46 @@ import type { ScanFn, ScanStrategy } from '../strategyTypes';
 // ── Options ─────────────────────────────────────────────────────────────────
 
 export interface BbMtfOptions {
-  /** Bollinger Band period (default 20) */
+  /** Bollinger Band period for both 1h and 15m (default 20) */
   bbPeriod?: number;
   /** Bollinger Band standard deviation multiplier (default 2.0) */
   bbStdDev?: number;
-  /** MA period for prevPrev filter (default 50) */
+  /** MA period for knife-catching gate (default 50) */
   maPeriod?: number;
   /**
    * Knife-catching gate: reject if close < MA × (1 − maxMaDropPct).
-   * Default 0.06 (6% — allow up to 6% drop from MA before declaring free-fall).
+   * Default 0.06 (reject if >6% below MA).
    */
   maxMaDropPct?: number;
   /**
-   * Minimum 1h BB breach depth as a fraction of the lower band price.
-   * Default 0.001 (0.1%).
+   * Minimum 1h BB breach depth as a fraction of the lower band.
+   * Default 0.001 (0.1%). Any of the last breachLookback1h bars must satisfy this.
    */
   minH1BreachFrac?: number;
   /**
-   * Minimum 15m BB breach depth as a fraction of the lower band price.
-   * Default 0.0005 (0.05%).
+   * Minimum 15m BB breach depth as a fraction of the lower band.
+   * Default 0.0005 (0.05%). Only the LAST bar is checked.
    */
   minM15BreachFrac?: number;
+  /**
+   * How many recent 1h bars to check for a breach (default 3).
+   * Allows entry even if price is recovering from a breach that started 1-2 hours ago.
+   */
+  breachLookback1h?: number;
+  /**
+   * Within this many recent 15m bars (excluding the last), at least one must have
+   * closed ABOVE the 15m BB lower (fresh-breach guard). Default 4 (= 1 hour).
+   */
+  breachLookback15m?: number;
   /** ATR multiplier for SL below entry (default 1.5) */
   slAtr?: number;
   /** Number of rescue DCA levels below entry (default 2) */
   rescueCount?: number;
-  /** ATR spacing between rescue levels (default 1.0) */
+  /** ATR spacing between consecutive rescue levels (default 1.0) */
   rescueSpacingAtr?: number;
   /**
-   * Maximum total budget as a multiplier of the initial position notional
-   * (initial + all rescue levels combined).  Default 3.10.
-   * Used for display / sizing guidance; enforcement is in the auto-trade hook.
+   * Maximum total budget as a multiplier of the initial position notional.
+   * Default 3.10 — shown in UI; actual enforcement in auto-trade hook.
    */
   maxBudgetMultiplier?: number;
 }
@@ -78,6 +89,8 @@ const DEFAULT_BB_MTF_OPTIONS: Required<BbMtfOptions> = {
   maxMaDropPct: 0.06,
   minH1BreachFrac: 0.001,
   minM15BreachFrac: 0.0005,
+  breachLookback1h: 3,
+  breachLookback15m: 4,
   slAtr: 1.5,
   rescueCount: 2,
   rescueSpacingAtr: 1.0,
@@ -121,11 +134,11 @@ function calcSMA(candles: Candle[], period: number): number {
   return slice.reduce((s, c) => s + c.close, 0) / period;
 }
 
-/**
- * Calculates Bollinger Bands at the last closed candle.
- * Returns { upper, middle, lower } or null if not enough data.
- */
-function calcBB(candles: Candle[], period: number, stdDev: number): { upper: number; middle: number; lower: number } | null {
+function calcBB(
+  candles: Candle[],
+  period: number,
+  stdDev: number,
+): { upper: number; middle: number; lower: number } | null {
   if (candles.length < period) return null;
   const slice = candles.slice(candles.length - period);
   const mean = slice.reduce((s, c) => s + c.close, 0) / period;
@@ -144,108 +157,109 @@ function buildBbMtfDrawings(
   sl: number,
   tp1: number,
   tp2: number,
+  atr: number,
   bb15m: BbBands,
   bb1h: BbBands,
   rescueLevels: number[],
   candles: Candle[],
+  lastCandleHigh: number,
+  lastCandleLow: number,
 ): DrawingGroups {
   const R  = Math.abs(entryPrice - sl);
   const rr = R > 0 ? Math.abs(tp2 - entryPrice) / R : 0;
 
-  // ── entryLines: 핵심 진입/청산 레벨 (항상 표시) ──────────────────────────
+  // ── 침범 캔들 박스: 마지막 캔들만 금색 하이라이트 ────────────────────────
+  const breachCandleTime = candles[candles.length - 1].time;
+  const prevCandleTime   = candles.length >= 2 ? candles[candles.length - 2].time : candles[0].time;
+  const breachTop        = Math.max(lastCandleHigh, bb15m.lower);
+  const breachCandleBox: BoxDrawing = {
+    id: uid(), type: 'box', ticker: symbol,
+    p1: { time: prevCandleTime, price: breachTop },
+    p2: { time: breachCandleTime, price: lastCandleLow },
+    corners: [
+      { pos: 'TL', time: prevCandleTime,   price: breachTop      },
+      { pos: 'TR', time: breachCandleTime, price: breachTop      },
+      { pos: 'BR', time: breachCandleTime, price: lastCandleLow  },
+      { pos: 'BL', time: prevCandleTime,   price: lastCandleLow  },
+    ],
+    topPrice: breachTop,
+    bottomPrice: lastCandleLow,
+    color: '#f0b90b',
+    memo: '⚡ BB 침범 캔들',
+  };
+
+  // ── BB 3선: 하단(침범트리거) / 중심(TP1기준) / 상단 ─────────────────────
+  const bb15mLowerLine: HlineDrawing = {
+    id: uid(), type: 'hline', ticker: symbol, price: bb15m.lower,
+    color: '#38bdf8',   // 하늘색 — 가장 중요한 기준선
+    memo: `BB 하단 ${fmt(bb15m.lower)} ← 침범 트리거`,
+  };
+  const bb15mMiddleLine: HlineDrawing = {
+    id: uid(), type: 'hline', ticker: symbol, price: bb15m.middle,
+    color: '#f0b90b',   // 노란색 — TP1 기준 (진입가와 같은 계열)
+    memo: `BB 중심 ${fmt(bb15m.middle)} · TP1 기준`,
+  };
+  const bb15mUpperLine: HlineDrawing = {
+    id: uid(), type: 'hline', ticker: symbol, price: bb15m.upper,
+    color: '#0ecb81',   // 초록 — 상단 목표
+    memo: `BB 상단 ${fmt(bb15m.upper)}`,
+  };
+
+  // ── 핵심 진입·익절·손절 3선 ──────────────────────────────────────────────
   const entryLines: Drawing[] = [
     {
       id: uid(), type: 'hline', ticker: symbol, price: entryPrice,
       color: '#f0b90b',
-      memo: `① ▲ 롱 BB MTF 딥 진입 · RR≈${rr.toFixed(1)}`,
+      memo: `▶ 진입 ${fmt(entryPrice)} · LIMIT IOC · RR≈${rr.toFixed(1)}`,
     } satisfies HlineDrawing,
     {
       id: uid(), type: 'hline', ticker: symbol, price: tp1,
       color: '#0ecb81',
-      memo: `② TP1 ${fmt(tp1)} · 15m BB 중심선 복귀`,
-    } satisfies HlineDrawing,
-    {
-      id: uid(), type: 'hline', ticker: symbol, price: tp2,
-      color: '#00b4a0',
-      memo: `③ TP2 ${fmt(tp2)} · RR≈${rr.toFixed(1)}`,
+      memo: `✔ TP ${fmt(tp1)} · BB중심 복귀`,
     } satisfies HlineDrawing,
     {
       id: uid(), type: 'hline', ticker: symbol, price: sl,
       color: '#f6465d',
-      memo: `④ SL ${fmt(sl)} · ATR×1.5`,
+      memo: `✖ SL ${fmt(sl)}`,
     } satisfies HlineDrawing,
   ];
 
-  // ── breakout: BB 밴드 컨텍스트 + 구출레벨 (항상 표시) ─────────────────────
-
-  // 15m BB 밴드 배경 박스 (SMA20 ± 2σ 구간을 면적으로 시각화)
-  const t1 = candles[0].time;
-  const t2 = candles[candles.length - 1].time;
-  const bbBoxCorners: BoxCorner[] = [
-    { pos: 'TL', time: t1, price: bb15m.upper },
-    { pos: 'TR', time: t2, price: bb15m.upper },
-    { pos: 'BR', time: t2, price: bb15m.lower },
-    { pos: 'BL', time: t1, price: bb15m.lower },
-  ];
-  const bbBandBox: BoxDrawing = {
-    id: uid(), type: 'box', ticker: symbol,
-    p1: { time: t1, price: bb15m.upper },
-    p2: { time: t2, price: bb15m.lower },
-    corners: bbBoxCorners,
-    topPrice: bb15m.upper,
-    bottomPrice: bb15m.lower,
-    color: 'rgba(56,189,248,0.07)',
-    memo: `BB 밴드 구간 (15m SMA${DEFAULT_BB_MTF_OPTIONS.bbPeriod}±${DEFAULT_BB_MTF_OPTIONS.bbStdDev}σ)`,
-  };
-
-  // 15m BB 하단선 — 침범 트리거 (가장 중요)
-  const bb15mLowerLine: HlineDrawing = {
-    id: uid(), type: 'hline', ticker: symbol, price: bb15m.lower,
-    color: '#38bdf8',
-    memo: `⑦ 15m BB 하단 ← 침범 트리거 (SMA${DEFAULT_BB_MTF_OPTIONS.bbPeriod}−${DEFAULT_BB_MTF_OPTIONS.bbStdDev}σ)`,
-  };
-
-  // 15m BB 상단선 — 반등 목표 참고
-  const bb15mUpperLine: HlineDrawing = {
-    id: uid(), type: 'hline', ticker: symbol, price: bb15m.upper,
-    color: 'rgba(14,203,129,0.50)',
-    memo: `⑧ 15m BB 상단 ${fmt(bb15m.upper)} · 반등 목표`,
-  };
-
-  // 1h BB 하단선 — 컨텍스트 침범 레벨
-  const bb1hLowerLine: HlineDrawing = {
-    id: uid(), type: 'hline', ticker: symbol, price: bb1h.lower,
-    color: 'rgba(59,139,235,0.70)',
-    memo: `⑨ 1h BB 하단 ${fmt(bb1h.lower)} ← 컨텍스트 침범`,
-  };
-
-  // 구출 DCA 레벨
-  const rescueLines: Drawing[] = rescueLevels.map((level, i) => ({
-    id: uid(), type: 'hline', ticker: symbol, price: level,
-    color: 'rgba(155,89,182,0.80)',
-    memo: `⑤ 구출DCA ${i + 1}단계 ${fmt(level)}`,
-  } satisfies HlineDrawing));
-
-  // ── dimSR: 상세 모드에서만 표시되는 추가 컨텍스트 ──────────────────────────
+  // ── dimSR: 상세 모드에서만 표시 (1h 컨텍스트 + 구출레벨 + TP2) ──────────
   const dimSR: Drawing[] = [
     {
-      id: uid(), type: 'hline', ticker: symbol, price: bb1h.middle,
-      color: 'rgba(240,185,11,0.35)',
-      memo: `1h BB 중심선 ${fmt(bb1h.middle)}`,
+      id: uid(), type: 'hline', ticker: symbol, price: bb1h.lower,
+      color: '#3b8beb',
+      memo: `1h BB 하단 ${fmt(bb1h.lower)}`,
     } satisfies HlineDrawing,
     {
+      id: uid(), type: 'hline', ticker: symbol, price: tp2,
+      color: '#00b4a0',
+      memo: `TP2(2R) ${fmt(tp2)}`,
+    } satisfies HlineDrawing,
+    ...rescueLevels.map((level, i) => ({
+      id: uid(), type: 'hline', ticker: symbol, price: level,
+      color: '#9b59b2',
+      memo: `구출${i + 1} ${fmt(level)}`,
+    } satisfies HlineDrawing)),
+    {
       id: uid(), type: 'hline', ticker: symbol, price: bb1h.upper,
-      color: 'rgba(14,203,129,0.25)',
+      color: '#0ecb81',
       memo: `1h BB 상단 ${fmt(bb1h.upper)}`,
     } satisfies HlineDrawing,
   ];
 
   return {
-    breakout: [bbBandBox, bb15mLowerLine, bb15mUpperLine, bb1hLowerLine, ...rescueLines],
-    dimSR,
+    // breakout: 항상 표시 — 침범 캔들 + BB 3선 (총 4개)
+    breakout: [
+      breachCandleBox,  // ⚡ 침범 캔들 하이라이트
+      bb15mLowerLine,   // BB 하단 (침범 트리거, 하늘색)
+      bb15mMiddleLine,  // BB 중심 (TP1, 노란색)
+      bb15mUpperLine,   // BB 상단 (목표, 초록)
+    ],
+    dimSR,              // 1h 컨텍스트 + 구출레벨 + TP2 (상세 모드)
     topSR: [],
     hvn: [],
-    entryLines,
+    entryLines,         // 진입 / TP / SL (3선)
   };
 }
 
@@ -259,100 +273,107 @@ async function scanSymbolBbMtf(
   const iMs1h  = intervalToMs('1h');
   const iMs15m = intervalToMs('15m');
 
-  // Fetch 1h candles (enough for BB + MA)
-  const h1Limit = Math.max(opts.bbPeriod, opts.maPeriod) + 10;
+  // ── 1h 캔들 ─────────────────────────────────────────────────────────────────
+  // breachLookback1h 개의 최근 봉을 검사하므로 여유 포함
+  const h1Limit = opts.bbPeriod + opts.breachLookback1h + 5;
   const rawH1 = await fetchBinanceKlinesCached(symbol, '1h', h1Limit, signal);
   if (rawH1.length < opts.bbPeriod + 2) return null;
   const closedH1 = closedOnly(rawH1, iMs1h);
   if (closedH1.length < opts.bbPeriod + 2) return null;
 
-  // 1h BB
+  // 1h BB (마지막 bbPeriod 봉 기준)
   const bb1h = calcBB(closedH1, opts.bbPeriod, opts.bbStdDev);
   if (!bb1h) return null;
 
-  const lastH1 = closedH1[closedH1.length - 1];
-  const h1BreachDepth = bb1h.lower - lastH1.close; // positive = below lower band
-  if (h1BreachDepth < bb1h.lower * opts.minH1BreachFrac) return null; // not breaching or not deep enough
+  // 1h 침범 체크: 최근 breachLookback1h 봉 중 가장 깊은 침범값
+  const nH1 = closedH1.length;
+  const h1Window = closedH1.slice(Math.max(0, nH1 - opts.breachLookback1h));
+  const h1BestBreach = Math.max(0, ...h1Window.map(c => bb1h.lower - c.close));
+  if (h1BestBreach < bb1h.lower * opts.minH1BreachFrac) return null;
 
-  // Fetch 15m candles
-  const m15Limit = Math.max(opts.bbPeriod, opts.maPeriod) + 20;
+  // ── 15m 캔들 ─────────────────────────────────────────────────────────────────
+  // maPeriod + bbPeriod + lookback 여유 확보
+  const m15Limit = opts.maPeriod + opts.bbPeriod + opts.breachLookback15m + 10;
   const rawM15 = await fetchBinanceKlinesCached(symbol, '15m', m15Limit, signal);
   if (rawM15.length < opts.maPeriod + 5) return null;
   const closedM15 = closedOnly(rawM15, iMs15m);
   if (closedM15.length < opts.maPeriod + 5) return null;
 
   const n15 = closedM15.length;
-  const lastM15    = closedM15[n15 - 1];
-  const prevM15    = closedM15[n15 - 2];
-  const prevPrevM15 = n15 >= 3 ? closedM15[n15 - 3] : null;
+  const lastM15 = closedM15[n15 - 1];
 
-  // 15m BB
+  // 15m BB (마지막 bbPeriod 봉 기준)
   const bb15m = calcBB(closedM15, opts.bbPeriod, opts.bbStdDev);
   if (!bb15m) return null;
 
-  const m15BreachDepth = bb15m.lower - lastM15.close; // positive = below lower band
+  // 현재(마지막) 15m 봉이 BB 하단 아래에 있어야 함
+  const m15BreachDepth = bb15m.lower - lastM15.close; // 양수 = 하단 아래
   if (m15BreachDepth < bb15m.lower * opts.minM15BreachFrac) return null;
 
-  // 15m MA for filters
+  // 신선한 침범 확인: 최근 breachLookback15m 봉(현재 제외) 중 하나 이상이 BB 하단 위에 있었어야 함
+  // → 오래 전부터 BB 하단 아래에 갇혀있는 코인 제외
+  const freshWindow = closedM15.slice(
+    Math.max(0, n15 - 1 - opts.breachLookback15m),
+    n15 - 1,
+  );
+  const wasFreshAbove = freshWindow.some(c => c.close >= bb15m.lower);
+  if (!wasFreshAbove) return null;
+
+  // 낙도 방지 게이트: MA 기준 maxMaDropPct 이상 하락하면 자유낙하로 판단 후 제외
   const ma15m = calcSMA(closedM15, opts.maPeriod);
   if (ma15m === 0) return null;
-
-  // prevPrev MA filter: bar[-3] must have been above MA (not deep in downtrend)
-  if (prevPrevM15 && prevPrevM15.close < ma15m) return null;
-
-  // Knife-catching gate: price must not have dropped more than maxMaDropPct below MA
   if (lastM15.close < ma15m * (1 - opts.maxMaDropPct)) return null;
 
-  // Extra sanity: the previous closed bar should still be near / above the lower band
-  // (ensures the breach just started — not mid-fall)
-  if (prevM15.close < bb15m.lower * (1 - opts.minM15BreachFrac * 5)) return null;
-
-  // ATR on 15m
+  // ATR (15m 기준)
   const atr = calcATR(closedM15);
   if (atr === 0) return null;
 
-  // Entry / SL / TP
+  // ── Entry / SL / TP ──────────────────────────────────────────────────────────
   const entryPrice = lastM15.close;
   const sl  = entryPrice - opts.slAtr * atr;
   const R   = entryPrice - sl;
-  const tp1 = bb15m.middle;          // BB middle = mean reversion target
-  const tp2 = entryPrice + 2 * R;   // 2R runner
+  const tp1 = bb15m.middle; // mean reversion 1차 목표
+  const tp2 = entryPrice + 2 * R;
 
-  // Score: combine breach depths into 0–100
-  const h1BreachPct  = (h1BreachDepth / bb1h.lower) * 100;
+  // 점수: 두 타임프레임 침범 깊이의 합산 (40~100점)
+  const h1BreachPct  = (h1BestBreach / bb1h.lower) * 100;
   const m15BreachPct = (m15BreachDepth / bb15m.lower) * 100;
-  // Deeper breach → higher score (dip buying — deeper = more oversold)
-  const rawScore = 40 + Math.min(30, h1BreachPct * 500) + Math.min(30, m15BreachPct * 1000);
+  const rawScore = 40
+    + Math.min(30, h1BreachPct * 500)   // 최대 +30: 1h 침범 0.1%→6pt, 0.6%→30pt
+    + Math.min(30, m15BreachPct * 1000); // 최대 +30: 15m 침범 0.05%→5pt, 0.3%→30pt
   const score = Math.round(Math.min(100, rawScore));
 
-  // Rescue DCA levels
+  // 구출 DCA 레벨
   const rescueLevels: number[] = [];
   for (let i = 1; i <= opts.rescueCount; i++) {
     rescueLevels.push(entryPrice - i * opts.rescueSpacingAtr * atr);
   }
 
-  // Status: price is already at/below lower band → TRIGGERED
+  // ── 상태: BB 하단 침범 = 즉시 TRIGGERED ──────────────────────────────────
   const status: CandidateStatus = 'TRIGGERED';
 
-  // SR / HVN (lightweight)
-  const srLevels = calcSRLevels(closedM15, atr, entryPrice);
-  const hvnZones = calcHVN(closedM15.slice(-200), 80, 5, entryPrice);
+  // SR / HVN (가벼운 계산)
+  const srLevels  = calcSRLevels(closedM15, atr, entryPrice);
+  const hvnZones  = calcHVN(closedM15.slice(-200), 80, 5, entryPrice);
   const topLevels = [
     ...srLevels.filter(z => z.kind === 'support').sort((a, b) => b.score - a.score).slice(0, 1),
     ...srLevels.filter(z => z.kind === 'resistance').sort((a, b) => b.score - a.score).slice(0, 1),
   ];
 
-  const asOfCloseTime    = lastM15.time + iMs15m;
-  const validBars        = getTtlBars('15m');
-  const validUntilTime   = asOfCloseTime + validBars * iMs15m;
-  const nextCloseTime    = asOfCloseTime + iMs15m;
-  const vf               = getVolFactor('15m');
-  const triggerSpec      = { type: 'hline' as const, fixedPrice: bb15m.lower, slope: 0, p1Time: 0, p1Price: 0 };
-  const triggerAtNext    = triggerPrice(triggerSpec, nextCloseTime);
+  const asOfCloseTime  = lastM15.time + iMs15m;
+  const validBars      = getTtlBars('15m');
+  const validUntilTime = asOfCloseTime + validBars * iMs15m;
+  const nextCloseTime  = asOfCloseTime + iMs15m;
+  const vf             = getVolFactor('15m');
+  const triggerSpec    = {
+    type: 'hline' as const, fixedPrice: bb15m.lower, slope: 0, p1Time: 0, p1Price: 0,
+  };
+  const triggerAtNext  = triggerPrice(triggerSpec, nextCloseTime);
 
   const drawingGroups = buildBbMtfDrawings(
-    symbol, entryPrice, sl, tp1, tp2,
+    symbol, entryPrice, sl, tp1, tp2, atr,
     bb15m, bb1h, rescueLevels, closedM15,
+    lastM15.high, lastM15.low,
   );
 
   return {
@@ -380,7 +401,7 @@ async function scanSymbolBbMtf(
     triggeredAt: asOfCloseTime,
     distanceNowPct: 0,
     strategyId: 'bb-mtf-dca',
-    // BB MTF specific metadata
+    // BB MTF 전용 메타데이터
     bbMtfH1BreachPct: h1BreachPct,
     bbMtfM15BreachPct: m15BreachPct,
     bbMtfMiddleBand: bb15m.middle,
@@ -402,9 +423,9 @@ async function runBbMtfDcaScanInternal(
   signal?: AbortSignal,
   options?: ScanOptions,
 ): Promise<void> {
-  // BB MTF is LONG only — skip scan if explicitly requesting shorts
+  // BB MTF DCA 는 롱(딥 매수) 전용
   if (direction === 'short') {
-    options?.onStatus?.('BB MTF DCA는 롱(딥 매수) 전용 전략입니다. 숏 방향은 지원하지 않습니다.', 'warn');
+    options?.onStatus?.('BB MTF DCA는 롱(딥 매수) 전용입니다. 숏 방향은 지원하지 않습니다.', 'warn');
     return;
   }
 
@@ -415,11 +436,8 @@ async function runBbMtfDcaScanInternal(
     return;
   }
 
-  const scanTag = options?.scanTag ?? `bb-mtf-dca:${direction}`;
-  const scanSlot = await acquireScanSlot({
-    tag: scanTag,
-    policy: options?.busyPolicy ?? 'queue',
-  });
+  const scanTag  = options?.scanTag ?? `bb-mtf-dca:${direction}`;
+  const scanSlot = await acquireScanSlot({ tag: scanTag, policy: options?.busyPolicy ?? 'queue' });
   if (!scanSlot) {
     options?.onStatus?.('다른 스캔이 진행 중이라 이번 스캔은 건너뜀', 'warn');
     return;
@@ -428,8 +446,8 @@ async function runBbMtfDcaScanInternal(
     options?.onStatus?.(`다른 스캔 종료 대기 후 시작 (${(scanSlot.waitedMs / 1000).toFixed(1)}s)`, 'info');
   }
 
-  const total = symbols.length;
-  let done = 0;
+  const total    = symbols.length;
+  let done       = 0;
   if (total === 0) { scanSlot.release(); return; }
 
   const concurrency = Math.max(1, options?.concurrency ?? 3);
@@ -481,8 +499,8 @@ export async function runBbMtfDcaScan(
 }
 
 /**
- * Factory: creates a ScanFn with custom BB MTF options baked in.
- * Used by useAltAutoTrade when the auto-trade settings include bb-mtf params.
+ * Factory: BbMtfOptions 를 bake-in 한 ScanFn 반환.
+ * useAltAutoTrade / AltScannerModal 의 자동매매·수동스캔에서 사용.
  */
 export function createBbMtfDcaScan(bbMtfOptions?: BbMtfOptions): ScanFn {
   const defined = bbMtfOptions

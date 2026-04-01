@@ -162,6 +162,8 @@ export interface AutoTradeSettings {
   bbMtfRescueCount?: number;         // number of rescue DCA levels (default 2)
   bbMtfRescueSpacingAtr?: number;    // ATR spacing between rescue levels (default 1.0)
   bbMtfMaxBudgetMultiplier?: number; // max total budget multiplier (default 3.10)
+  bbMtfBreachLookback1h?: number;    // how many recent 1h bars to check for breach (default 3)
+  bbMtfBreachLookback15m?: number;   // fresh-breach guard window in 15m bars (default 4)
   // Risk gates (lab-compatible)
   maxSpreadBps?: number;             // leader-retest: block when bid-ask spread > N bps (0 = disable, default 4)
   maxRiskPct?: number;               // leader-retest: block when |entry-SL|/entry > N% (0 = disable, default 2.5)
@@ -463,8 +465,8 @@ function SettingsEditor({
         <span style={s.hint}>한 번의 스캔 사이클에서 자동 진입 허용 수 (전체 TF 합산, 기본 1)</span>
       </div>
 
-      {/* Chase-entry prevention — shown for breakout & FVG; hidden for leader-retest (not applicable) */}
-      {!isLeaderRetest && (
+      {/* Chase-entry prevention — shown for breakout & FVG; hidden for leader-retest & bb-mtf-dca (not applicable) */}
+      {!isLeaderRetest && !isBbMtf && (
       <div style={s.fieldRow}>
         <label style={s.label}>추격 진입 방지</label>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -917,9 +919,25 @@ function SettingsEditor({
                 style={{ ...s.numberInput, width: 52 }} />
               <span style={s.unit}>ATR</span>
             </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>1h 룩백</span>
+              <input type="number" min={1} max={10} step={1}
+                value={draft.bbMtfBreachLookback1h ?? 3}
+                onChange={e => set('bbMtfBreachLookback1h', Math.max(1, Math.min(10, parseInt(e.target.value) || 3)))}
+                style={{ ...s.numberInput, width: 52 }} />
+              <span style={s.unit}>봉</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>15m 신선도</span>
+              <input type="number" min={1} max={16} step={1}
+                value={draft.bbMtfBreachLookback15m ?? 4}
+                onChange={e => set('bbMtfBreachLookback15m', Math.max(1, Math.min(16, parseInt(e.target.value) || 4)))}
+                style={{ ...s.numberInput, width: 52 }} />
+              <span style={s.unit}>봉</span>
+            </div>
           </div>
           <span style={s.hint}>
-            1h + 15m 볼린저 밴드 하단 이중 침범 시 LIMIT 딥 매수. BB 기간/배수·MA 필터·SL·구출DCA 단계 설정. 구출 단계=0이면 DCA 비활성.
+            1h + 15m 볼린저 밴드 하단 이중 침범 시 LIMIT 딥 매수. BB 기간/배수·MA 필터·SL·구출DCA 단계 설정. 구출 단계=0이면 DCA 비활성. 1h 룩백=최근 N봉 중 침범 허용, 15m 신선도=이전 N봉 중 BB 위 봉 필요.
           </span>
         </div>
       )}
@@ -995,24 +1013,40 @@ function SettingsEditor({
       {isLive && (
         <div style={s.fieldRow}>
           <label style={s.label}>실전 진입 주문 방식</label>
-          <div style={{ display: 'flex', gap: 6 }}>
-            {(['MARKET', 'LIMIT_IOC'] as const).map(t => (
-              <button
-                key={t}
-                style={{ ...s.toggleChip, ...((draft.liveEntryOrderType ?? 'MARKET') === t ? s.toggleChipActiveLive : {}) }}
-                onClick={() => set('liveEntryOrderType', t)}
-              >
-                {t === 'MARKET' ? '시장가(Market)' : '지정가 IOC'}
-              </button>
-            ))}
-          </div>
-          <span style={s.hint}>
-            시장가: 즉시 체결 (슬리피지 있음) · 지정가 IOC: 스캔 시점 가격으로 즉시 체결 시도, 미체결 시 자동 취소 (슬리피지 없음, 진입 실패 가능)
-          </span>
-          {isLeaderRetest && (
-            <span style={{ ...s.hint, color: '#5b9cf6', marginTop: 2 }}>
-              ⚠ 리더-리테스트는 이 설정을 무시하고 entryZone 기반 지정가(LIMIT)로 진입합니다. TRIGGERED → LIMIT IOC, PENDING → GTC LIMIT(존 대기). MARKET 추격 진입 없음.
-            </span>
+          {isBbMtf ? (
+            <>
+              <span style={{
+                display: 'inline-block', padding: '3px 10px', borderRadius: 4,
+                fontSize: '0.78rem', fontWeight: 600,
+                background: 'rgba(59,139,235,0.15)', color: '#3b8beb',
+                border: '1px solid rgba(59,139,235,0.35)',
+              }}>
+                LIMIT_IOC 고정
+              </span>
+              <span style={s.hint}>현재가 즉시체결 시도 · 미체결 시 자동취소 — BB MTF DCA 전략은 진입 방식이 고정됩니다.</span>
+            </>
+          ) : (
+            <>
+              <div style={{ display: 'flex', gap: 6 }}>
+                {(['MARKET', 'LIMIT_IOC'] as const).map(t => (
+                  <button
+                    key={t}
+                    style={{ ...s.toggleChip, ...((draft.liveEntryOrderType ?? 'MARKET') === t ? s.toggleChipActiveLive : {}) }}
+                    onClick={() => set('liveEntryOrderType', t)}
+                  >
+                    {t === 'MARKET' ? '시장가(Market)' : '지정가 IOC'}
+                  </button>
+                ))}
+              </div>
+              <span style={s.hint}>
+                시장가: 즉시 체결 (슬리피지 있음) · 지정가 IOC: 스캔 시점 가격으로 즉시 체결 시도, 미체결 시 자동 취소 (슬리피지 없음, 진입 실패 가능)
+              </span>
+              {isLeaderRetest && (
+                <span style={{ ...s.hint, color: '#5b9cf6', marginTop: 2 }}>
+                  ⚠ 리더-리테스트는 이 설정을 무시하고 entryZone 기반 지정가(LIMIT)로 진입합니다. TRIGGERED → LIMIT IOC, PENDING → GTC LIMIT(존 대기). MARKET 추격 진입 없음.
+                </span>
+              )}
+            </>
           )}
         </div>
       )}
@@ -1039,8 +1073,8 @@ function SettingsEditor({
         </span>
       </div>
 
-      {/* TP1 partial close — not applicable for leader-retest (tp1 is structurally derived from orderPlan) */}
-      {!isLeaderRetest && <div style={s.fieldRow}>
+      {/* TP1 partial close — not applicable for leader-retest or bb-mtf-dca (both have fixed TP logic) */}
+      {!isLeaderRetest && !isBbMtf && <div style={s.fieldRow}>
         <label style={s.label}>TP1 부분익절</label>
         <div style={{ display: 'flex', gap: 6 }}>
           <button

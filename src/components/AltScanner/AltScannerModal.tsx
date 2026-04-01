@@ -149,6 +149,26 @@ const STATUS_ORDER: Record<CandidateStatus, number> = {
   PENDING: 0, TRIGGERED: 1, INVALID: 2, EXPIRED: 3,
 };
 
+// ── Entry reason text ──────────────────────────────────────────────────────
+function getEntryReason(c: ScanCandidate): string {
+  if (c.strategyId === 'bb-mtf-dca') {
+    const h1 = c.bbMtfH1BreachPct != null ? `1h BB 하단 침범 ${c.bbMtfH1BreachPct.toFixed(2)}%` : '1h BB 하단 침범';
+    const m15 = c.bbMtfM15BreachPct != null ? `15m BB 하단 침범 ${c.bbMtfM15BreachPct.toFixed(2)}%` : '15m BB 하단 침범';
+    return `${h1} + ${m15} → LIMIT 딥 매수 신호`;
+  }
+  if (c.strategyId === 'leader-retest') {
+    const dir = c.direction === 'long' ? '지지 리테스트' : '저항 리테스트';
+    return `SR ${dir} 확인봉 완성 → ${c.direction === 'long' ? '롱' : '숏'} 진입 신호`;
+  }
+  if (c.strategyId === 'fvg-poc-ema72') {
+    return `FVG POC × EMA72 수렴 진입 신호 → ${c.direction === 'long' ? '롱' : '숏'}`;
+  }
+  // legacy breakout
+  const bk = c.breakoutType === 'trendline' ? '추세선' : c.breakoutType === 'hline' ? '수평선' : '박스권';
+  const dir = c.direction === 'long' ? '상방' : '하방';
+  return `${bk} ${dir} 돌파 확인 → ${c.direction === 'long' ? '롱' : '숏'} 진입 신호`;
+}
+
 // ── Opinion generator ──────────────────────────────────────────────────────
 function buildOpinion(c: ScanCandidate): { text: string; stars: number; color: string } {
   const R  = Math.abs(c.entryPrice - c.slPrice);
@@ -813,7 +833,8 @@ function TradingInfoPanel({
           {c.strategyId === 'bb-mtf-dca' ? (
             <>
               <div>1h+15m 이중 BB 하단 침범 딥 진입</div>
-              <div>MA 필터 · 낙도 방지 · LIMIT 전용</div>
+              <div>LIMIT_IOC — 현재가 즉시 체결 (IOC)</div>
+              <div style={{ fontSize: '0.68rem', color: '#848e9c' }}>미체결 시 자동 취소됨</div>
             </>
           ) : c.strategyId === 'fvg-poc-ema72' ? (
             <>
@@ -1329,6 +1350,20 @@ export function AltScannerModal({
     return [...g.breakout, ...g.dimSR, ...g.topSR, ...(showHVN ? g.hvn : []), ...entryLines];
   }, [selected, levelMode, showHVN]);
 
+  // Approximate Y% of entry price within chart candle range (for overlay arrow)
+  const entryYPct = useMemo(() => {
+    if (!selected || selected.status !== 'TRIGGERED') return null;
+    const candles = chartCandles;
+    if (candles.length < 2) return null;
+    const highs = candles.map(c => c.high);
+    const lows  = candles.map(c => c.low);
+    const maxP = Math.max(...highs);
+    const minP = Math.min(...lows);
+    if (maxP <= minP) return null;
+    const pct = (maxP - selected.entryPrice) / (maxP - minP);
+    return Math.max(0.05, Math.min(0.90, pct));
+  }, [selected, chartCandles]);
+
   // ── Sorted + filtered candidate list ─────────────────────────────────────
   const displayCandidates = useMemo(() => {
     let list = [...candidates];
@@ -1352,6 +1387,17 @@ export function AltScannerModal({
 
   return (
     <div style={S.overlay}>
+      <style>{`
+        @keyframes entryArrowBounce {
+          0%, 100% { transform: translateY(0) scale(1); }
+          40% { transform: translateY(5px) scale(1.25); }
+          70% { transform: translateY(-2px) scale(0.9); }
+        }
+        @keyframes entryBannerPulse {
+          0%, 100% { opacity: 0.85; box-shadow: 0 0 0 0 rgba(14,203,129,0); }
+          50% { opacity: 1; box-shadow: 0 0 0 6px rgba(14,203,129,0.12); }
+        }
+      `}</style>
       <div style={S.modal}>
         {/* ── Header ─────────────────────────────────────────────────────── */}
         <div style={S.header}>
@@ -1563,7 +1609,13 @@ export function AltScannerModal({
                       <span style={{ color: '#5e6673', fontSize: '0.68rem' }}>{remBars}봉 남음</span>
                     )}
                     {c.status === 'TRIGGERED' && (
-                      <span style={{ color: '#0ecb81', fontSize: '0.68rem' }}>발생!</span>
+                      <span style={{
+                        color: '#0ecb81', fontSize: '0.68rem', fontWeight: 700,
+                        animation: 'entryArrowBounce 1.2s ease-in-out infinite',
+                        display: 'inline-block',
+                      }}>
+                        {c.direction === 'long' ? '⬇' : '⬆'} 진입!
+                      </span>
                     )}
                     {(c.status === 'INVALID' || c.status === 'EXPIRED') && (
                       <span style={{ color: '#5e6673', fontSize: '0.67rem' }}>
@@ -1722,6 +1774,46 @@ export function AltScannerModal({
 
                 <LegendBar levelMode={levelMode} showHVN={showHVN} hasTP1={hasTP1} />
 
+                {/* ── Entry reason banner (TRIGGERED only) ─────────────── */}
+                {selected.status === 'TRIGGERED' && (
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 8,
+                    padding: '6px 14px',
+                    background: selected.direction === 'long'
+                      ? 'rgba(14,203,129,0.08)' : 'rgba(246,70,93,0.08)',
+                    borderBottom: `1px solid ${selected.direction === 'long'
+                      ? 'rgba(14,203,129,0.2)' : 'rgba(246,70,93,0.2)'}`,
+                    animation: 'entryBannerPulse 1.6s ease-in-out infinite',
+                    borderRadius: 0,
+                  }}>
+                    <span style={{
+                      fontSize: '1.1rem',
+                      display: 'inline-block',
+                      color: selected.direction === 'long' ? '#0ecb81' : '#f6465d',
+                    }}>
+                      {selected.direction === 'long' ? '⬇' : '⬆'}
+                    </span>
+                    <div>
+                      <div style={{ fontSize: '0.68rem', color: '#848e9c', marginBottom: 1 }}>
+                        진입 사유 발생
+                      </div>
+                      <div style={{
+                        fontSize: '0.80rem', fontWeight: 700,
+                        color: selected.direction === 'long' ? '#0ecb81' : '#f6465d',
+                        letterSpacing: '-0.01em',
+                      }}>
+                        {getEntryReason(selected)}
+                      </div>
+                    </div>
+                    <div style={{ marginLeft: 'auto', textAlign: 'right' }}>
+                      <div style={{ fontSize: '0.68rem', color: '#848e9c' }}>진입가</div>
+                      <div style={{ fontSize: '0.82rem', fontWeight: 700, color: '#f0b90b', fontFamily: 'monospace' }}>
+                        {pf(selected.entryPrice)}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* Chart timeframe selector (independent of scan interval) */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 12px', borderBottom: '1px solid #2a2e39', background: '#181c27' }}>
                   <span style={{ fontSize: '0.7rem', color: '#5e6673', marginRight: 4 }}>차트 봉:</span>
@@ -1744,7 +1836,7 @@ export function AltScannerModal({
                 </div>
 
                 <div style={S.chartArea}>
-                  <div style={S.chartCanvasWrap}>
+                  <div style={{ ...S.chartCanvasWrap, position: 'relative' }}>
                     <CandleChart
                       key={selected.symbol + selected.direction + chartViewInterval}
                       candles={chartViewInterval === (selected.interval as Interval) ? chartCandles : chartViewCandles}
@@ -1754,7 +1846,44 @@ export function AltScannerModal({
                       setDrawingMode={() => {}}
                       onDrawingsChange={() => {}}
                       initialDrawings={chartViewInterval === (selected.interval as Interval) ? activeDrawings : []}
+                      indicators={selected.strategyId === 'bb-mtf-dca'
+                        ? { coinDuckMABB: false, dwCloud: false, bbOnly: true }
+                        : undefined}
                     />
+                    {/* Animated entry arrow overlay — positioned at approximate entry price Y */}
+                    {selected.status === 'TRIGGERED' && entryYPct !== null && chartViewInterval === (selected.interval as Interval) && (
+                      <div style={{
+                        position: 'absolute',
+                        right: 68,
+                        top: `${Math.round(entryYPct * 100)}%`,
+                        transform: 'translateY(-50%)',
+                        pointerEvents: 'none',
+                        zIndex: 10,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 4,
+                      }}>
+                        <span style={{
+                          fontSize: '1.1rem',
+                          animation: 'entryArrowBounce 0.9s ease-in-out infinite',
+                          display: 'inline-block',
+                          color: selected.direction === 'long' ? '#f0b90b' : '#f6465d',
+                          textShadow: '0 0 8px rgba(240,185,11,0.8)',
+                        }}>←</span>
+                        <span style={{
+                          fontSize: '0.65rem',
+                          color: '#f0b90b',
+                          fontWeight: 700,
+                          background: 'rgba(13,17,28,0.85)',
+                          borderRadius: 3,
+                          padding: '1px 4px',
+                          border: '1px solid rgba(240,185,11,0.4)',
+                          whiteSpace: 'nowrap' as const,
+                        }}>
+                          {selected.strategyId === 'bb-mtf-dca' ? '⬇ BB침범 진입' : '⬇ 진입'}
+                        </span>
+                      </div>
+                    )}
                   </div>
                 </div>
 

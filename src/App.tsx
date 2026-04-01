@@ -2116,6 +2116,8 @@ function AppInner() {
       rescueCount: activeAutoTradeSettings.bbMtfRescueCount,
       rescueSpacingAtr: activeAutoTradeSettings.bbMtfRescueSpacingAtr,
       maxBudgetMultiplier: activeAutoTradeSettings.bbMtfMaxBudgetMultiplier,
+      breachLookback1h: activeAutoTradeSettings.bbMtfBreachLookback1h,
+      breachLookback15m: activeAutoTradeSettings.bbMtfBreachLookback15m,
     },
     breakoutDirection: activeAutoTradeSettings.breakoutDirection ?? 'both',
     minCandidateScore: activeAutoTradeSettings.minCandidateScore ?? (
@@ -2607,11 +2609,17 @@ function AppInner() {
     try {
       const isDual = await getPositionMode(binanceApiKey, binanceApiSecret);
       if (isDual) {
-        addLog('error', '[ALT실전] Hedge(헤지) 모드 감지 — 단방향(One-way) 모드 필수. 바이낸스에서 포지션 모드 변경 후 재시도.');
+        liveInFlightRef.current.delete(liveKey);
+        const msg = '[ALT실전] Hedge(헤지) 모드 감지 — 바이낸스 선물에서 단방향(One-way)으로 변경 후 재시도';
+        addLog('error', msg);
+        alert(msg);
         return;
       }
     } catch {
-      addLog('error', '[ALT실전] 포지션 모드 확인 실패 — 네트워크 또는 API 권한 확인');
+      liveInFlightRef.current.delete(liveKey);
+      const msg = '[ALT실전] 포지션 모드 확인 실패 — 네트워크 또는 API 권한 확인';
+      addLog('error', msg);
+      alert(msg);
       return;
     }
 
@@ -2643,7 +2651,10 @@ function AppInner() {
         : parseFloat(((riskAmount * leverage) / effectiveEntryPrice).toFixed(6));
     }
     if (qty <= 0) {
-      addLog('error', '[ALT실전] 수량 계산 실패: 잔고 또는 SL 거리를 확인하세요');
+      liveInFlightRef.current.delete(liveKey);
+      const msg = `[ALT실전] 수량 계산 실패 — 잔고: $${balance.toFixed(2)}, SL 거리 확인 필요`;
+      addLog('error', msg);
+      alert(msg);
       return;
     }
 
@@ -2716,12 +2727,16 @@ function AppInner() {
     if (isRetestLive) {
       // Leader-retest: zone-aware limit entry — MARKET 추격 진입 금지
       if (params.candidateStatus === 'INVALID') {
+        liveInFlightRef.current.delete(liveKey);
         addLog('warn', `[ALT실전/retest] ⛔ ${params.symbol} ${params.direction.toUpperCase()} — 상태 INVALID → 진입 스킵`);
+        alert(`[ALT실전] ${params.symbol} 신호 무효(INVALID) — 진입 불가`);
         return;
       }
       const op = params.orderPlan;
       if (!op) {
+        liveInFlightRef.current.delete(liveKey);
         addLog('warn', `[ALT실전/retest] ⛔ ${params.symbol} orderPlan 없음 (구버전 신호?) → 진입 스킵`);
+        alert(`[ALT실전] ${params.symbol} 주문 계획 없음 — 재스캔 후 시도`);
         return;
       }
       const isLong = params.direction === 'long';
@@ -2736,7 +2751,10 @@ function AppInner() {
       if (markNow > 0) {
         const tooLate = isLong ? markNow > op.lateAbove : markNow < op.lateAbove;
         if (tooLate) {
-          addLog('warn', `[ALT실전/retest] ⛔ ${params.symbol} lateAbove 초과 (${markNow.toFixed(4)} ${isLong ? '>' : '<'} ${op.lateAbove.toFixed(4)}) → 진입 스킵`);
+          liveInFlightRef.current.delete(liveKey);
+          const msg = `[ALT실전] ${params.symbol} 현재가(${markNow.toFixed(4)})가 진입 허용 범위 초과 → 진입 스킵`;
+          addLog('warn', msg);
+          alert(msg);
           return;
         }
       }
@@ -2747,7 +2765,6 @@ function AppInner() {
           : markNow <= op.entryZoneHigh && markNow >= op.entryZoneLow
       );
       if (params.candidateStatus === 'TRIGGERED' || inZone) {
-        // Price inside entry zone: LIMIT_IOC for immediate fill at zone-clamped price
         const limitPx = markNow > 0
           ? Math.max(op.entryZoneLow, Math.min(op.entryZoneHigh, markNow))
           : op.idealEntry;
@@ -2755,17 +2772,21 @@ function AppInner() {
         finalEntryPrice = limitPx;
         addLog('info', `[ALT실전/retest] ${params.symbol} LIMIT_IOC @ ${limitPx.toFixed(4)} (zone 내 즉시 체결 시도)`);
       } else if (params.candidateStatus === 'PENDING') {
-        // Price not yet in zone: resting GTC LIMIT at idealEntry (flip level)
-        // Guard: price already broke through zone in wrong direction → structure invalid
         if (markNow > 0 && (isLong ? markNow < op.entryZoneLow : markNow > op.entryZoneHigh)) {
-          addLog('warn', `[ALT실전/retest] ⛔ ${params.symbol} 현재가(${markNow.toFixed(4)}) zone 이탈 → 구조 무효화 가능성 → 진입 스킵`);
+          liveInFlightRef.current.delete(liveKey);
+          const msg = `[ALT실전] ${params.symbol} 현재가(${markNow.toFixed(4)})가 진입 존 이탈 → 구조 무효, 진입 스킵`;
+          addLog('warn', msg);
+          alert(msg);
           return;
         }
         liveOrderType = 'LIMIT_GTC';
         finalEntryPrice = op.idealEntry;
         addLog('info', `[ALT실전/retest] ${params.symbol} resting LIMIT GTC @ ${op.idealEntry.toFixed(4)} (PENDING — zone 진입 대기, 만료 ${new Date(params.validUntilTime).toLocaleTimeString('ko-KR')})`);
       } else {
-        addLog('warn', `[ALT실전/retest] ⛔ ${params.symbol} 알 수 없는 상태(${params.candidateStatus}) → 진입 스킵`);
+        liveInFlightRef.current.delete(liveKey);
+        const msg = `[ALT실전] ${params.symbol} 알 수 없는 상태(${params.candidateStatus}) → 진입 불가`;
+        addLog('warn', msg);
+        alert(msg);
         return;
       }
     } else if (isBreakoutLive && params.triggerLinePrice && params.triggerLinePrice > 0) {
@@ -2788,11 +2809,18 @@ function AppInner() {
         finalEntryPrice = trigLine;
         addLog('info', `[ALT실전/breakout] ${params.symbol} → 지정가 IOC @ ${trigLine.toFixed(4)} (거리 ${driftPct.toFixed(3)}% ≤ ${farPct}%)`);
       } else {
-        addLog('warn',
-          `[ALT실전/breakout] ⛔ ${params.symbol} ${params.direction.toUpperCase()} — 거리 ${driftPct.toFixed(3)}% > 허용폭 ${farPct}% → 진입 스킵`,
-        );
+        liveInFlightRef.current.delete(liveKey);
+        const msg = `[ALT실전] ${params.symbol} 현재가가 트리거에서 ${driftPct.toFixed(2)}% 이탈 (허용 ${farPct}%) → 진입 스킵`;
+        addLog('warn', msg);
+        alert(msg);
         return;
       }
+    } else if (params.strategyId === 'bb-mtf-dca') {
+      const markNow = markPricesMapRef.current[params.symbol] ?? 0;
+      const limitPx = markNow > 0 ? markNow : effectiveEntryPrice;
+      liveOrderType = 'LIMIT_IOC';
+      finalEntryPrice = limitPx;
+      addLog('info', `[ALT실전/bb-mtf-dca] ${params.symbol} LIMIT_IOC @ ${limitPx >= 1 ? limitPx.toFixed(4) : limitPx.toFixed(6)} (BB 하단 침범 딥 매수)`);
     } else {
       liveOrderType = liveAutoTradeSettingsRef.current.liveEntryOrderType ?? 'MARKET';
     }
@@ -5109,6 +5137,8 @@ function AppInner() {
             rescueCount: activeAutoTradeSettings.bbMtfRescueCount,
             rescueSpacingAtr: activeAutoTradeSettings.bbMtfRescueSpacingAtr,
             maxBudgetMultiplier: activeAutoTradeSettings.bbMtfMaxBudgetMultiplier,
+            breachLookback1h: activeAutoTradeSettings.bbMtfBreachLookback1h,
+            breachLookback15m: activeAutoTradeSettings.bbMtfBreachLookback15m,
           }}
         />
       )}

@@ -51,6 +51,8 @@ const CD_MA_DEFS = [
 export interface IndicatorConfig {
   coinDuckMABB: boolean;
   dwCloud: boolean;
+  /** Render ONLY Bollinger Band curves (upper/mid/lower) — no MA, no Ichimoku */
+  bbOnly?: boolean;
 }
 
 // ── Indicator computations ────────────────────────────────────────────────────
@@ -179,8 +181,10 @@ export function useChartRenderer(
     const dwEMA26 = indicators.dwCloud ? computeEMA(candles, 26) : null;
     // Ichimoku is bundled with coinDuckMABB (MA&BB&LCH)
     const ichi  = indicators.coinDuckMABB ? computeIchimoku(candles) : null;
-    return { cdMAs, cdBB, dwEMA9, dwEMA26, ichi };
-  }, [candles, indicators.coinDuckMABB, indicators.dwCloud]);
+    // bbOnly: BB-only mode (no MA/Ichimoku)
+    const bbOnlyBB = indicators.bbOnly ? computeBB(candles, 20, 2) : null;
+    return { cdMAs, cdBB, dwEMA9, dwEMA26, ichi, bbOnlyBB };
+  }, [candles, indicators.coinDuckMABB, indicators.dwCloud, indicators.bbOnly]);
 
   const render = useCallback((
     ctx: CanvasRenderingContext2D,
@@ -362,8 +366,43 @@ export function useChartRenderer(
       });
     }
 
+    // ── BB-only mode: draw Bollinger Band curves without MA / Ichimoku ───
+    if (indicators.bbOnly && indicatorArrays.bbOnlyBB) {
+      const bb = indicatorArrays.bbOnlyBB;
+      // Band fill (upper → lower path)
+      const fillPts: { x: number; yu: number; yl: number }[] = [];
+      for (let i = startI; i <= endI; i++) {
+        const u = bb.upper[i]; const l = bb.lower[i];
+        if (u === null || l === null) continue;
+        fillPts.push({ x: idxToX(i + 0.5, vp, priceArea), yu: priceToY(u, vp, priceArea), yl: priceToY(l, vp, priceArea) });
+      }
+      if (fillPts.length >= 2) {
+        ctx.beginPath();
+        fillPts.forEach((pt, i) => { if (i === 0) ctx.moveTo(pt.x, pt.yu); else ctx.lineTo(pt.x, pt.yu); });
+        for (let i = fillPts.length - 1; i >= 0; i--) ctx.lineTo(fillPts[i].x, fillPts[i].yl);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(56,189,248,0.07)';
+        ctx.fill();
+      }
+      // Upper, mid, lower lines
+      const bbLineStyles = [
+        { arr: bb.upper, col: 'rgba(56,189,248,0.75)', w: 1.5 },
+        { arr: bb.mid,   col: 'rgba(240,185,11,0.65)', w: 1   },
+        { arr: bb.lower, col: 'rgba(56,189,248,0.75)', w: 1.5 },
+      ];
+      bbLineStyles.forEach(({ arr, col, w }) => {
+        ctx.beginPath(); ctx.strokeStyle = col; ctx.lineWidth = w; let s = false;
+        for (let i = startI; i <= endI; i++) {
+          const v = arr[i]; if (v === null) continue;
+          const x = idxToX(i + 0.5, vp, priceArea); const y = priceToY(v, vp, priceArea);
+          if (!s) { ctx.moveTo(x, y); s = true; } else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      });
+    }
+
     // ── MA lines (hidden when any indicator is active) ───────────────────
-    const anyIndicatorOn = indicators.coinDuckMABB || indicators.dwCloud;
+    const anyIndicatorOn = indicators.coinDuckMABB || indicators.dwCloud || !!indicators.bbOnly;
     if (!anyIndicatorOn) MA_DEFS.forEach(({ period, color }) => {
       const maArr = maArrays[period as 7 | 25 | 99];
       ctx.beginPath();
