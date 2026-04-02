@@ -404,6 +404,8 @@ function AppInner() {
     try { localStorage.setItem(uk('live-alt-order-registry'), JSON.stringify(liveAltOrderRegistry)); } catch {}
   }, [liveAltOrderRegistry]);
   const inFlightTPSLRef = useRef(new Set<string>());
+  /** BB MTF DCA rescue GTC order IDs keyed by liveKey — for automatic cancellation when position closes */
+  const liveRescueOrderIdsRef = useRef<Record<string, string[]>>({});
   const [timeStopRequests, setTimeStopRequests] = useState<Record<string, TimeStopRequestEntry>>({});
   const timeStopRequestsRef = useRef<Record<string, TimeStopRequestEntry>>(timeStopRequests);
   timeStopRequestsRef.current = timeStopRequests;
@@ -1657,10 +1659,17 @@ function AppInner() {
       params.candidateStatus === 'PENDING' &&
       params.triggerPriceAtNextClose != null;
     const effectiveEntryPrice = isTrendlinePending ? params.triggerPriceAtNextClose! : params.entryPrice;
+    // BB MTF DCA 동시 진입 시 마진 균등 분배: perEntryMargin = marginUsdt / batchSize
+    const bbMtfBatchSize = (params.strategyId === 'bb-mtf-dca' && (params.bbMtfScanBatchSize ?? 1) > 1)
+      ? (params.bbMtfScanBatchSize ?? 1)
+      : 1;
+    const effectiveMarginUsdt = params.marginUsdt != null
+      ? parseFloat((params.marginUsdt / bbMtfBatchSize).toFixed(4))
+      : undefined;
     let qty: number;
-    if (params.sizeMode === 'margin' && params.marginUsdt != null && params.marginUsdt > 0) {
-      // Margin mode: qty = marginUsdt * leverage / entryPrice
-      qty = parseFloat(((params.marginUsdt * leverage) / effectiveEntryPrice).toFixed(6));
+    if (params.sizeMode === 'margin' && effectiveMarginUsdt != null && effectiveMarginUsdt > 0) {
+      // Margin mode: qty = effectiveMarginUsdt * leverage / entryPrice
+      qty = parseFloat(((effectiveMarginUsdt * leverage) / effectiveEntryPrice).toFixed(6));
     } else {
       const riskAmount = balance * ((params.riskPct ?? 2) / 100);
       const slDistance = Math.abs(effectiveEntryPrice - params.slPrice);
@@ -1780,6 +1789,48 @@ function AppInner() {
     if (isTrendlinePending) {
       addLog('info', `[ALT모의] ${params.symbol} 조건부 진입 대기 — 다음 봉 종가 ${params.direction === 'long' ? '≥' : '≤'} ${limitPrice.toFixed(4)} 시 체결`);
     }
+
+    // ── BB MTF DCA 구출 주문 (물타기) ────────────────────────────────────
+    // Rescue limit orders placed immediately below the main entry.
+    // They fill automatically when price drops to each level (via checkPrices).
+    if (params.strategyId === 'bb-mtf-dca' && !isTrendlinePending &&
+        params.bbMtfRescueLevels && params.bbMtfRescueLevels.length > 0) {
+      let rescuePlaced = 0;
+      for (const rescuePrice of params.bbMtfRescueLevels) {
+        // Validate: rescue price must be above SL
+        if (rescuePrice <= 0 || rescuePrice <= params.slPrice) continue;
+        // Sizing: effectiveMarginUsdt (already divided by batchSize above) per rescue level
+        let rescueQty: number;
+        if (params.sizeMode === 'margin' && effectiveMarginUsdt != null && effectiveMarginUsdt > 0) {
+          rescueQty = parseFloat(((effectiveMarginUsdt * leverage) / rescuePrice).toFixed(6));
+        } else {
+          const riskAmount = balance * ((params.riskPct ?? 2) / 100) / bbMtfBatchSize;
+          const slDist = Math.abs(rescuePrice - params.slPrice);
+          rescueQty = slDist > 0
+            ? parseFloat((riskAmount / slDist).toFixed(6))
+            : parseFloat(((riskAmount * leverage) / rescuePrice).toFixed(6));
+        }
+        if (rescueQty <= 0) continue;
+        const rescueAltMeta: import('./types/paperTrading').AltMeta = {
+          ...altMeta,
+          rescueLevel: rescuePrice,
+        };
+        const rescuePlacedOk = paperTradingRef.current.placeLimitOrder(
+          params.symbol, side, rescueQty, rescuePrice,
+          leverage, marginType, false,
+          params.tpPrice, params.slPrice, rescueAltMeta, 'limit',
+        );
+        if (rescuePlacedOk) rescuePlaced++;
+      }
+      if (rescuePlaced > 0) {
+        const levels = params.bbMtfRescueLevels
+          .filter(p => p > params.slPrice)
+          .map(p => (p >= 1 ? p.toFixed(4) : p.toFixed(6)))
+          .join(' / ');
+        addLog('info', `[ALT모의/bb-mtf-dca] ${params.symbol} 구출 주문 ${rescuePlaced}개 등록 — ${levels}`);
+      }
+    }
+
     handleTickerSelect(params.symbol);
     setIsPaperMode(true);
     setShowAltScanner(false);
@@ -1996,6 +2047,8 @@ function AppInner() {
       // AND the full orderPlan is forwarded so the live executor can use zone-aware limit entry.
       failedAuctionExitLevel: isRetest ? c.orderPlan?.failedAuctionExitLevel : undefined,
       orderPlan: isRetest ? c.orderPlan : undefined,
+      bbMtfRescueLevels: c.strategyId === 'bb-mtf-dca' ? c.bbMtfRescueLevels : undefined,
+      bbMtfScanBatchSize: c.strategyId === 'bb-mtf-dca' ? (c.bbMtfScanBatchSize ?? 1) : undefined,
     };
     // All filters passed — log confirmed entry attempt and record for scan-done voice
     if (isRetest && c.orderPlan) {
@@ -2118,12 +2171,14 @@ function AppInner() {
       maxBudgetMultiplier: activeAutoTradeSettings.bbMtfMaxBudgetMultiplier,
       breachLookback1h: activeAutoTradeSettings.bbMtfBreachLookback1h,
       breachLookback15m: activeAutoTradeSettings.bbMtfBreachLookback15m,
+      tp1FixedPct: activeAutoTradeSettings.bbMtfTp1FixedPct,
+      tp2FixedPct: activeAutoTradeSettings.bbMtfTp2FixedPct,
     },
     breakoutDirection: activeAutoTradeSettings.breakoutDirection ?? 'both',
     minCandidateScore: activeAutoTradeSettings.minCandidateScore ?? (
       activeAutoTradeSettings.strategyId === 'leader-retest' ? 65 :
       activeAutoTradeSettings.strategyId === 'fvg-poc-ema72' ? 75 :
-      activeAutoTradeSettings.strategyId === 'bb-mtf-dca' ? 55 : 90
+      activeAutoTradeSettings.strategyId === 'bb-mtf-dca' ? 70 : 90
     ),
     breakoutMaxBarsAfterTrigger: activeAutoTradeSettings.breakoutMaxBarsAfterTrigger ?? 0,
     maxSpreadBps: activeAutoTradeSettings.maxSpreadBps ?? 4,
@@ -2132,6 +2187,14 @@ function AppInner() {
     retestCrowdingSnapshot,
     retestRegimeFilter: activeAutoTradeSettings.retestRegimeFilter ?? true,
     retestRegimeStrictness: activeAutoTradeSettings.retestRegimeStrictness ?? 'normal',
+    existingPositionCount: (() => {
+      // Count currently open positions for the active strategy to enforce concurrent limit
+      const sid = activeAutoTradeSettings.strategyId ?? 'breakout';
+      if (autoTradeMode === 'live') {
+        return Object.values(liveAltMetaMap).filter(m => m.strategyId === sid).length;
+      }
+      return paperTrading.positions.filter(p => p.altMeta?.strategyId === sid).length;
+    })(),
     sizingHint: (() => {
       if (activeAutoTradeSettings.sizeMode === 'margin') {
         const notionalUsd = (activeAutoTradeSettings.marginUsdt ?? 0) * (activeAutoTradeSettings.leverage ?? 1);
@@ -2636,15 +2699,23 @@ function AppInner() {
     const effectiveEntryPrice = isTrendlinePending ? params.triggerPriceAtNextClose! : params.entryPrice;
 
     // ── Quantity calculation: margin mode vs risk% mode ───────────────────
+    // BB MTF DCA 동시 진입 시 마진 균등 분배: perEntryMargin = marginUsdt / batchSize
+    const liveBbMtfBatchSize = (params.strategyId === 'bb-mtf-dca' && (params.bbMtfScanBatchSize ?? 1) > 1)
+      ? (params.bbMtfScanBatchSize ?? 1)
+      : 1;
+    const liveEffectiveMarginUsdt = params.marginUsdt != null
+      ? parseFloat((params.marginUsdt / liveBbMtfBatchSize).toFixed(4))
+      : undefined;
     let qty: number;
-    if (params.sizeMode === 'margin' && (params.marginUsdt ?? 0) > 0) {
-      if (params.marginUsdt! > balance) {
-        addLog('error', `[ALT실전] 잔고 부족: 필요 마진 $${params.marginUsdt} > 가용 잔고 $${balance.toFixed(2)} — 건너뜀`);
+    if (params.sizeMode === 'margin' && (liveEffectiveMarginUsdt ?? 0) > 0) {
+      if (liveEffectiveMarginUsdt! > balance) {
+        addLog('error', `[ALT실전] 잔고 부족: 필요 마진 $${liveEffectiveMarginUsdt}${liveBbMtfBatchSize > 1 ? ` (${params.marginUsdt}÷${liveBbMtfBatchSize})` : ''} > 가용 잔고 $${balance.toFixed(2)} — 건너뜀`);
+        liveInFlightRef.current.delete(liveKey);
         return;
       }
-      qty = parseFloat(((params.marginUsdt! * leverage) / effectiveEntryPrice).toFixed(6));
+      qty = parseFloat(((liveEffectiveMarginUsdt! * leverage) / effectiveEntryPrice).toFixed(6));
     } else {
-      const riskAmount = balance * ((params.riskPct ?? 2) / 100);
+      const riskAmount = balance * ((params.riskPct ?? 2) / 100) / liveBbMtfBatchSize;
       const slDistance = Math.abs(effectiveEntryPrice - params.slPrice);
       qty = slDistance > 0
         ? parseFloat((riskAmount / slDistance).toFixed(6))
@@ -2817,10 +2888,13 @@ function AppInner() {
       }
     } else if (params.strategyId === 'bb-mtf-dca') {
       const markNow = markPricesMapRef.current[params.symbol] ?? 0;
-      const limitPx = markNow > 0 ? markNow : effectiveEntryPrice;
+      const basePx  = markNow > 0 ? markNow : effectiveEntryPrice;
+      // +0.15% 슬리피지 버퍼: ask 스프레드 + 소폭 반등 커버
+      // 이 이상 올라갔으면 딥 타이밍 놓친 것으로 보고 IOC 자동 취소
+      const limitPx = basePx * 1.0015;
       liveOrderType = 'LIMIT_IOC';
       finalEntryPrice = limitPx;
-      addLog('info', `[ALT실전/bb-mtf-dca] ${params.symbol} LIMIT_IOC @ ${limitPx >= 1 ? limitPx.toFixed(4) : limitPx.toFixed(6)} (BB 하단 침범 딥 매수)`);
+      addLog('info', `[ALT실전/bb-mtf-dca] ${params.symbol} LIMIT_IOC @ ${limitPx >= 1 ? limitPx.toFixed(4) : limitPx.toFixed(6)} (mark ${basePx >= 1 ? basePx.toFixed(4) : basePx.toFixed(6)} +0.15% 버퍼)`);
     } else {
       liveOrderType = liveAutoTradeSettingsRef.current.liveEntryOrderType ?? 'MARKET';
     }
@@ -2940,6 +3014,49 @@ function AppInner() {
         if (opened) {
           addLog('order', `[ALT실전] 포지션 오픈 확인 — ${params.symbol} ${params.direction.toUpperCase()} ${Math.abs(opened.positionAmt)}`);
           announceAltEntry(params.symbol, params.direction, leverage, { mode: 'live', reservation: false, voiceEnabled });
+
+          // ── BB MTF DCA 구출 주문 (물타기) ──────────────────────────────
+          // Place GTC LIMIT orders at each rescue level. They fill automatically if price dips.
+          // Order IDs are tracked in liveRescueOrderIdsRef for automatic cancellation on close.
+          if (params.strategyId === 'bb-mtf-dca' &&
+              params.bbMtfRescueLevels && params.bbMtfRescueLevels.length > 0) {
+            const currentBalance = futuresBalanceRef.current;
+            for (const rescuePrice of params.bbMtfRescueLevels) {
+              if (rescuePrice <= 0 || rescuePrice <= params.slPrice) continue;
+              let rescueQty: number;
+              if (params.sizeMode === 'margin' && liveEffectiveMarginUsdt != null && liveEffectiveMarginUsdt > 0) {
+                rescueQty = parseFloat(((liveEffectiveMarginUsdt * leverage) / rescuePrice).toFixed(6));
+              } else {
+                rescueQty = parseFloat((qty * (params.entryPrice / rescuePrice)).toFixed(6));
+              }
+              if (rescueQty <= 0) continue;
+              // 마진 사전 체크: GTC 주문은 Binance가 즉시 마진 예약함
+              const rescueMargin = (rescueQty * rescuePrice) / leverage;
+              if (rescueMargin > currentBalance * 0.8) {
+                const rpFmt = rescuePrice >= 1 ? rescuePrice.toFixed(4) : rescuePrice.toFixed(6);
+                addLog('warn', `[ALT실전/bb-mtf-dca] ${params.symbol} 구출 주문 스킵 @ ${rpFmt} — 필요마진 $${rescueMargin.toFixed(2)} > 가용잔고의 80% (잔고 $${currentBalance.toFixed(2)}). 스캔당 진입 수를 1개로 유지하세요.`);
+                continue;
+              }
+              try {
+                await futuresPlaceOrder(
+                  side, rescuePrice, rescueQty, leverage, liveMarginType,
+                  false, params.symbol, 'GTC',
+                  {
+                    onAck: (ack) => {
+                      if (ack.orderId) {
+                        const cur = liveRescueOrderIdsRef.current[liveKey] ?? [];
+                        liveRescueOrderIdsRef.current[liveKey] = [...cur, ack.orderId];
+                      }
+                    },
+                  },
+                );
+                const rpFmt = rescuePrice >= 1 ? rescuePrice.toFixed(4) : rescuePrice.toFixed(6);
+                addLog('info', `[ALT실전/bb-mtf-dca] ${params.symbol} 구출 GTC @ ${rpFmt} (마진 $${rescueMargin.toFixed(2)})`);
+              } catch (re) {
+                addLog('warn', `[ALT실전/bb-mtf-dca] ${params.symbol} 구출 주문 실패: ${re instanceof Error ? re.message : String(re)}`);
+              }
+            }
+          }
           return;
         }
         const openOrder = ackOrderId
@@ -3857,7 +3974,17 @@ function AppInner() {
   }, [futuresAllPositions]);
 
   const cleanupAltOrphanOrders = useCallback(async (entry: LiveAltOrderRegistryEntry) => {
-    if (!entry.orders.length) {
+    // Also cancel BB MTF DCA rescue GTC orders tracked in liveRescueOrderIdsRef
+    const rescueIds = liveRescueOrderIdsRef.current[entry.symbol + '_long']
+      ?? liveRescueOrderIdsRef.current[entry.symbol + '_short']
+      ?? [];
+    const cancelRescueOnce = async () => {
+      for (const orderId of rescueIds) {
+        try { await futuresCancelOrder(orderId, entry.symbol); } catch { /* already filled or cancelled */ }
+      }
+    };
+
+    if (!entry.orders.length && !rescueIds.length) {
       futuresRemoveClientSL(entry.symbol, entry.positionSide);
       return;
     }
@@ -3874,11 +4001,16 @@ function AppInner() {
     };
 
     await cancelRefsOnce();
+    await cancelRescueOnce();
     futuresRemoveClientSL(entry.symbol, entry.positionSide);
     await new Promise(resolve => setTimeout(resolve, 1200));
     try { await futuresRefetch(); } catch {}
     await cancelRefsOnce();
+    await cancelRescueOnce();
     futuresRemoveClientSL(entry.symbol, entry.positionSide);
+    // Clear tracked rescue order IDs after cleanup
+    delete liveRescueOrderIdsRef.current[entry.symbol + '_long'];
+    delete liveRescueOrderIdsRef.current[entry.symbol + '_short'];
   }, [futuresCancelOrder, futuresRemoveClientSL, futuresRefetch]);
 
   const enrichLiveHistoryRowFromTrades = useCallback(async (
@@ -5139,6 +5271,8 @@ function AppInner() {
             maxBudgetMultiplier: activeAutoTradeSettings.bbMtfMaxBudgetMultiplier,
             breachLookback1h: activeAutoTradeSettings.bbMtfBreachLookback1h,
             breachLookback15m: activeAutoTradeSettings.bbMtfBreachLookback15m,
+            tp1FixedPct: activeAutoTradeSettings.bbMtfTp1FixedPct,
+            tp2FixedPct: activeAutoTradeSettings.bbMtfTp2FixedPct,
           }}
         />
       )}

@@ -114,6 +114,12 @@ export interface ScanCandidate {
   bbMtfRescueLevels?: number[];
   /** Maximum budget multiplier (e.g. 3.10 = 3.1× initial notional) */
   bbMtfMaxBudgetMultiplier?: number;
+  /**
+   * How many BB MTF DCA candidates are being entered in this scan run (including this one).
+   * Used by the trade handler to divide marginUsdt equally: perEntryMargin = marginUsdt / bbMtfScanBatchSize.
+   * Undefined = treat as 1 (full margin).
+   */
+  bbMtfScanBatchSize?: number;
 }
 
 // ── Utilities ──────────────────────────────────────────────────────────────

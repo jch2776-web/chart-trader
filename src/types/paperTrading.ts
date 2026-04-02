@@ -47,6 +47,10 @@ export interface AltMeta {
   isGtcLimitEntry?: boolean;
   // Leader-retest: time at which the GTC entry order should be cancelled if unfilled
   gtcEntryExpiresAt?: number;
+  // BB MTF DCA rescue (물타기): if set, this entry is a rescue at the given price level
+  rescueLevel?: number;
+  // BB MTF DCA: rescue price levels computed at scan time (stored on main position)
+  bbMtfRescueLevels?: number[];
 }
 
 export interface PaperPosition {

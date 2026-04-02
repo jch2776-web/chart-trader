@@ -3,10 +3,12 @@
  *
  * Entry conditions (LONG only):
  *   1. Any of last breachLookback1h (default 3) 1h bars closed below 1h BB lower
+ *      AND the most recent 1h bar is still within 0.5% of 1h BB lower (not recovered)
+ *   1b. 4h trend filter: 4h close must be above 4h MA50×(1−maxMaDropPct) (no 4h downtrend)
  *   2. Last closed 15m bar is below 15m BB lower
- *   3. Fresh-breach guard: within the previous breachLookback15m (default 4) 15m bars,
- *      at least ONE bar was still ABOVE the 15m BB lower.
- *      → prevents buying into coins already stuck below BB for many bars
+ *   3. Fresh-breach guard: the bar immediately before the last (n15-2) must have
+ *      closed ABOVE the 15m BB lower — i.e., the breach just started this bar.
+ *      → prevents buying into coins already stuck below BB for multiple bars
  *   4. Knife-catching gate: close > MA(maPeriod) × (1 − maxMaDropPct)
  *      → prevents entering free-fall (>maxMaDropPct% below MA)
  *
@@ -23,7 +25,7 @@
  */
 
 import type { Candle } from '../../../types/candle';
-import type { HlineDrawing, BoxDrawing, BoxCorner, Drawing } from '../../../types/drawing';
+import type { HlineDrawing, BoxDrawing, Drawing } from '../../../types/drawing';
 import type {
   ScanCandidate, ScanInterval, ScanDirection, ScanOptions,
   DrawingGroups, CandidateStatus,
@@ -80,6 +82,16 @@ export interface BbMtfOptions {
    * Default 3.10 — shown in UI; actual enforcement in auto-trade hook.
    */
   maxBudgetMultiplier?: number;
+  /**
+   * TP1 fixed profit % from entry (default 1.2).
+   * TP1 = min(BB middle, entry × (1 + tp1FixedPct/100)) — whichever is closer.
+   */
+  tp1FixedPct?: number;
+  /**
+   * TP2 fixed profit % from entry (default 2.5).
+   * TP2 = entry × (1 + tp2FixedPct/100).
+   */
+  tp2FixedPct?: number;
 }
 
 const DEFAULT_BB_MTF_OPTIONS: Required<BbMtfOptions> = {
@@ -91,10 +103,12 @@ const DEFAULT_BB_MTF_OPTIONS: Required<BbMtfOptions> = {
   minM15BreachFrac: 0.0005,
   breachLookback1h: 3,
   breachLookback15m: 4,
-  slAtr: 1.5,
+  slAtr: 2.0,          // 2.0×ATR — 기존 1.5는 15m 변동성에 너무 타이트했음
   rescueCount: 2,
-  rescueSpacingAtr: 1.0,
+  rescueSpacingAtr: 0.7, // 구출1=0.7×ATR, 구출2=1.4×ATR — 모두 SL(2.0×ATR) 위
   maxBudgetMultiplier: 3.10,
+  tp1FixedPct: 1.2,
+  tp2FixedPct: 2.5,
 };
 
 // ── Utilities ────────────────────────────────────────────────────────────────
@@ -157,7 +171,8 @@ function buildBbMtfDrawings(
   sl: number,
   tp1: number,
   tp2: number,
-  atr: number,
+  tp1FixedPct: number,
+  tp2FixedPct: number,
   bb15m: BbBands,
   bb1h: BbBands,
   rescueLevels: number[],
@@ -215,7 +230,7 @@ function buildBbMtfDrawings(
     {
       id: uid(), type: 'hline', ticker: symbol, price: tp1,
       color: '#0ecb81',
-      memo: `✔ TP ${fmt(tp1)} · BB중심 복귀`,
+      memo: `✔ TP1 ${fmt(tp1)} · ${tp1 < bb15m.middle ? `+${tp1FixedPct}% 고정` : 'BB중심 복귀'}`,
     } satisfies HlineDrawing,
     {
       id: uid(), type: 'hline', ticker: symbol, price: sl,
@@ -234,7 +249,7 @@ function buildBbMtfDrawings(
     {
       id: uid(), type: 'hline', ticker: symbol, price: tp2,
       color: '#00b4a0',
-      memo: `TP2(2R) ${fmt(tp2)}`,
+      memo: `TP2 ${fmt(tp2)} · +${tp2FixedPct}% 고정`,
     } satisfies HlineDrawing,
     ...rescueLevels.map((level, i) => ({
       id: uid(), type: 'hline', ticker: symbol, price: level,
@@ -291,6 +306,22 @@ async function scanSymbolBbMtf(
   const h1BestBreach = Math.max(0, ...h1Window.map(c => bb1h.lower - c.close));
   if (h1BestBreach < bb1h.lower * opts.minH1BreachFrac) return null;
 
+  // 1h 현재봉 체크: 가장 최근 1h 봉이 아직 BB 하단 근처에 있어야 함 (0.5% 이내)
+  // → 이미 1h에서 크게 회복한 경우(침범이 오래 전) 진입 차단
+  const lastH1 = closedH1[nH1 - 1];
+  if (lastH1.close > bb1h.lower * 1.005) return null;
+
+  // ── 4h 추세 필터: 4h 종가가 4h MA(maPeriod) 아래이면 하락 추세로 판단, 진입 차단 ──
+  const iMs4h = intervalToMs('4h');
+  const raw4h = await fetchBinanceKlinesCached(symbol, '4h', opts.maPeriod + 5, signal);
+  if (raw4h.length >= opts.maPeriod) {
+    const closed4h = closedOnly(raw4h, iMs4h);
+    if (closed4h.length >= opts.maPeriod) {
+      const ma4h = calcSMA(closed4h, opts.maPeriod);
+      if (ma4h > 0 && closed4h[closed4h.length - 1].close < ma4h * (1 - opts.maxMaDropPct)) return null;
+    }
+  }
+
   // ── 15m 캔들 ─────────────────────────────────────────────────────────────────
   // maPeriod + bbPeriod + lookback 여유 확보
   const m15Limit = opts.maPeriod + opts.bbPeriod + opts.breachLookback15m + 10;
@@ -310,14 +341,11 @@ async function scanSymbolBbMtf(
   const m15BreachDepth = bb15m.lower - lastM15.close; // 양수 = 하단 아래
   if (m15BreachDepth < bb15m.lower * opts.minM15BreachFrac) return null;
 
-  // 신선한 침범 확인: 최근 breachLookback15m 봉(현재 제외) 중 하나 이상이 BB 하단 위에 있었어야 함
-  // → 오래 전부터 BB 하단 아래에 갇혀있는 코인 제외
-  const freshWindow = closedM15.slice(
-    Math.max(0, n15 - 1 - opts.breachLookback15m),
-    n15 - 1,
-  );
-  const wasFreshAbove = freshWindow.some(c => c.close >= bb15m.lower);
-  if (!wasFreshAbove) return null;
+  // 신선한 침범 확인: 바로 직전 15m 봉(n15-2)이 BB 하단 위에 있어야 함
+  // → 이번 봉에서 막 침범 시작 = 신선한 시그널
+  // → 이미 여러 봉 전부터 하단 아래에 갇혀있는 경우 차단
+  const prevM15 = closedM15[n15 - 2];
+  if (!prevM15 || prevM15.close < bb15m.lower) return null;
 
   // 낙도 방지 게이트: MA 기준 maxMaDropPct 이상 하락하면 자유낙하로 판단 후 제외
   const ma15m = calcSMA(closedM15, opts.maPeriod);
@@ -331,9 +359,12 @@ async function scanSymbolBbMtf(
   // ── Entry / SL / TP ──────────────────────────────────────────────────────────
   const entryPrice = lastM15.close;
   const sl  = entryPrice - opts.slAtr * atr;
-  const R   = entryPrice - sl;
-  const tp1 = bb15m.middle; // mean reversion 1차 목표
-  const tp2 = entryPrice + 2 * R;
+  // TP1: BB 중심선 또는 +tp1FixedPct% 중 더 가까운 쪽
+  const tp1BbMiddle = bb15m.middle;
+  const tp1Fixed    = entryPrice * (1 + opts.tp1FixedPct / 100);
+  const tp1 = Math.min(tp1BbMiddle, tp1Fixed); // 먼저 닿는 목표
+  // TP2: +tp2FixedPct% 고정 수익
+  const tp2 = entryPrice * (1 + opts.tp2FixedPct / 100);
 
   // 점수: 두 타임프레임 침범 깊이의 합산 (40~100점)
   const h1BreachPct  = (h1BestBreach / bb1h.lower) * 100;
@@ -371,7 +402,8 @@ async function scanSymbolBbMtf(
   const triggerAtNext  = triggerPrice(triggerSpec, nextCloseTime);
 
   const drawingGroups = buildBbMtfDrawings(
-    symbol, entryPrice, sl, tp1, tp2, atr,
+    symbol, entryPrice, sl, tp1, tp2,
+    opts.tp1FixedPct, opts.tp2FixedPct,
     bb15m, bb1h, rescueLevels, closedM15,
     lastM15.high, lastM15.low,
   );

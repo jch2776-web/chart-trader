@@ -148,6 +148,7 @@ export function useAltAutoTrade({
   retestCrowdingSnapshot,
   retestRegimeFilter,
   retestRegimeStrictness,
+  existingPositionCount,
 }: {
   symbols: string[];
   onEnterTrade: (candidate: ScanCandidate) => void;
@@ -215,6 +216,12 @@ export function useAltAutoTrade({
    * 'strict' = neutral +5, chop +10.
    */
   retestRegimeStrictness?: RegimeStrictness;
+  /**
+   * Number of positions already open for this strategy.
+   * Pre-seeds totalEntered so maxAutoPositionsPerScan acts as a CONCURRENT limit
+   * across scan runs, not just within a single run.
+   */
+  existingPositionCount?: number;
 }) {
   const [isActive, setIsActiveState] = useState<boolean>(() => {
     try { return localStorage.getItem(AUTO_TRADE_KEY) === 'true'; } catch { return false; }
@@ -235,6 +242,7 @@ export function useAltAutoTrade({
   const scanIntervalsRef          = useRef(scanIntervals ?? DEFAULT_SCAN_INTERVALS);
   const cadenceRef                = useRef(normalizeCadenceMinutes(cadenceMinutes));
   const maxAutoPositionsRef       = useRef(maxAutoPositionsPerScan ?? 0); // 0 = unlimited
+  const existingPositionCountRef  = useRef(existingPositionCount ?? 0);
   const scanningRef               = useRef(false);
   const lastRunSlotRef            = useRef<number>(-1);
   const strategyIdRef             = useRef(strategyId ?? 'breakout');
@@ -263,6 +271,7 @@ export function useAltAutoTrade({
   scanIntervalsRef.current        = scanIntervals && scanIntervals.length > 0 ? scanIntervals : DEFAULT_SCAN_INTERVALS;
   cadenceRef.current              = normalizeCadenceMinutes(cadenceMinutes);
   maxAutoPositionsRef.current     = maxAutoPositionsPerScan ?? 0;
+  existingPositionCountRef.current = existingPositionCount ?? 0;
   strategyIdRef.current           = strategyId ?? 'breakout';
   retestOptionsRef.current        = retestOptions;
   retestAutoDirectionRef.current  = retestAutoDirection ?? 'long';
@@ -357,7 +366,8 @@ export function useAltAutoTrade({
       addLog(`🚀 수동 스캔 시작 — ${syms.length}개 심볼 × ${numTf}개 타임프레임(${dueIntervals.join(',')}) (예상 약 ${estTotalSec}초)`, 'success');
     }
 
-    let totalEntered = 0;
+    // Pre-seed with already-open positions so maxAutoPositionsPerScan is a CONCURRENT limit
+    let totalEntered = existingPositionCountRef.current;
     let firstCandidateReadyAt: number | null = null;
     // Deduplicate across timeframes: each symbol+direction is entered at most once per run
     const enteredThisRun = new Set<string>();
@@ -556,7 +566,14 @@ export function useAltAutoTrade({
       // Declared here, emitted below.
       let actualEnteredCount = 0;
 
+      const isBbMtfStrategy = strategyIdRef.current === 'bb-mtf-dca';
       const maxPositions = maxAutoPositionsRef.current;
+      // BB MTF DCA: 동시 진입 수를 미리 계산해 마진을 균등 분배
+      // perEntryMargin = marginUsdt / bbMtfScanBatchSize (trade handler에서 사용)
+      const remainingSlots = maxPositions > 0 ? Math.max(0, maxPositions - totalEntered) : qualified.length;
+      const bbMtfScanBatchSize = isBbMtfStrategy
+        ? Math.min(qualified.length, remainingSlots > 0 ? remainingSlots : qualified.length)
+        : 1;
       for (const c of qualified) {
         if (maxPositions > 0 && totalEntered >= maxPositions) {
           addLog(`⛔ [${interval}] 최대 진입 수(${maxPositions}) 도달 — ${c.symbol} 건너뜀`, 'warn');
@@ -734,7 +751,12 @@ export function useAltAutoTrade({
           );
         }
         actualEnteredCount++;
-        onEnterRef.current({ ...c, scanMode: mode, scanStartTime: startTime });
+        onEnterRef.current({
+          ...c,
+          scanMode: mode,
+          scanStartTime: startTime,
+          ...(isBbMtfStrategy ? { bbMtfScanBatchSize } : {}),
+        });
         enteredThisRun.add(key);
         totalEntered++;
         if (firstCandidateReadyAt == null) {

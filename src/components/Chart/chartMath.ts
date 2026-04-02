@@ -27,6 +27,7 @@ export interface ChartArea {
 export interface ChartAreas {
   price: ChartArea;
   volume: ChartArea;
+  rsi: ChartArea;
 }
 
 /** Backward-compat: full data area (price + volume + gap) */
@@ -39,17 +40,21 @@ export function getChartArea(layout: ChartLayout): ChartArea {
   };
 }
 
-/** Split into price + volume sub-areas */
+/** Split into price + volume + RSI sub-areas */
 export function getChartAreas(layout: ChartLayout): ChartAreas {
   const ax = layout.paddingLeft;
   const aw = layout.width - layout.paddingLeft - layout.paddingRight;
   const totalH = layout.height - layout.paddingTop - layout.paddingBottom;
-  const volumeH = Math.max(36, Math.round(totalH * 0.15));
   const gap = 4;
-  const priceH = totalH - volumeH - gap;
+  const volumeH = Math.max(28, Math.round(totalH * 0.11));
+  const rsiH    = Math.max(44, Math.round(totalH * 0.13));
+  const priceH  = totalH - volumeH - rsiH - gap * 2;
+  const volY    = layout.paddingTop + priceH + gap;
+  const rsiY    = volY + volumeH + gap;
   return {
-    price:  { x: ax, y: layout.paddingTop,              w: aw, h: priceH },
-    volume: { x: ax, y: layout.paddingTop + priceH + gap, w: aw, h: volumeH },
+    price:  { x: ax, y: layout.paddingTop, w: aw, h: priceH },
+    volume: { x: ax, y: volY,              w: aw, h: volumeH },
+    rsi:    { x: ax, y: rsiY,              w: aw, h: rsiH },
   };
 }
 

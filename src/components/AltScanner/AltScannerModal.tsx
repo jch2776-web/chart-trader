@@ -64,6 +64,10 @@ export interface AltTradeParams {
   failedAuctionExitLevel?: number;
   // Leader-retest: full execution blueprint — used for zone-aware limit entry in live mode
   orderPlan?: OrderPlan;
+  // BB MTF DCA: rescue (물타기) price levels — limit orders placed here on position open
+  bbMtfRescueLevels?: number[];
+  // BB MTF DCA: total number of symbols entering this scan run — marginUsdt is divided by this
+  bbMtfScanBatchSize?: number;
 }
 
 interface AutoEntryHints {

@@ -100,10 +100,34 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
       const actualCost = parseFloat((margin + actualFee).toFixed(8));
 
       // If same symbol + same side already open → average into existing position (물타기)
-      // Exception: altMeta positions must never be water-averaged — each alt entry is independent.
-      // If either the existing position or the incoming fill has altMeta, reject the fill silently.
+      // Exception: regular alt entries must NOT average — each signal is independent.
+      // Exception to the exception: BB MTF DCA rescue fills (altMeta.rescueLevel set) ARE allowed to average.
       const existing = prev.positions.find(p => p.symbol === symbol && p.positionSide === side);
-      if (existing && (existing.altMeta || altMeta)) return prev; // block water-avg for alt positions
+      const isRescueFill = altMeta?.rescueLevel !== undefined;
+      if (existing && (existing.altMeta || altMeta) && !isRescueFill) return prev; // block water-avg for non-rescue alt positions
+      // Rescue fill: average into existing position, keep original position's altMeta and TP/SL
+      if (existing && isRescueFill) {
+        const existingQty = Math.abs(existing.positionAmt);
+        const newTotalQty = parseFloat((existingQty + qty).toFixed(8));
+        const avgEntryPrice = parseFloat(
+          ((existingQty * existing.entryPrice + qty * price) / newTotalQty).toFixed(8)
+        );
+        return {
+          ...prev,
+          balance: parseFloat((prev.balance - actualCost).toFixed(8)),
+          positions: prev.positions.map(p => p.id !== existing.id ? p : {
+            ...p,
+            positionAmt: parseFloat((side === 'LONG' ? newTotalQty : -newTotalQty).toFixed(8)),
+            entryPrice: avgEntryPrice,
+            isolatedMargin: parseFloat((existing.isolatedMargin + margin).toFixed(8)),
+            entryFee: parseFloat((existing.entryFee + actualFee).toFixed(8)),
+            // Keep original TP/SL — rescue doesn't change exit targets
+            tpPrice: existing.tpPrice,
+            slPrice: existing.slPrice,
+            altMeta: existing.altMeta, // keep original signal meta
+          }),
+        };
+      }
       if (existing) {
         const existingQty = Math.abs(existing.positionAmt);
         const newTotalQty = existingQty + qty;
@@ -196,9 +220,14 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
       // Cancel any orphaned reduce-only orders whose parent position is now closing
       // (e.g. manual close-limit orders placed against this position become orphans)
       const closeSide = pos.positionSide === 'LONG' ? 'SELL' : 'BUY';
-      const cleanedOrders = prev.orders.filter(
-        o => !(o.symbol === pos.symbol && o.reduceOnly && o.side === closeSide),
-      );
+      const cleanedOrders = prev.orders.filter(o => {
+        if (o.symbol === pos.symbol && o.reduceOnly && o.side === closeSide) return false;
+        // Cancel BB MTF DCA rescue orders linked to this closing position
+        if (o.symbol === pos.symbol && o.altMeta?.rescueLevel !== undefined) {
+          if (!pos.altMeta?.candidateId || o.altMeta.candidateId === pos.altMeta.candidateId) return false;
+        }
+        return true;
+      });
       return {
         ...prev,
         balance: parseFloat((prev.balance + Math.max(0, returned)).toFixed(8)),
@@ -337,9 +366,17 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
     // Pre-check with stateRef (latest rendered state) for a fast synchronous return value.
     if (altMeta) {
       const posSide = side === 'BUY' ? 'LONG' : 'SHORT';
-      const dupOrder = stateRef.current.orders.find(o => o.symbol === symbol && o.side === side && o.altMeta);
-      const dupPos   = stateRef.current.positions.find(p => p.symbol === symbol && p.positionSide === posSide && p.altMeta);
-      if (dupOrder || dupPos) return false;
+      const isRescue = altMeta.rescueLevel !== undefined;
+      if (!isRescue) {
+        // Normal alt order: block if any alt order/position exists for this symbol+side
+        const dupOrder = stateRef.current.orders.find(o => o.symbol === symbol && o.side === side && o.altMeta && o.altMeta.rescueLevel === undefined);
+        const dupPos   = stateRef.current.positions.find(p => p.symbol === symbol && p.positionSide === posSide && p.altMeta);
+        if (dupOrder || dupPos) return false;
+      } else {
+        // Rescue order: only block if same rescue level already queued
+        const dupRescue = stateRef.current.orders.find(o => o.symbol === symbol && o.side === side && o.altMeta?.rescueLevel === altMeta.rescueLevel);
+        if (dupRescue) return false;
+      }
     }
     const order: PaperOrder = {
       id: uid(), symbol, side, qty, limitPrice, triggerType, leverage, marginType, reduceOnly,
@@ -349,9 +386,15 @@ export function usePaperTrading(storageKey: string, onAutoClose?: (reason: 'tp' 
       // Secondary guard inside setState (covers rapid concurrent calls within same render cycle).
       if (altMeta) {
         const posSide = side === 'BUY' ? 'LONG' : 'SHORT';
-        const dupOrder = prev.orders.find(o => o.symbol === symbol && o.side === side && o.altMeta);
-        const dupPos   = prev.positions.find(p => p.symbol === symbol && p.positionSide === posSide && p.altMeta);
-        if (dupOrder || dupPos) return prev;
+        const isRescue = altMeta.rescueLevel !== undefined;
+        if (!isRescue) {
+          const dupOrder = prev.orders.find(o => o.symbol === symbol && o.side === side && o.altMeta && o.altMeta.rescueLevel === undefined);
+          const dupPos   = prev.positions.find(p => p.symbol === symbol && p.positionSide === posSide && p.altMeta);
+          if (dupOrder || dupPos) return prev;
+        } else {
+          const dupRescue = prev.orders.find(o => o.symbol === symbol && o.side === side && o.altMeta?.rescueLevel === altMeta.rescueLevel);
+          if (dupRescue) return prev;
+        }
       }
       return { ...prev, orders: [...prev.orders, order] };
     });

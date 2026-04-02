@@ -164,6 +164,8 @@ export interface AutoTradeSettings {
   bbMtfMaxBudgetMultiplier?: number; // max total budget multiplier (default 3.10)
   bbMtfBreachLookback1h?: number;    // how many recent 1h bars to check for breach (default 3)
   bbMtfBreachLookback15m?: number;   // fresh-breach guard window in 15m bars (default 4)
+  bbMtfTp1FixedPct?: number;         // TP1 fixed profit % (default 1.2); actual = min(BB middle, entry×(1+pct/100))
+  bbMtfTp2FixedPct?: number;         // TP2 fixed profit % (default 2.5); entry×(1+pct/100)
   // Risk gates (lab-compatible)
   maxSpreadBps?: number;             // leader-retest: block when bid-ask spread > N bps (0 = disable, default 4)
   maxRiskPct?: number;               // leader-retest: block when |entry-SL|/entry > N% (0 = disable, default 2.5)
@@ -332,46 +334,95 @@ function SettingsEditor({
       </div>
 
       {/* Size mode */}
-      <div style={s.fieldRow}>
-        <label style={s.label}>사이즈 방식</label>
-        <div style={{ display: 'flex', gap: 6 }}>
-          <button
-            style={{ ...s.toggleChip, ...(draft.sizeMode === 'margin' ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
-            onClick={() => set('sizeMode', 'margin')}
-          >
-            고정 마진 (USDT)
-          </button>
-          <button
-            style={{ ...s.toggleChip, ...(draft.sizeMode === 'risk' ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
-            onClick={() => set('sizeMode', 'risk')}
-          >
-            잔고 비율 (%)
-          </button>
-        </div>
-      </div>
-
-      {/* Margin USDT */}
-      {draft.sizeMode === 'margin' && (
+      {isBbMtf ? (
         <div style={s.fieldRow}>
-          <label style={s.label}>마진 크기</label>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <input
-              type="number"
-              min={1} max={100000} step={1}
-              value={draft.marginUsdt}
-              onChange={e => set('marginUsdt', Math.max(1, parseFloat(e.target.value) || 1))}
-              style={s.numberInput}
-            />
-            <span style={s.unit}>USDT</span>
-          </div>
-          <span style={s.hint}>
-            진입 포지션 크기 = {draft.marginUsdt} × {draft.leverage} = {draft.marginUsdt * draft.leverage} USDT
+          <label style={s.label}>사이즈 방식</label>
+          <span style={{ padding: '3px 10px', borderRadius: 4, fontSize: '0.78rem',
+            background: 'rgba(59,139,235,0.15)', color: '#3b8beb',
+            border: '1px solid rgba(59,139,235,0.35)' }}>
+            마진$ 고정
           </span>
+          <span style={s.hint}>BB MTF DCA는 마진$ 고정 방식만 사용합니다 (rescue 주문 크기 계산 필요)</span>
+        </div>
+      ) : (
+        <div style={s.fieldRow}>
+          <label style={s.label}>사이즈 방식</label>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button
+              style={{ ...s.toggleChip, ...(draft.sizeMode === 'margin' ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
+              onClick={() => set('sizeMode', 'margin')}
+            >
+              고정 마진 (USDT)
+            </button>
+            <button
+              style={{ ...s.toggleChip, ...(draft.sizeMode === 'risk' ? (isLive ? s.toggleChipActiveLive : s.toggleChipActive) : {}) }}
+              onClick={() => set('sizeMode', 'risk')}
+            >
+              잔고 비율 (%)
+            </button>
+          </div>
         </div>
       )}
 
+      {/* Margin USDT */}
+      {(isBbMtf || draft.sizeMode === 'margin') && (() => {
+        const n = Math.max(1, draft.maxAutoPositionsPerScan ?? 1);
+        const perSymbol = draft.marginUsdt / n;
+        if (isBbMtf) {
+          // For BB MTF DCA, marginUsdt = total budget; per-symbol = total / N
+          // Changing total → N auto-adjusts to keep per-symbol constant
+          // Changing N (below) → total auto-adjusts to keep per-symbol constant
+          return (
+            <div style={s.fieldRow}>
+              <label style={s.label}>총 마진 예산</label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <input
+                  type="number"
+                  min={1} max={100000} step={1}
+                  value={draft.marginUsdt}
+                  onChange={e => {
+                    const newTotal = Math.max(1, parseFloat(e.target.value) || 1);
+                    const newN = Math.max(1, Math.min(10, Math.round(newTotal / perSymbol)));
+                    set('marginUsdt', newTotal);
+                    set('maxAutoPositionsPerScan', newN);
+                  }}
+                  style={s.numberInput}
+                />
+                <span style={s.unit}>USDT</span>
+                <span style={{ fontSize: '0.72rem', color: '#9aa4b5' }}>÷</span>
+                <span style={{ fontSize: '0.78rem', color: '#38bdf8', fontWeight: 700 }}>{n}개</span>
+                <span style={{ fontSize: '0.72rem', color: '#9aa4b5' }}>=</span>
+                <span style={{ fontSize: '0.82rem', color: '#0ecb81', fontWeight: 700 }}>{perSymbol.toFixed(1)} USDT</span>
+                <span style={{ fontSize: '0.7rem', color: '#5e6673' }}>/ 심볼</span>
+              </div>
+              <span style={s.hint}>
+                심볼당 {perSymbol.toFixed(1)} × {draft.leverage}배 = {(perSymbol * draft.leverage).toFixed(1)} USDT 포지션 · 총 예산 변경 시 동시 진입 수 자동 재계산
+              </span>
+            </div>
+          );
+        }
+        return (
+          <div style={s.fieldRow}>
+            <label style={s.label}>마진 크기</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <input
+                type="number"
+                min={1} max={100000} step={1}
+                value={draft.marginUsdt}
+                onChange={e => set('marginUsdt', Math.max(1, parseFloat(e.target.value) || 1))}
+                style={s.numberInput}
+              />
+              <span style={s.unit}>USDT</span>
+            </div>
+            <span style={s.hint}>
+              진입 포지션 크기 = {draft.marginUsdt} × {draft.leverage} = {draft.marginUsdt * draft.leverage} USDT
+            </span>
+          </div>
+        );
+      })()}
+
       {/* Risk pct */}
-      {draft.sizeMode === 'risk' && (
+      {!isBbMtf && draft.sizeMode === 'risk' && (
         <div style={s.fieldRow}>
           <label style={s.label}>리스크 비율</label>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -451,18 +502,32 @@ function SettingsEditor({
 
       {/* Max auto positions per scan */}
       <div style={s.fieldRow}>
-        <label style={s.label}>최대 스캔 진입 수</label>
+        <label style={s.label}>{isBbMtf ? '동시 진입 수' : '최대 스캔 진입 수'}</label>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <input
             type="number"
             min={1} max={10} step={1}
             value={draft.maxAutoPositionsPerScan ?? 1}
-            onChange={e => set('maxAutoPositionsPerScan', Math.max(1, Math.min(10, parseInt(e.target.value) || 1)))}
+            onChange={e => {
+              const newN = Math.max(1, Math.min(10, parseInt(e.target.value) || 1));
+              if (isBbMtf) {
+                // Keep per-symbol constant: total = perSymbol × newN
+                const perSymbol = draft.marginUsdt / Math.max(1, draft.maxAutoPositionsPerScan ?? 1);
+                set('maxAutoPositionsPerScan', newN);
+                set('marginUsdt', Math.max(1, Math.round(perSymbol * newN)));
+              } else {
+                set('maxAutoPositionsPerScan', newN);
+              }
+            }}
             style={s.numberInput}
           />
           <span style={s.unit}>개</span>
         </div>
-        <span style={s.hint}>한 번의 스캔 사이클에서 자동 진입 허용 수 (전체 TF 합산, 기본 1)</span>
+        <span style={s.hint}>
+          {isBbMtf
+            ? <>동시 진입 수를 변경하면 <strong>총 마진 예산</strong>이 자동 재계산됩니다 (심볼당 마진 고정). 예) 심볼당 $33 · 4개 → 총 $132</>
+            : '한 번의 스캔 사이클에서 자동 진입 허용 수 (전체 TF 합산, 기본 1).'}
+        </span>
       </div>
 
       {/* Chase-entry prevention — shown for breakout & FVG; hidden for leader-retest & bb-mtf-dca (not applicable) */}
@@ -607,7 +672,10 @@ function SettingsEditor({
                 set('strategyId', sid);
                 if (sid === 'leader-retest') set('minCandidateScore', 65);
                 if (sid === 'fvg-poc-ema72') set('minCandidateScore', 75);
-                if (sid === 'bb-mtf-dca') set('minCandidateScore', 55);
+                if (sid === 'bb-mtf-dca') {
+                  set('minCandidateScore', 70);
+                  // maxAutoPositionsPerScan은 강제하지 않음 — 마진을 동시 진입 수로 균등 분배
+                }
                 if (sid === 'breakout') {
                   set('minCandidateScore', 90);
                   // 실험실 기본값과 동일하게 맞춤 (0 = 비활성)
@@ -898,8 +966,8 @@ function SettingsEditor({
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>SL ATR배수</span>
               <input type="number" min={0.5} max={4.0} step={0.1}
-                value={draft.bbMtfSlAtr ?? 1.5}
-                onChange={e => set('bbMtfSlAtr', Math.max(0.5, Math.min(4.0, parseFloat(e.target.value) || 1.5)))}
+                value={draft.bbMtfSlAtr ?? 2.0}
+                onChange={e => set('bbMtfSlAtr', Math.max(0.5, Math.min(4.0, parseFloat(e.target.value) || 2.0)))}
                 style={{ ...s.numberInput, width: 52 }} />
               <span style={s.unit}>×</span>
             </div>
@@ -914,8 +982,8 @@ function SettingsEditor({
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>구출 간격</span>
               <input type="number" min={0.5} max={3.0} step={0.1}
-                value={draft.bbMtfRescueSpacingAtr ?? 1.0}
-                onChange={e => set('bbMtfRescueSpacingAtr', Math.max(0.5, Math.min(3.0, parseFloat(e.target.value) || 1.0)))}
+                value={draft.bbMtfRescueSpacingAtr ?? 0.7}
+                onChange={e => set('bbMtfRescueSpacingAtr', Math.max(0.3, Math.min(3.0, parseFloat(e.target.value) || 0.7)))}
                 style={{ ...s.numberInput, width: 52 }} />
               <span style={s.unit}>ATR</span>
             </div>
@@ -936,8 +1004,35 @@ function SettingsEditor({
               <span style={s.unit}>봉</span>
             </div>
           </div>
+          {/* TP 고정 % */}
+          <div style={{ display: 'flex', flexWrap: 'wrap' as const, gap: '8px 16px', borderTop: '1px solid rgba(155,89,182,0.18)', paddingTop: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>TP1 고정 %</span>
+              <input type="number" min={0.5} max={5.0} step={0.1}
+                value={draft.bbMtfTp1FixedPct ?? 1.2}
+                onChange={e => set('bbMtfTp1FixedPct', Math.max(0.5, Math.min(5.0, parseFloat(e.target.value) || 1.2)))}
+                style={{ ...s.numberInput, width: 52 }} />
+              <span style={s.unit}>%</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: '0.74rem', color: '#9aa4b5', whiteSpace: 'nowrap' as const }}>TP2 고정 %</span>
+              <input type="number" min={1.0} max={10.0} step={0.1}
+                value={draft.bbMtfTp2FixedPct ?? 2.5}
+                onChange={e => set('bbMtfTp2FixedPct', Math.max(1.0, Math.min(10.0, parseFloat(e.target.value) || 2.5)))}
+                style={{ ...s.numberInput, width: 52 }} />
+              <span style={s.unit}>%</span>
+            </div>
+          </div>
           <span style={s.hint}>
-            1h + 15m 볼린저 밴드 하단 이중 침범 시 LIMIT 딥 매수. BB 기간/배수·MA 필터·SL·구출DCA 단계 설정. 구출 단계=0이면 DCA 비활성. 1h 룩백=최근 N봉 중 침범 허용, 15m 신선도=이전 N봉 중 BB 위 봉 필요.
+            1h + 15m 볼린저 밴드 하단 이중 침범 시 LIMIT 딥 매수. BB 기간/배수·MA 필터·SL·구출DCA 단계 설정. 구출 단계=0이면 DCA 비활성. 1h 룩백=최근 N봉 중 침범 허용, 15m 신선도=이전 N봉 중 BB 위 봉 필요.{' '}
+            TP1=BB중심 또는 고정% 중 먼저 닿는 쪽. TP2=고정% (12시간 강제종료 권장: 타임스탑 봉수=48).
+          </span>
+          <span style={{ fontSize: '0.70rem', color: '#9aa4b5', lineHeight: 1.55, marginTop: 4, display: 'block' }}>
+            ℹ 마진$는 N개 동시 진입 시 자동으로 N등분됩니다. 설정값은 1개 진입 시의 최대 마진 기준입니다.{' '}
+            구출 단계당 동일 마진이 추가 투입됩니다 (기본 2단계 = 총 3배). 잔고는 마진$ × 3 이상 유지하세요.
+          </span>
+          <span style={{ fontSize: '0.70rem', color: '#9aa4b5', lineHeight: 1.55, marginTop: 2, display: 'block' }}>
+            💡 SL ATR배수 권장: 손절이 너무 잦으면 2.0~2.5로 올리세요 (기본 1.5). 구출 간격은 SL배수보다 작게 유지 (예: SL=2.0, 구출간격=0.8).
           </span>
         </div>
       )}
@@ -949,8 +1044,8 @@ function SettingsEditor({
           <input
             type="number"
             min={50} max={100} step={1}
-            value={draft.minCandidateScore ?? (isLeaderRetest ? 65 : isFvg ? 75 : isBbMtf ? 55 : 90)}
-            onChange={e => set('minCandidateScore', Math.max(50, Math.min(100, parseInt(e.target.value) || (isLeaderRetest ? 65 : isFvg ? 75 : isBbMtf ? 55 : 90))))}
+            value={draft.minCandidateScore ?? (isLeaderRetest ? 65 : isFvg ? 75 : isBbMtf ? 70 : 90)}
+            onChange={e => set('minCandidateScore', Math.max(50, Math.min(100, parseInt(e.target.value) || (isLeaderRetest ? 65 : isFvg ? 75 : isBbMtf ? 70 : 90))))}
             style={s.numberInput}
           />
           <span style={s.unit}>점</span>
@@ -962,7 +1057,7 @@ function SettingsEditor({
             : (draft.strategyId ?? 'breakout') === 'fvg-poc-ema72'
             ? 'FVG POC 스코어는 40~80점 범위 — 75점 내외 권장. 전략 전환 시 자동 조정됩니다.'
             : (draft.strategyId ?? 'breakout') === 'bb-mtf-dca'
-            ? 'BB MTF DCA 스코어는 40~100점 — 55점 내외 권장. 침범 깊이가 깊을수록 높은 점수.'
+            ? 'BB MTF DCA 스코어는 40~100점 — 70점 이상 권장. 침범 깊이가 깊을수록 높은 점수.'
             : '기존 돌파 스코어는 0~100점 분포 — 기본 90점. 낮출수록 후보 증가, 높일수록 고품질 집중.'}
         </span>
       </div>
@@ -1005,7 +1100,10 @@ function SettingsEditor({
             value={draft.timeStopBars ?? 4}
             onChange={e => set('timeStopBars', Math.max(1, Math.min(50, Number(e.target.value) || 4)))}
           />
-          <span style={s.hint}>진입 후 N봉이 경과하면 TP/SL 미도달 시 시장가 청산. (스캔 TF 기준)</span>
+          <span style={s.hint}>
+            진입 후 N봉이 경과하면 TP/SL 미도달 시 시장가 청산. (스캔 TF 기준)
+            {isBbMtf && <span style={{ color: '#9b59b6', marginLeft: 4 }}>BB MTF DCA: 15m×48봉=12시간 강제종료 권장.</span>}
+          </span>
         </div>
       )}
 
@@ -1138,7 +1236,7 @@ function SettingsEditor({
       </div>}
 
       {/* Risk gates */}
-      <div style={s.fieldRow}>
+      {!isBbMtf && <div style={s.fieldRow}>
         <label style={s.label}>총 포지션 한도</label>
         <input
           style={{ ...s.numberInput, width: 70 }}
@@ -1147,9 +1245,9 @@ function SettingsEditor({
           onChange={e => set('maxTotalPositions', Math.max(0, Number(e.target.value) || 0))}
         />
         <span style={s.hint}>총 오픈 포지션 수가 N 이상이면 신규 진입 차단. (0 = 무제한)</span>
-      </div>
+      </div>}
 
-      <div style={s.fieldRow}>
+      {!isBbMtf && <div style={s.fieldRow}>
         <label style={s.label}>동방향 포지션 한도</label>
         <input
           style={{ ...s.numberInput, width: 70 }}
@@ -1158,7 +1256,7 @@ function SettingsEditor({
           onChange={e => set('maxConcurrentCorrelated', Math.max(0, Number(e.target.value) || 0))}
         />
         <span style={s.hint}>같은 방향(LONG/SHORT) 포지션이 N 이상이면 차단. (0 = 무제한)</span>
-      </div>
+      </div>}
 
       <div style={s.fieldRow}>
         <label style={s.label}>손실 후 쿨다운</label>

@@ -648,6 +648,8 @@ function PerformanceAnalysisSection({
     return [
       { key: 'breakout', label: '기존 돌파', ...summarizeCohort(altRows.filter(r => !r.strategyId || r.strategyId === 'breakout')) },
       { key: 'leader-retest', label: '리더-리테스트', ...summarizeCohort(altRows.filter(r => r.strategyId === 'leader-retest')) },
+      { key: 'fvg-poc-ema72', label: 'FVG POC+EMA72', ...summarizeCohort(altRows.filter(r => r.strategyId === 'fvg-poc-ema72')) },
+      { key: 'bb-mtf-dca', label: 'BB MTF DCA', ...summarizeCohort(altRows.filter(r => r.strategyId === 'bb-mtf-dca')) },
     ];
   }, [altRows]);
 
@@ -2591,6 +2593,10 @@ export function BottomPanel({
                         <span style={{ fontSize: '0.58rem', background: 'rgba(155,89,182,0.18)', color: '#9b59b6', borderRadius: 3, padding: '1px 5px', fontWeight: 700, border: '1px solid rgba(155,89,182,0.4)', marginLeft: 4 }}>
                           리더-리테스트
                         </span>
+                      ) : h.strategyId === 'bb-mtf-dca' ? (
+                        <span style={{ fontSize: '0.58rem', background: 'rgba(14,203,129,0.18)', color: '#0ecb81', borderRadius: 3, padding: '1px 5px', fontWeight: 700, border: '1px solid rgba(14,203,129,0.4)', marginLeft: 4 }}>
+                          BB MTF DCA
+                        </span>
                       ) : (
                         <span style={{ fontSize: '0.58rem', background: 'rgba(59,139,235,0.18)', color: '#3b8beb', borderRadius: 3, padding: '1px 5px', fontWeight: 700, border: '1px solid rgba(59,139,235,0.4)', marginLeft: 4 }}>
                           기존 돌파
@@ -2810,13 +2816,29 @@ export function BottomPanel({
                           <span style={s.symbolFull}>{o.symbol}</span>
                         </div>
                         <span style={{ fontSize: '0.6rem', background: 'rgba(240,185,11,0.15)', color: '#f0b90b', borderRadius: 3, padding: '1px 4px', fontWeight: 700, marginLeft: 2 }}>모의</span>
-                        {o.altMeta && (
-                          <button
-                            style={{ fontSize: '0.58rem', background: 'rgba(59,139,235,0.18)', color: '#3b8beb', borderRadius: 3, padding: '1px 5px', fontWeight: 700, border: '1px solid rgba(59,139,235,0.4)', cursor: 'pointer', lineHeight: 1.3, marginLeft: 4 }}
-                            onClick={() => onOpenAltPosition?.(o.altMeta!)}
-                            title="ALT추천 스냅샷 보기"
-                          >ALT추천</button>
-                        )}
+                        {o.altMeta && (() => {
+                          const isRescue = o.altMeta.rescueLevel !== undefined;
+                          const rescueLevels = o.altMeta.bbMtfRescueLevels;
+                          let dcaLabel = 'DCA';
+                          if (isRescue && rescueLevels && rescueLevels.length > 0) {
+                            // LONG: higher price = lower DCA index (closest to entry)
+                            const sorted = [...rescueLevels].sort((a, b) => b - a);
+                            const idx = sorted.indexOf(o.altMeta.rescueLevel!);
+                            dcaLabel = idx >= 0 ? `DCA-${idx + 1}` : 'DCA';
+                          }
+                          return isRescue ? (
+                            <span
+                              style={{ fontSize: '0.58rem', background: 'rgba(14,203,129,0.15)', color: '#0ecb81', borderRadius: 3, padding: '1px 5px', fontWeight: 700, border: '1px solid rgba(14,203,129,0.35)', lineHeight: 1.3, marginLeft: 4 }}
+                              title={`물타기 구출 주문 @ ${o.altMeta.rescueLevel}`}
+                            >{dcaLabel}</span>
+                          ) : (
+                            <button
+                              style={{ fontSize: '0.58rem', background: 'rgba(59,139,235,0.18)', color: '#3b8beb', borderRadius: 3, padding: '1px 5px', fontWeight: 700, border: '1px solid rgba(59,139,235,0.4)', cursor: 'pointer', lineHeight: 1.3, marginLeft: 4 }}
+                              onClick={() => onOpenAltPosition?.(o.altMeta!)}
+                              title="ALT추천 스냅샷 보기"
+                            >ALT추천</button>
+                          );
+                        })()}
                       </div>
                     </td>
                     <td style={s.td}><span style={{ ...s.sideBadge, background: isBuy ? 'rgba(14,203,129,0.12)' : 'rgba(246,70,93,0.12)', color: isBuy ? '#0ecb81' : '#f6465d' }}>{o.side}</span></td>
@@ -2944,15 +2966,15 @@ export function BottomPanel({
                                 <button
                                   style={{
                                     fontSize: '0.58rem',
-                                    background: altMeta.strategyId === 'fvg-poc-ema72' ? 'rgba(240,185,11,0.18)' : altMeta.strategyId === 'leader-retest' ? 'rgba(155,89,182,0.18)' : 'rgba(59,139,235,0.18)',
-                                    color: altMeta.strategyId === 'fvg-poc-ema72' ? '#f0b90b' : altMeta.strategyId === 'leader-retest' ? '#9b59b6' : '#3b8beb',
+                                    background: altMeta.strategyId === 'fvg-poc-ema72' ? 'rgba(240,185,11,0.18)' : altMeta.strategyId === 'leader-retest' ? 'rgba(155,89,182,0.18)' : altMeta.strategyId === 'bb-mtf-dca' ? 'rgba(14,203,129,0.18)' : 'rgba(59,139,235,0.18)',
+                                    color: altMeta.strategyId === 'fvg-poc-ema72' ? '#f0b90b' : altMeta.strategyId === 'leader-retest' ? '#9b59b6' : altMeta.strategyId === 'bb-mtf-dca' ? '#0ecb81' : '#3b8beb',
                                     borderRadius: 3, padding: '1px 5px', fontWeight: 700,
-                                    border: `1px solid ${altMeta.strategyId === 'fvg-poc-ema72' ? 'rgba(240,185,11,0.4)' : altMeta.strategyId === 'leader-retest' ? 'rgba(155,89,182,0.4)' : 'rgba(59,139,235,0.4)'}`,
+                                    border: `1px solid ${altMeta.strategyId === 'fvg-poc-ema72' ? 'rgba(240,185,11,0.4)' : altMeta.strategyId === 'leader-retest' ? 'rgba(155,89,182,0.4)' : altMeta.strategyId === 'bb-mtf-dca' ? 'rgba(14,203,129,0.4)' : 'rgba(59,139,235,0.4)'}`,
                                     cursor: 'pointer', lineHeight: 1.3, marginLeft: 4,
                                   }}
                                   onClick={() => onOpenAltPosition?.(altMeta)}
                                   title="ALT추천 스냅샷 보기"
-                                >{altMeta.strategyId === 'fvg-poc-ema72' ? 'FVG POC + EMA72' : altMeta.strategyId === 'leader-retest' ? '리더-리테스트' : '기존 돌파'}</button>
+                                >{altMeta.strategyId === 'fvg-poc-ema72' ? 'FVG POC + EMA72' : altMeta.strategyId === 'leader-retest' ? '리더-리테스트' : altMeta.strategyId === 'bb-mtf-dca' ? 'BB MTF DCA' : '기존 돌파'}</button>
                                 {altMeta.candidateScore != null && (
                                   <span style={{ fontSize: '0.58rem', background: 'rgba(240,185,11,0.1)', color: '#f0b90b', borderRadius: 3, padding: '1px 4px', fontWeight: 700, marginLeft: 2 }}>{altMeta.candidateScore}점</span>
                                 )}
@@ -3094,15 +3116,15 @@ export function BottomPanel({
                                 <button
                                   style={{
                                     fontSize: '0.58rem',
-                                    background: liveMeta.strategyId === 'fvg-poc-ema72' ? 'rgba(240,185,11,0.18)' : liveMeta.strategyId === 'leader-retest' ? 'rgba(155,89,182,0.18)' : 'rgba(59,139,235,0.18)',
-                                    color: liveMeta.strategyId === 'fvg-poc-ema72' ? '#f0b90b' : liveMeta.strategyId === 'leader-retest' ? '#9b59b6' : '#3b8beb',
+                                    background: liveMeta.strategyId === 'fvg-poc-ema72' ? 'rgba(240,185,11,0.18)' : liveMeta.strategyId === 'leader-retest' ? 'rgba(155,89,182,0.18)' : liveMeta.strategyId === 'bb-mtf-dca' ? 'rgba(14,203,129,0.18)' : 'rgba(59,139,235,0.18)',
+                                    color: liveMeta.strategyId === 'fvg-poc-ema72' ? '#f0b90b' : liveMeta.strategyId === 'leader-retest' ? '#9b59b6' : liveMeta.strategyId === 'bb-mtf-dca' ? '#0ecb81' : '#3b8beb',
                                     borderRadius: 3, padding: '1px 5px', fontWeight: 700,
-                                    border: `1px solid ${liveMeta.strategyId === 'fvg-poc-ema72' ? 'rgba(240,185,11,0.4)' : liveMeta.strategyId === 'leader-retest' ? 'rgba(155,89,182,0.4)' : 'rgba(59,139,235,0.4)'}`,
+                                    border: `1px solid ${liveMeta.strategyId === 'fvg-poc-ema72' ? 'rgba(240,185,11,0.4)' : liveMeta.strategyId === 'leader-retest' ? 'rgba(155,89,182,0.4)' : liveMeta.strategyId === 'bb-mtf-dca' ? 'rgba(14,203,129,0.4)' : 'rgba(59,139,235,0.4)'}`,
                                     cursor: 'pointer', lineHeight: 1.3, marginLeft: 4,
                                   }}
                                   onClick={() => onOpenAltPosition?.(liveMeta)}
                                   title="ALT추천 스냅샷 보기"
-                                >{liveMeta.strategyId === 'fvg-poc-ema72' ? 'FVG POC + EMA72' : liveMeta.strategyId === 'leader-retest' ? '리더-리테스트' : '기존 돌파'}</button>
+                                >{liveMeta.strategyId === 'fvg-poc-ema72' ? 'FVG POC + EMA72' : liveMeta.strategyId === 'leader-retest' ? '리더-리테스트' : liveMeta.strategyId === 'bb-mtf-dca' ? 'BB MTF DCA' : '기존 돌파'}</button>
                                 {liveMeta.candidateScore != null && (
                                   <span style={{ fontSize: '0.58rem', background: 'rgba(240,185,11,0.1)', color: '#f0b90b', borderRadius: 3, padding: '1px 4px', fontWeight: 700, marginLeft: 2 }}>{liveMeta.candidateScore}점</span>
                                 )}

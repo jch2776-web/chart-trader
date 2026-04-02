@@ -102,6 +102,40 @@ function computeBB(candles: Candle[], period: number, mult: number): BBResult {
   return { mid, upper, lower };
 }
 
+// ── RSI computation ───────────────────────────────────────────────────────────
+function computeRSI(candles: Candle[], period = 14): (number | null)[] {
+  const result: (number | null)[] = new Array(candles.length).fill(null);
+  if (candles.length < period + 1) return result;
+  let avgGain = 0, avgLoss = 0;
+  for (let i = 1; i <= period; i++) {
+    const d = candles[i].close - candles[i - 1].close;
+    if (d > 0) avgGain += d; else avgLoss -= d;
+  }
+  avgGain /= period; avgLoss /= period;
+  result[period] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+  for (let i = period + 1; i < candles.length; i++) {
+    const d = candles[i].close - candles[i - 1].close;
+    avgGain = (avgGain * (period - 1) + Math.max(0,  d)) / period;
+    avgLoss = (avgLoss * (period - 1) + Math.max(0, -d)) / period;
+    result[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+  }
+  return result;
+}
+
+/** EMA of a nullable array (skips nulls, seeds from first non-null value) */
+function computeNullableEMA(src: (number | null)[], period: number): (number | null)[] {
+  const k = 2 / (period + 1);
+  const out: (number | null)[] = new Array(src.length).fill(null);
+  let ema: number | null = null;
+  for (let i = 0; i < src.length; i++) {
+    const v = src[i];
+    if (v === null) continue;
+    ema = ema === null ? v : ema + k * (v - ema);
+    out[i] = ema;
+  }
+  return out;
+}
+
 // ── Ichimoku Cloud computation ────────────────────────────────────────────────
 const ICHI_TENKAN  = 9;
 const ICHI_KIJUN   = 26;
@@ -183,7 +217,11 @@ export function useChartRenderer(
     const ichi  = indicators.coinDuckMABB ? computeIchimoku(candles) : null;
     // bbOnly: BB-only mode (no MA/Ichimoku)
     const bbOnlyBB = indicators.bbOnly ? computeBB(candles, 20, 2) : null;
-    return { cdMAs, cdBB, dwEMA9, dwEMA26, ichi, bbOnlyBB };
+    // Always-on: default BB (20, 2σ) and RSI(14)
+    const defaultBB = computeBB(candles, 20, 2);
+    const rsiArr    = computeRSI(candles, 14);
+    const rsiMaArr  = computeNullableEMA(rsiArr, 9);
+    return { cdMAs, cdBB, dwEMA9, dwEMA26, ichi, bbOnlyBB, defaultBB, rsiArr, rsiMaArr };
   }, [candles, indicators.coinDuckMABB, indicators.dwCloud, indicators.bbOnly]);
 
   const render = useCallback((
@@ -192,7 +230,7 @@ export function useChartRenderer(
     vp: ChartViewport,
   ) => {
     const { width, height } = layout;
-    const { price: priceArea, volume: volArea } = getChartAreas(layout);
+    const { price: priceArea, volume: volArea, rsi: rsiArea } = getChartAreas(layout);
 
     // ── Background ──────────────────────────────────────────────────────
     ctx.fillStyle = BG;
@@ -366,10 +404,11 @@ export function useChartRenderer(
       });
     }
 
-    // ── BB-only mode: draw Bollinger Band curves without MA / Ichimoku ───
-    if (indicators.bbOnly && indicatorArrays.bbOnlyBB) {
-      const bb = indicatorArrays.bbOnlyBB;
-      // Band fill (upper → lower path)
+    // ── Default BB (20, 2σ) — always shown, subtle style ────────────────
+    // When coinDuckMABB is on its own cdBB is already visible; skip duplicate.
+    if (!indicators.coinDuckMABB && indicatorArrays.defaultBB) {
+      const bb = indicatorArrays.defaultBB;
+      // Band fill
       const fillPts: { x: number; yu: number; yl: number }[] = [];
       for (let i = startI; i <= endI; i++) {
         const u = bb.upper[i]; const l = bb.lower[i];
@@ -381,16 +420,13 @@ export function useChartRenderer(
         fillPts.forEach((pt, i) => { if (i === 0) ctx.moveTo(pt.x, pt.yu); else ctx.lineTo(pt.x, pt.yu); });
         for (let i = fillPts.length - 1; i >= 0; i--) ctx.lineTo(fillPts[i].x, fillPts[i].yl);
         ctx.closePath();
-        ctx.fillStyle = 'rgba(56,189,248,0.07)';
+        ctx.fillStyle = indicators.bbOnly ? 'rgba(56,189,248,0.07)' : 'rgba(56,189,248,0.05)';
         ctx.fill();
       }
-      // Upper, mid, lower lines
-      const bbLineStyles = [
-        { arr: bb.upper, col: 'rgba(56,189,248,0.75)', w: 1.5 },
-        { arr: bb.mid,   col: 'rgba(240,185,11,0.65)', w: 1   },
-        { arr: bb.lower, col: 'rgba(56,189,248,0.75)', w: 1.5 },
-      ];
-      bbLineStyles.forEach(({ arr, col, w }) => {
+      const bbStyle = indicators.bbOnly
+        ? [{ arr: bb.upper, col: 'rgba(56,189,248,0.75)', w: 1.5 }, { arr: bb.mid, col: 'rgba(240,185,11,0.65)', w: 1 }, { arr: bb.lower, col: 'rgba(56,189,248,0.75)', w: 1.5 }]
+        : [{ arr: bb.upper, col: 'rgba(56,189,248,0.55)', w: 1   }, { arr: bb.mid, col: 'rgba(240,185,11,0.45)', w: 0.8 }, { arr: bb.lower, col: 'rgba(56,189,248,0.55)', w: 1   }];
+      bbStyle.forEach(({ arr, col, w }) => {
         ctx.beginPath(); ctx.strokeStyle = col; ctx.lineWidth = w; let s = false;
         for (let i = startI; i <= endI; i++) {
           const v = arr[i]; if (v === null) continue;
@@ -400,6 +436,9 @@ export function useChartRenderer(
         ctx.stroke();
       });
     }
+
+    // bbOnly flag: BB is already drawn by defaultBB block above (with prominent style when bbOnly=true)
+    // MA suppression still applies via anyIndicatorOn check below.
 
     // ── MA lines (hidden when any indicator is active) ───────────────────
     const anyIndicatorOn = indicators.coinDuckMABB || indicators.dwCloud || !!indicators.bbOnly;
@@ -467,6 +506,102 @@ export function useChartRenderer(
       }
     }
 
+    // ── RSI panel ────────────────────────────────────────────────────────
+    {
+      const rsi = indicatorArrays.rsiArr;
+      // Panel background
+      ctx.fillStyle = 'rgba(19,23,34,0.95)';
+      ctx.fillRect(rsiArea.x, rsiArea.y, rsiArea.w, rsiArea.h);
+
+      // Helper: RSI value → Y pixel in rsiArea
+      const rsiY = (v: number) => rsiArea.y + rsiArea.h - (v / 100) * rsiArea.h;
+
+      // Overbought / oversold zone bands
+      const y70 = rsiY(70); const y30 = rsiY(30);
+      ctx.fillStyle = 'rgba(246,70,93,0.07)';
+      ctx.fillRect(rsiArea.x, rsiArea.y, rsiArea.w, y70 - rsiArea.y);
+      ctx.fillStyle = 'rgba(14,203,129,0.07)';
+      ctx.fillRect(rsiArea.x, y30, rsiArea.w, rsiArea.y + rsiArea.h - y30);
+
+      // Collect visible RSI points
+      const pts: { x: number; y: number; v: number }[] = [];
+      for (let i = startI; i <= endI; i++) {
+        const v = rsi[i]; if (v === null) continue;
+        pts.push({ x: idxToX(i + 0.5, vp, priceArea), y: rsiY(v), v });
+      }
+
+      if (pts.length >= 2) {
+        // Gradient fill below RSI line (from line to panel bottom)
+        const lastV = pts[pts.length - 1].v;
+        const gradColor = lastV > 70 ? '246,70,93' : lastV < 30 ? '14,203,129' : '56,189,248';
+        const grad = ctx.createLinearGradient(0, rsiArea.y, 0, rsiArea.y + rsiArea.h);
+        grad.addColorStop(0,   `rgba(${gradColor},0.30)`);
+        grad.addColorStop(0.6, `rgba(${gradColor},0.10)`);
+        grad.addColorStop(1,   `rgba(${gradColor},0.00)`);
+        ctx.beginPath();
+        pts.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
+        ctx.lineTo(pts[pts.length - 1].x, rsiArea.y + rsiArea.h);
+        ctx.lineTo(pts[0].x, rsiArea.y + rsiArea.h);
+        ctx.closePath();
+        ctx.fillStyle = grad;
+        ctx.fill();
+
+        // RSI line
+        ctx.beginPath();
+        ctx.strokeStyle = lastV > 70 ? 'rgba(246,70,93,0.9)' : lastV < 30 ? 'rgba(14,203,129,0.9)' : 'rgba(56,189,248,0.9)';
+        ctx.lineWidth = 1.5;
+        pts.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
+        ctx.stroke();
+      }
+
+      // RSI MA(9) line — EMA of RSI, orange like Binance
+      {
+        const rsiMa = indicatorArrays.rsiMaArr;
+        const maPts: { x: number; y: number }[] = [];
+        for (let i = startI; i <= endI; i++) {
+          const v = rsiMa[i]; if (v === null) continue;
+          maPts.push({ x: idxToX(i + 0.5, vp, priceArea), y: rsiY(v) });
+        }
+        if (maPts.length >= 2) {
+          ctx.beginPath();
+          ctx.strokeStyle = 'rgba(243,146,55,0.85)';
+          ctx.lineWidth = 1.2;
+          maPts.forEach((p, i) => { if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y); });
+          ctx.stroke();
+        }
+      }
+
+      // Reference lines at 70, 50, 30
+      [[70, 'rgba(246,70,93,0.4)'], [50, 'rgba(120,130,150,0.35)'], [30, 'rgba(14,203,129,0.4)']].forEach(([level, col]) => {
+        ctx.beginPath();
+        ctx.strokeStyle = col as string;
+        ctx.lineWidth = 0.75;
+        ctx.setLineDash([3, 3]);
+        ctx.moveTo(rsiArea.x, rsiY(level as number));
+        ctx.lineTo(rsiArea.x + rsiArea.w, rsiY(level as number));
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // Level label on right axis
+        ctx.fillStyle = col as string;
+        ctx.font = '9px sans-serif';
+        ctx.textAlign = 'right';
+        ctx.fillText(String(level), rsiArea.x + rsiArea.w - 2, rsiY(level as number) - 2);
+      });
+
+      // RSI(14) · MA(9) static labels — only when not hovering (hover block draws values instead)
+      if (!crosshair.visible) {
+        ctx.font = 'bold 9px sans-serif';
+        ctx.textAlign = 'right';
+        const axisEdge = rsiArea.x + rsiArea.w;
+        ctx.fillStyle = 'rgba(243,146,55,0.8)';
+        ctx.fillText('MA(9)', axisEdge - 4, rsiArea.y + 10);
+        const maLabelW = ctx.measureText('MA(9)').width;
+        ctx.fillStyle = 'rgba(160,170,185,0.7)';
+        ctx.fillText('RSI(14)', axisEdge - 4 - maLabelW - 6, rsiArea.y + 10);
+      }
+
+    }
+
     // ── Drawings ─────────────────────────────────────────────────────────
     const allDrawings = previewDrawing
       ? [...drawings, previewDrawing]
@@ -503,7 +638,7 @@ export function useChartRenderer(
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(axisX, priceArea.y);
-    ctx.lineTo(axisX, priceArea.y + priceArea.h + volArea.h + 4);
+    ctx.lineTo(axisX, rsiArea.y + rsiArea.h);
     ctx.stroke();
 
     ctx.fillStyle = TEXT;
@@ -529,8 +664,37 @@ export function useChartRenderer(
       renderPositionOverlay(ctx, positions, orders, vp, priceArea, axisX, tp1Lines);
     }
 
+    // ── Current RSI badge on right axis (drawn after Y-axis BG) ──────────
+    {
+      const rsi = indicatorArrays.rsiArr;
+      const curRsi = (() => { for (let i = endI; i >= startI; i--) { const v = rsi[i]; if (v !== null) return v; } return null; })();
+      if (curRsi !== null) {
+        const rsiToY  = (v: number) => rsiArea.y + rsiArea.h - (v / 100) * rsiArea.h;
+        const vCol    = curRsi > 70 ? '#f6465d' : curRsi < 30 ? '#0ecb81' : '#38bdf8';
+        const curRsiY = rsiToY(curRsi);
+        // Dashed line across RSI panel
+        ctx.strokeStyle = vCol;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(rsiArea.x, curRsiY);
+        ctx.lineTo(axisX, curRsiY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // Colored filled badge on right axis (same style as price badge)
+        const rsiLabel = curRsi.toFixed(1);
+        ctx.font = '10px "SF Mono","Cascadia Code",Consolas,monospace';
+        const bw = ctx.measureText(rsiLabel).width + 12;
+        ctx.fillStyle = vCol;
+        ctx.fillRect(axisX, curRsiY - 9, bw, 18);
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'left';
+        ctx.fillText(rsiLabel, axisX + 5, curRsiY + 4);
+      }
+    }
+
     // ── X-Axis (bottom) ───────────────────────────────────────────────────
-    const xAxisY = priceArea.y + priceArea.h + volArea.h + 4;
+    const xAxisY = rsiArea.y + rsiArea.h;
     ctx.fillStyle = AXIS_BG;
     ctx.fillRect(0, xAxisY, width, layout.paddingBottom);
     ctx.strokeStyle = AXIS_LINE;
@@ -736,6 +900,59 @@ export function useChartRenderer(
           ctx.fillStyle = col;
           ctx.fillText(val, pad + i * 90 + 14, top);
         });
+
+        // ── RSI value at hovered candle ────────────────────────────────
+        const hoverRsi = indicatorArrays.rsiArr[hoverIdx];
+        if (hoverRsi !== null) {
+          const rsiHoverY = rsiArea.y + rsiArea.h - (hoverRsi / 100) * rsiArea.h;
+          const rsiVCol   = hoverRsi > 70 ? '#f6465d' : hoverRsi < 30 ? '#0ecb81' : '#38bdf8';
+          const axisX     = priceArea.x + priceArea.w;
+
+          // Horizontal line across RSI panel at hovered RSI value
+          ctx.strokeStyle = 'rgba(182,189,198,0.4)';
+          ctx.lineWidth = 1;
+          ctx.setLineDash([4, 4]);
+          ctx.beginPath();
+          ctx.moveTo(rsiArea.x, rsiHoverY);
+          ctx.lineTo(axisX, rsiHoverY);
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          // Dot on RSI line at hovered position
+          ctx.beginPath();
+          ctx.arc(cx, rsiHoverY, 3, 0, Math.PI * 2);
+          ctx.fillStyle = rsiVCol;
+          ctx.fill();
+
+          // RSI hover badge on right axis
+          const rsiHoverLabel = hoverRsi.toFixed(1);
+          ctx.font = '10px "SF Mono","Cascadia Code",Consolas,monospace';
+          const bw = ctx.measureText(rsiHoverLabel).width + 10;
+          ctx.fillStyle = '#2b3043';
+          ctx.fillRect(axisX, rsiHoverY - 9, bw, 18);
+          ctx.strokeStyle = rsiVCol;
+          ctx.lineWidth = 1;
+          ctx.strokeRect(axisX, rsiHoverY - 9, bw, 18);
+          ctx.fillStyle = rsiVCol;
+          ctx.textAlign = 'left';
+          ctx.fillText(rsiHoverLabel, axisX + 5, rsiHoverY + 4);
+
+          // RSI + MA hover values — top-right (aligned with static labels, overrides them)
+          ctx.font = 'bold 10px "SF Mono","Cascadia Code",Consolas,monospace';
+          const hoverRsiMa = indicatorArrays.rsiMaArr[hoverIdx];
+          const axisEdgeHov = rsiArea.x + rsiArea.w;
+          ctx.textAlign = 'right';
+          if (hoverRsiMa !== null) {
+            ctx.fillStyle = 'rgba(243,146,55,0.95)';
+            ctx.fillText(`MA ${hoverRsiMa.toFixed(1)}`, axisEdgeHov - 4, rsiArea.y + 10);
+            const maHovW = ctx.measureText(`MA ${hoverRsiMa.toFixed(1)}`).width;
+            ctx.fillStyle = rsiVCol;
+            ctx.fillText(`RSI ${rsiHoverLabel}`, axisEdgeHov - 4 - maHovW - 8, rsiArea.y + 10);
+          } else {
+            ctx.fillStyle = rsiVCol;
+            ctx.fillText(`RSI ${rsiHoverLabel}`, axisEdgeHov - 4, rsiArea.y + 10);
+          }
+        }
       }
     }
   }, [candles, interval, drawings, previewDrawing, crosshair, hoverHandle, draggingHandle, maArrays, indicatorArrays, indicators, positions, orders, countdown, tp1Lines]);
