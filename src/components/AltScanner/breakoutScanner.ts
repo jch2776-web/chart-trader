@@ -13,7 +13,7 @@ import { acquireScanSlot, getBinanceGovernorSnapshot } from '../../lib/binanceRe
 import type { OrderPlan } from './features/orderPlan';
 import type { RetestScoreBreakdown } from './features/retestScoring';
 
-export type ScanInterval = '15m' | '1h' | '4h' | '1d';
+export type ScanInterval = '15m' | '1h' | '4h' | '1d' | '1w';
 export type ScanDirection = 'both' | 'long' | 'short';
 export type CandidateStatus = 'PENDING' | 'TRIGGERED' | 'INVALID' | 'EXPIRED';
 

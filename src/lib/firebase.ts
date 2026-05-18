@@ -12,6 +12,17 @@
 //   rules_version = '2';
 //   service cloud.firestore {
 //     match /databases/{database}/documents {
+//       // Trade history: anyone can write (upload), anyone can read (leaderboard).
+//       // Access is controlled at the app level via the leaderboard access code.
+//       match /tradeHistory/{id} {
+//         allow read, write: if true;
+//       }
+//       // Leaderboard config (access code): readable by all, writable only via console.
+//       match /config/leaderboard {
+//         allow read: if true;
+//         allow write: if false;
+//       }
+//       // Board posts and other collections
 //       match /{document=**} {
 //         allow read, write: if true;
 //       }

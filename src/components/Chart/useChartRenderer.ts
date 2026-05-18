@@ -2,14 +2,15 @@ import { useCallback, useMemo } from 'react';
 import type { Candle, Interval } from '../../types/candle';
 import type {
   Drawing, TrendlineDrawing, BoxDrawing, HlineDrawing, PixelPoint,
-  FibRetracementDrawing, PriceRangeDrawing, DateRangeDrawing,
+  FibRetracementDrawing, PriceRangeDrawing, DateRangeDrawing, L2LOverlay,
+  ParallelChannelDrawing, TextDrawing, LabelDrawing, XabcdDrawing, BrushDrawing,
 } from '../../types/drawing';
 import { FIB_LEVELS, FIB_LEVEL_COLORS } from '../../types/drawing';
 import type { FuturesPosition, FuturesOrder } from '../../types/futures';
 import type { ChartViewport, ChartLayout, ChartArea } from './chartMath';
 import {
   getChartAreas, idxToX, priceToY, candleWidth,
-  computePriceTicks, computeTimeTicks, pointToPixel,
+  computePriceTicks, computeTimeTicks, candleTimeAt, pointToPixel,
 } from './chartMath';
 import { formatPrice, formatTime } from '../../utils/priceFormat';
 
@@ -20,6 +21,23 @@ function hexToRgba(hex: string, alpha: number): string {
   const g = parseInt(h.slice(2, 4), 16);
   const b = parseInt(h.slice(4, 6), 16);
   return `rgba(${r},${g},${b},${alpha})`;
+}
+
+function getBadgeTextColor(bgColor: string): string {
+  const hex = bgColor.replace('#', '');
+  if (hex.length !== 6) return '#ffffff';
+  const r = parseInt(hex.slice(0, 2), 16);
+  const g = parseInt(hex.slice(2, 4), 16);
+  const b = parseInt(hex.slice(4, 6), 16);
+  const luminance = (r * 299 + g * 587 + b * 114) / 1000;
+  return luminance > 170 ? '#131722' : '#ffffff';
+}
+
+function getLineDash(style: 'solid' | 'dashed' | 'dotted' | undefined, fallbackDashed = false): number[] {
+  if (style === 'dashed') return [10, 6];
+  if (style === 'dotted') return [2, 6];
+  if (fallbackDashed) return [6, 4];
+  return [];
 }
 
 // ── Binance color palette ────────────────────────────────────────────────────
@@ -53,6 +71,10 @@ export interface IndicatorConfig {
   dwCloud: boolean;
   /** Render ONLY Bollinger Band curves (upper/mid/lower) — no MA, no Ichimoku */
   bbOnly?: boolean;
+  /** Show default MA lines (MA7/25/99). Default true when undefined. */
+  showMA?: boolean;
+  /** Show default Bollinger Band (BB20). Default true when undefined. */
+  showBB?: boolean;
 }
 
 // ── Indicator computations ────────────────────────────────────────────────────
@@ -183,9 +205,15 @@ function computeIchimoku(candles: Candle[]): IchimokuResult {
 
 interface HoverHandle { drawingId: string; handleIdx: number }
 
+const INTERVAL_LABEL: Record<Interval, string> = {
+  '1m': '1분', '3m': '3분', '5m': '5분', '15m': '15분',
+  '1h': '1시간', '4h': '4시간', '1d': '1일', '1w': '1주',
+};
+
 export function useChartRenderer(
   candles: Candle[],
   interval: Interval,
+  ticker: string,
   drawings: Drawing[],
   previewDrawing: Drawing | null,
   crosshair: { x: number; y: number; visible: boolean },
@@ -196,6 +224,7 @@ export function useChartRenderer(
   countdown: number = 0,
   indicators: IndicatorConfig = { coinDuckMABB: false, dwCloud: false },
   tp1Lines: Array<{ price: number; hit: boolean }> = [],
+  l2lOverlay: L2LOverlay | null = null,
 ) {
   // Pre-compute MA arrays whenever candles change
   const maArrays = useMemo(() => ({
@@ -235,6 +264,20 @@ export function useChartRenderer(
     // ── Background ──────────────────────────────────────────────────────
     ctx.fillStyle = BG;
     ctx.fillRect(0, 0, width, height);
+
+    // ── Watermark ───────────────────────────────────────────────────────
+    const cx = priceArea.x + priceArea.w / 2;
+    const cy = priceArea.y + priceArea.h / 2;
+    ctx.save();
+    ctx.globalAlpha = 0.07;
+    ctx.fillStyle = '#ffffff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = 'bold 72px sans-serif';
+    ctx.fillText(ticker, cx, cy - 30);
+    ctx.font = 'bold 36px sans-serif';
+    ctx.fillText(INTERVAL_LABEL[interval] ?? interval, cx, cy + 36);
+    ctx.restore();
 
     // ── Price area clip path ─────────────────────────────────────────────
     const startI = Math.max(0, Math.floor(vp.startIdx));
@@ -404,9 +447,9 @@ export function useChartRenderer(
       });
     }
 
-    // ── Default BB (20, 2σ) — always shown, subtle style ────────────────
+    // ── Default BB (20, 2σ) — shown unless explicitly disabled ─────────
     // When coinDuckMABB is on its own cdBB is already visible; skip duplicate.
-    if (!indicators.coinDuckMABB && indicatorArrays.defaultBB) {
+    if (!indicators.coinDuckMABB && indicatorArrays.defaultBB && indicators.showBB !== false) {
       const bb = indicatorArrays.defaultBB;
       // Band fill
       const fillPts: { x: number; yu: number; yl: number }[] = [];
@@ -442,7 +485,8 @@ export function useChartRenderer(
 
     // ── MA lines (hidden when any indicator is active) ───────────────────
     const anyIndicatorOn = indicators.coinDuckMABB || indicators.dwCloud || !!indicators.bbOnly;
-    if (!anyIndicatorOn) MA_DEFS.forEach(({ period, color }) => {
+    const maVisible = indicators.showMA !== false;
+    if (!anyIndicatorOn && maVisible) MA_DEFS.forEach(({ period, color }) => {
       const maArr = maArrays[period as 7 | 25 | 99];
       ctx.beginPath();
       ctx.strokeStyle = color;
@@ -626,6 +670,16 @@ export function useChartRenderer(
         renderPriceRange(ctx, d, candles, vp, priceArea, isPreview, hoverHandle, draggingHandle, isInactive);
       } else if (d.type === 'daterange') {
         renderDateRange(ctx, d, candles, vp, priceArea, isPreview, hoverHandle, draggingHandle, isInactive);
+      } else if (d.type === 'channel') {
+        renderChannel(ctx, d, candles, vp, priceArea, isPreview, hoverHandle, draggingHandle, isInactive);
+      } else if (d.type === 'text') {
+        renderText(ctx, d, candles, vp, priceArea, isPreview, hoverHandle, draggingHandle);
+      } else if (d.type === 'label') {
+        renderLabel(ctx, d, candles, vp, priceArea, isPreview, hoverHandle, draggingHandle);
+      } else if (d.type === 'xabcd') {
+        renderXabcd(ctx, d, candles, vp, priceArea, isPreview, hoverHandle, draggingHandle);
+      } else if (d.type === 'brush') {
+        renderBrush(ctx, d, candles, vp, priceArea);
       }
       if (isInactive) ctx.restore();
     });
@@ -658,10 +712,20 @@ export function useChartRenderer(
       ctx.stroke();
     });
 
+    allDrawings.forEach(d => {
+      if (d.type !== 'hline' || !d.showAxisLabel) return;
+      renderHlineAxisBadge(ctx, d, vp, priceArea, axisX);
+    });
+
     // ── Futures positions & orders overlay ───────────────────────────────
     // Drawn AFTER Y-axis background so axis-zone tags are visible
     if (positions.length > 0 || orders.length > 0 || tp1Lines.length > 0) {
       renderPositionOverlay(ctx, positions, orders, vp, priceArea, axisX, tp1Lines);
+    }
+
+    // ── L2L Overlay ──────────────────────────────────────────────────────
+    if (l2lOverlay) {
+      renderL2LOverlay(ctx, l2lOverlay, vp, priceArea, axisX);
     }
 
     // ── Current RSI badge on right axis (drawn after Y-axis BG) ──────────
@@ -707,10 +771,14 @@ export function useChartRenderer(
     ctx.textAlign = 'center';
     ctx.font = '11px "SF Mono","Cascadia Code",Consolas,monospace';
     timeTicks.forEach(idx => {
-      if (idx < 0 || idx >= candles.length) return;
+      if (idx < 0) return;
       const x = idxToX(idx + 0.5, vp, priceArea);
-      ctx.fillText(formatTime(candles[idx].time, interval), x, xAxisY + 14);
+      const ts = candleTimeAt(candles, idx, interval);
+      const isFuture = idx >= candles.length;
+      ctx.fillStyle = isFuture ? 'rgba(132,142,156,0.45)' : TEXT;
+      ctx.fillText(formatTime(ts, interval), x, xAxisY + 14);
     });
+    ctx.fillStyle = TEXT;
 
     // ── Current price dashed line ─────────────────────────────────────────
     if (candles.length > 0) {
@@ -955,7 +1023,7 @@ export function useChartRenderer(
         }
       }
     }
-  }, [candles, interval, drawings, previewDrawing, crosshair, hoverHandle, draggingHandle, maArrays, indicatorArrays, indicators, positions, orders, countdown, tp1Lines]);
+  }, [candles, interval, drawings, previewDrawing, crosshair, hoverHandle, draggingHandle, maArrays, indicatorArrays, indicators, positions, orders, countdown, tp1Lines, l2lOverlay]);
 
   return { render };
 }
@@ -979,7 +1047,7 @@ function renderTrendline(
 
   ctx.strokeStyle = isPreview ? hexToRgba(baseColor, 0.5) : baseColor;
   ctx.lineWidth = 1.5;
-  if (isPreview || isInactive) ctx.setLineDash([6, 4]);
+  ctx.setLineDash(getLineDash(d.lineStyle, isPreview || isInactive));
   ctx.beginPath();
   ctx.moveTo(startPx.x, startPx.y);
   ctx.lineTo(endPx.x, endPx.y);
@@ -1048,16 +1116,18 @@ function renderBox(
 
   ctx.strokeStyle = isPreview ? hexToRgba(baseColor, 0.5) : baseColor;
   ctx.lineWidth = 1.5;
-  if (isPreview || isInactive) ctx.setLineDash([6, 4]);
+  ctx.setLineDash(getLineDash(undefined, isPreview || isInactive));
   ctx.strokeRect(left, top, bw, bh);
   ctx.setLineDash([]);
 
   if (!isPreview) {
-    ctx.font = '11px "SF Mono","Cascadia Code",Consolas,monospace';
-    ctx.fillStyle = baseColor;
-    ctx.textAlign = 'right';
-    ctx.fillText(formatPrice(d.topPrice),    right - 4, top + 12);
-    ctx.fillText(formatPrice(d.bottomPrice), right - 4, bot - 4);
+    if (d.showPriceLabels !== false) {
+      ctx.font = '11px "SF Mono","Cascadia Code",Consolas,monospace';
+      ctx.fillStyle = baseColor;
+      ctx.textAlign = 'right';
+      ctx.fillText(formatPrice(d.topPrice), right - 4, top + 12);
+      ctx.fillText(formatPrice(d.bottomPrice), right - 4, bot - 4);
+    }
 
     // Body-hover highlight (handleIdx === -1 means body)
     const isBodyHovered  = hoverHandle?.drawingId  === d.id && hoverHandle?.handleIdx  === -1;
@@ -1077,17 +1147,115 @@ function renderBox(
     if (d.memo?.trim()) {
       ctx.save();
       ctx.font = 'bold 11px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif';
-      ctx.textAlign = 'left';
-      const textX = left + 6;
-      const textY = top + 22;
+      const memoAlign = d.memoAlign ?? 'left';
+      const isCentered = memoAlign === 'center';
+      ctx.textAlign = memoAlign;
+      const textY = isCentered ? top + bh / 2 + 4 : top + 22;
+      const textX = memoAlign === 'right'
+        ? right - 6
+        : memoAlign === 'center'
+          ? left + bw / 2
+          : left + 6;
       if (textY > area.y && textY < area.y + area.h && textX < right - 4) {
-        const tw = Math.min(ctx.measureText(d.memo).width, right - textX - 4);
+        const fullWidth = ctx.measureText(d.memo).width;
+        const tw = Math.min(fullWidth, Math.max(0, bw - 12));
+        const bgX = memoAlign === 'right'
+          ? textX - tw - 4
+          : memoAlign === 'center'
+            ? textX - tw / 2 - 4
+            : textX - 2;
         ctx.fillStyle = 'rgba(13,17,28,0.78)';
-        ctx.fillRect(textX - 2, textY - 12, tw + 6, 15);
+        ctx.fillRect(bgX, textY - 12, tw + 8, 15);
         ctx.fillStyle = 'rgba(255,255,255,0.92)';
         ctx.fillText(d.memo, textX, textY);
       }
       ctx.restore();
+    }
+  }
+}
+
+// ── Text drawing renderer ─────────────────────────────────────────────────────
+function renderText(
+  ctx: CanvasRenderingContext2D,
+  d: TextDrawing,
+  candles: Candle[],
+  vp: ChartViewport,
+  area: ChartArea,
+  _isPreview: boolean,
+  hoverHandle: HoverHandle | null,
+  draggingHandle: HoverHandle | null,
+) {
+  const pos = pointToPixel(d.p, candles, vp, area);
+  const color = d.color ?? '#d1d4dc';
+  const fontSize = d.fontSize ?? 13;
+  const isHovered = hoverHandle?.drawingId === d.id;
+  const isDragging = draggingHandle?.drawingId === d.id;
+
+  ctx.save();
+  // Anchor dot
+  ctx.beginPath();
+  ctx.arc(pos.x, pos.y, 3, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+  // Text
+  ctx.font = `${fontSize}px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif`;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'bottom';
+  ctx.fillStyle = color;
+  if (isHovered || isDragging) { ctx.shadowColor = color; ctx.shadowBlur = 8; }
+  ctx.fillText(d.text, pos.x + 6, pos.y + 2);
+  ctx.restore();
+}
+
+// ── Label drawing renderer ────────────────────────────────────────────────────
+function renderLabel(
+  ctx: CanvasRenderingContext2D,
+  d: LabelDrawing,
+  candles: Candle[],
+  vp: ChartViewport,
+  area: ChartArea,
+  isPreview: boolean,
+  hoverHandle: HoverHandle | null,
+  draggingHandle: HoverHandle | null,
+) {
+  const p1px = pointToPixel(d.p1, candles, vp, area);
+  const p2px = pointToPixel(d.p2, candles, vp, area);
+  const left = Math.min(p1px.x, p2px.x);
+  const right = Math.max(p1px.x, p2px.x);
+  const top = Math.min(p1px.y, p2px.y);
+  const bot = Math.max(p1px.y, p2px.y);
+  const bw = right - left;
+  const bh = bot - top;
+  const baseColor = d.color ?? '#e8b73a';
+  const fontSize = d.fontSize ?? 13;
+  const isBodyHovered = hoverHandle?.drawingId === d.id && hoverHandle.handleIdx === -1;
+  const isBodyDragging = draggingHandle?.drawingId === d.id && draggingHandle.handleIdx === -1;
+
+  ctx.fillStyle = hexToRgba(baseColor, isBodyHovered || isBodyDragging ? 0.18 : 0.09);
+  ctx.fillRect(left, top, bw, bh);
+  ctx.strokeStyle = isPreview ? hexToRgba(baseColor, 0.5) : hexToRgba(baseColor, isBodyHovered ? 0.9 : 0.7);
+  ctx.lineWidth = isBodyHovered || isBodyDragging ? 2 : 1.5;
+  ctx.setLineDash(isPreview ? [6, 4] : []);
+  ctx.strokeRect(left, top, bw, bh);
+  ctx.setLineDash([]);
+
+  if (!isPreview && d.text) {
+    ctx.save();
+    ctx.font = `${fontSize}px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif`;
+    ctx.fillStyle = baseColor;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const cx = left + bw / 2;
+    const cy = top + bh / 2;
+    const maxW = bw - 12;
+    if (maxW > 10) ctx.fillText(d.text, cx, cy, maxW);
+    ctx.restore();
+  }
+
+  if (!isPreview) {
+    for (let i = 0; i < d.corners.length; i++) {
+      const cpx = pointToPixel({ time: d.corners[i].time, price: d.corners[i].price }, candles, vp, area);
+      drawHandle(ctx, cpx, d.id, i, hoverHandle, draggingHandle, baseColor);
     }
   }
 }
@@ -1146,7 +1314,7 @@ function renderHline(
   // Main horizontal line
   ctx.strokeStyle = isPreview ? hexToRgba(baseColor, 0.5) : baseColor;
   ctx.lineWidth = 1.5;
-  if (isPreview || isInactive) ctx.setLineDash([6, 4]);
+  ctx.setLineDash(getLineDash(d.lineStyle, isPreview || isInactive));
   ctx.beginPath();
   ctx.moveTo(area.x, py);
   ctx.lineTo(area.x + area.w, py);
@@ -1154,11 +1322,13 @@ function renderHline(
   ctx.setLineDash([]);
 
   if (!isPreview) {
-    // Price label near the right edge (above the line to not overlap with axis)
-    ctx.font = '11px "SF Mono","Cascadia Code",Consolas,monospace';
-    ctx.fillStyle = hexToRgba(baseColor, 0.85);
-    ctx.textAlign = 'right';
-    ctx.fillText(formatPrice(d.price), area.x + area.w - 6, py - 4);
+    if (d.showPriceLabel !== false) {
+      // Price label near the right edge (above the line to not overlap with axis)
+      ctx.font = '11px "SF Mono","Cascadia Code",Consolas,monospace';
+      ctx.fillStyle = hexToRgba(baseColor, 0.85);
+      ctx.textAlign = 'right';
+      ctx.fillText(formatPrice(d.price), area.x + area.w - 6, py - 4);
+    }
 
     // Center handle for dragging
     const centerX = area.x + area.w / 2;
@@ -1168,18 +1338,52 @@ function renderHline(
     if (d.memo?.trim()) {
       ctx.save();
       ctx.font = 'bold 11px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif';
-      ctx.textAlign = 'left';
+      const memoAlign = d.memoAlign ?? 'left';
+      ctx.textAlign = memoAlign;
+      const tw = ctx.measureText(d.memo).width;
+      const textX = memoAlign === 'right'
+        ? area.x + area.w - 8
+        : memoAlign === 'center'
+          ? area.x + area.w / 2
+          : area.x + 8;
       const textY = py - 8;
       if (textY > area.y + 4) {
-        const tw = ctx.measureText(d.memo).width;
+        const bgX = memoAlign === 'right'
+          ? textX - tw - 4
+          : memoAlign === 'center'
+            ? textX - tw / 2 - 4
+            : area.x + 6;
         ctx.fillStyle = 'rgba(13,17,28,0.78)';
-        ctx.fillRect(area.x + 6, textY - 12, tw + 6, 15);
+        ctx.fillRect(bgX, textY - 12, tw + 8, 15);
         ctx.fillStyle = 'rgba(255,255,255,0.92)';
-        ctx.fillText(d.memo, area.x + 8, textY);
+        ctx.fillText(d.memo, textX, textY);
       }
       ctx.restore();
     }
   }
+}
+
+function renderHlineAxisBadge(
+  ctx: CanvasRenderingContext2D,
+  d: HlineDrawing,
+  vp: ChartViewport,
+  area: ChartArea,
+  axisX: number,
+) {
+  const bgColor = d.color ?? '#0ecb81';
+  const y = priceToY(d.price, vp, area);
+  if (y < area.y - 10 || y > area.y + area.h + 10) return;
+
+  ctx.save();
+  ctx.font = 'bold 10px "SF Mono","Cascadia Code",Consolas,monospace';
+  const label = formatPrice(d.price);
+  const tagW = ctx.measureText(label).width + 12;
+  ctx.fillStyle = bgColor;
+  ctx.fillRect(axisX + 1, y - 9, tagW, 18);
+  ctx.fillStyle = getBadgeTextColor(bgColor);
+  ctx.textAlign = 'left';
+  ctx.fillText(label, axisX + 6, y + 4);
+  ctx.restore();
 }
 
 // ── Fibonacci Retracement renderer ───────────────────────────────────────────
@@ -1689,4 +1893,505 @@ function extendRay(p1: PixelPoint, p2: PixelPoint, area: ChartArea) {
     startPx: left,
     endPx:   { x: chartRight, y: left.y + slope * (chartRight - left.x) },
   };
+}
+
+// ── Parallel Channel renderer ─────────────────────────────────────────────────
+function renderChannel(
+  ctx: CanvasRenderingContext2D,
+  d: ParallelChannelDrawing,
+  candles: Candle[],
+  vp: ChartViewport,
+  area: ChartArea,
+  isPreview: boolean,
+  hoverHandle: { drawingId: string; handleIdx: number } | null,
+  draggingHandle: { drawingId: string; handleIdx: number } | null,
+  isInactive: boolean,
+) {
+  const color = d.color ?? '#3b8beb';
+  const lineAlpha = isPreview ? 0.7 : isInactive ? 0.4 : 1;
+
+  const p1px = pointToPixel(d.p1, candles, vp, area);
+  const p2px = pointToPixel(d.p2, candles, vp, area);
+
+  // Pixel offset from base line to parallel line (price offset → pixel delta)
+  const priceRange = vp.maxPrice - vp.minPrice;
+  const pxOffset = priceRange > 0 ? -(d.offset / priceRange) * area.h : 0;
+
+  const p1ParPx: PixelPoint = { x: p1px.x, y: p1px.y + pxOffset };
+  const p2ParPx: PixelPoint = { x: p2px.x, y: p2px.y + pxOffset };
+
+  const ray1 = extendRay(p1px, p2px, area);
+  const ray2 = extendRay(p1ParPx, p2ParPx, area);
+
+  ctx.save();
+  ctx.globalAlpha = lineAlpha;
+
+  // Fill between the two lines
+  ctx.fillStyle = hexToRgba(color, 0.07);
+  ctx.beginPath();
+  ctx.moveTo(ray1.startPx.x, ray1.startPx.y);
+  ctx.lineTo(ray1.endPx.x, ray1.endPx.y);
+  ctx.lineTo(ray2.endPx.x, ray2.endPx.y);
+  ctx.lineTo(ray2.startPx.x, ray2.startPx.y);
+  ctx.closePath();
+  ctx.fill();
+
+  // Base line (solid)
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.moveTo(ray1.startPx.x, ray1.startPx.y);
+  ctx.lineTo(ray1.endPx.x, ray1.endPx.y);
+  ctx.stroke();
+
+  // Parallel line (solid)
+  ctx.beginPath();
+  ctx.moveTo(ray2.startPx.x, ray2.startPx.y);
+  ctx.lineTo(ray2.endPx.x, ray2.endPx.y);
+  ctx.stroke();
+
+  // Center line (dashed) — midpoint between base and parallel
+  const midStart: PixelPoint = { x: ray1.startPx.x, y: (ray1.startPx.y + ray2.startPx.y) / 2 };
+  const midEnd:   PixelPoint = { x: ray1.endPx.x,   y: (ray1.endPx.y   + ray2.endPx.y)   / 2 };
+  ctx.setLineDash([5, 4]);
+  ctx.lineWidth = 1;
+  ctx.globalAlpha = lineAlpha * 0.7;
+  ctx.beginPath();
+  ctx.moveTo(midStart.x, midStart.y);
+  ctx.lineTo(midEnd.x, midEnd.y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.lineWidth = 1.5;
+  ctx.globalAlpha = lineAlpha;
+
+  // Handles: p1 (base start), p2 (base end), p3 (parallel offset point)
+  if (!isPreview) {
+    const isHit = (idx: number) =>
+      (hoverHandle?.drawingId === d.id && hoverHandle.handleIdx === idx) ||
+      (draggingHandle?.drawingId === d.id && draggingHandle.handleIdx === idx);
+    const p3px = pointToPixel(d.p3, candles, vp, area);
+    [p1px, p2px, p3px].forEach((h, i) => {
+      ctx.fillStyle = isHit(i) ? '#ffffff' : color;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(h.x, h.y, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    });
+  }
+
+  ctx.restore();
+}
+
+// ── Freehand Brush Stroke renderer ───────────────────────────────────────────
+function renderBrush(
+  ctx: CanvasRenderingContext2D,
+  d: BrushDrawing,
+  candles: Candle[],
+  vp: ChartViewport,
+  area: ChartArea,
+) {
+  if (d.points.length < 2) return;
+  const color = d.color ?? '#3b8beb';
+  const lw = d.lineWidth ?? 8;
+  const alpha = d.opacity ?? 0.45;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lw;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.setLineDash([]);
+
+  ctx.beginPath();
+  const first = pointToPixel(d.points[0], candles, vp, area);
+  ctx.moveTo(first.x, first.y);
+  for (let i = 1; i < d.points.length; i++) {
+    const px = pointToPixel(d.points[i], candles, vp, area);
+    ctx.lineTo(px.x, px.y);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+// ── XABCD Harmonic Pattern renderer ──────────────────────────────────────────
+function renderXabcd(
+  ctx: CanvasRenderingContext2D,
+  d: XabcdDrawing,
+  candles: Candle[],
+  vp: ChartViewport,
+  area: ChartArea,
+  isPreview: boolean,
+  hoverHandle: { drawingId: string; handleIdx: number } | null,
+  draggingHandle: { drawingId: string; handleIdx: number } | null,
+) {
+  const color = d.color ?? '#3b8beb';
+  const alpha = isPreview ? 0.65 : 1;
+
+  // Price-based harmonic ratios (price distance, not time)
+  const pxPrice = d.px.price, paPrice = d.pa.price, pbPrice = d.pb.price, pcPrice = d.pc.price, pdPrice = d.pd.price;
+  const XA = Math.abs(paPrice - pxPrice);
+  const AB = Math.abs(pbPrice - paPrice);
+  const BC = Math.abs(pcPrice - pbPrice);
+  const CD = Math.abs(pdPrice - pcPrice);
+  const ratioAB = XA > 0 ? AB / XA : 0;  // AB/XA
+  const ratioBC = AB > 0 ? BC / AB : 0;  // BC/AB
+  const ratioCD = BC > 0 ? CD / BC : 0;  // CD/BC
+
+  const LABELS = ['X', 'A', 'B', 'C', 'D'];
+  const pts = [d.px, d.pa, d.pb, d.pc, d.pd];
+  const pxs = pts.map(p => pointToPixel(p, candles, vp, area));
+  const [X, A, B, C, D_] = pxs;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+
+  // ── Filled triangles (XAB and BCD) ──────────────────────────────────────
+  const fillAlpha = isPreview ? 0.06 : 0.1;
+  ctx.globalAlpha = alpha * fillAlpha / alpha; // relative fill
+  ctx.save();
+  ctx.globalAlpha = fillAlpha;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(X.x, X.y); ctx.lineTo(A.x, A.y); ctx.lineTo(B.x, B.y); ctx.closePath();
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(B.x, B.y); ctx.lineTo(C.x, C.y); ctx.lineTo(D_.x, D_.y); ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+
+  ctx.globalAlpha = alpha;
+
+  // ── Dotted diagonal lines: X→B, A→C, B→D (showing ratio relationships) ─
+  ctx.setLineDash([4, 4]);
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = color;
+  const diagonals: [PixelPoint, PixelPoint][] = [[X, B], [A, C], [B, D_]];
+  diagonals.forEach(([from, to]) => {
+    ctx.beginPath();
+    ctx.moveTo(from.x, from.y);
+    ctx.lineTo(to.x, to.y);
+    ctx.stroke();
+  });
+  ctx.setLineDash([]);
+
+  // ── Solid zigzag: X→A→B→C→D ─────────────────────────────────────────────
+  ctx.beginPath();
+  ctx.moveTo(X.x, X.y);
+  pxs.slice(1).forEach(p => ctx.lineTo(p.x, p.y));
+  ctx.strokeStyle = color;
+  ctx.lineWidth = isPreview ? 1.5 : 2;
+  ctx.stroke();
+
+  // ── Ratio labels on dotted diagonals ────────────────────────────────────
+  const labelFont = '700 10px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif';
+  const ratios = [ratioAB, ratioBC, ratioCD];
+  const ratioLines: [PixelPoint, PixelPoint][] = [[X, B], [A, C], [B, D_]];
+  ctx.font = labelFont;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  ratios.forEach((ratio, i) => {
+    if (ratio === 0) return;
+    const [from, to] = ratioLines[i];
+    const mx = (from.x + to.x) / 2;
+    const my = (from.y + to.y) / 2;
+    const label = ratio.toFixed(3);
+    const tw = ctx.measureText(label).width + 8;
+    const th = 14;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.roundRect(mx - tw / 2, my - th / 2, tw, th, 3);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.fillText(label, mx, my);
+  });
+
+  // ── Point handles and labels (X, A, B, C, D) ────────────────────────────
+  const ptFont = '700 11px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif';
+  pxs.forEach((px, i) => {
+    const isHovered = (hoverHandle?.drawingId === d.id && hoverHandle.handleIdx === i)
+                   || (draggingHandle?.drawingId === d.id && draggingHandle.handleIdx === i);
+
+    // Circle handle
+    ctx.beginPath();
+    ctx.arc(px.x, px.y, isHovered ? 6 : 4, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    if (isHovered) {
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+
+    // Label pill — place above or below based on local extremum direction
+    const prevY = i > 0 ? pxs[i - 1].y : null;
+    const nextY = i < pxs.length - 1 ? pxs[i + 1].y : null;
+    const isLow = (prevY == null || px.y >= prevY) && (nextY == null || px.y >= nextY);
+    const ly = px.y + (isLow ? 16 : -16);
+    const lw = 14;
+    const lh = 14;
+    ctx.font = ptFont;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.roundRect(px.x - lw / 2, ly - lh / 2, lw, lh, 3);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.fillText(LABELS[i], px.x, ly);
+  });
+
+  ctx.restore();
+}
+
+// ── Level-to-Level overlay renderer ──────────────────────────────────────────
+function renderL2LOverlay(
+  ctx: CanvasRenderingContext2D,
+  overlay: L2LOverlay,
+  vp: ChartViewport,
+  area: ChartArea,
+  axisX: number,
+) {
+  const mono = '"SF Mono","Cascadia Code",Consolas,monospace';
+  const chartLeft  = area.x;
+  const chartRight = axisX;
+
+  // ── helpers ─────────────────────────────────────────────────────────────
+  function inView(price: number) {
+    const y = priceToY(price, vp, area);
+    return y >= area.y && y <= area.y + area.h;
+  }
+
+  function drawHLine(price: number, color: string, dash: number[], lineW = 1.5) {
+    const y = priceToY(price, vp, area);
+    if (y < area.y || y > area.y + area.h) return;
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lineW;
+    ctx.setLineDash(dash);
+    ctx.beginPath();
+    ctx.moveTo(chartLeft, y);
+    ctx.lineTo(chartRight, y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+
+  function drawBand(top: number, bottom: number, color: string, alpha: number) {
+    const yTop    = priceToY(Math.max(top, bottom), vp, area);
+    const yBottom = priceToY(Math.min(top, bottom), vp, area);
+    const h = Math.abs(yBottom - yTop);
+    if (h < 1) return;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = color;
+    ctx.fillRect(chartLeft, Math.min(yTop, yBottom), chartRight - chartLeft, h);
+    ctx.restore();
+  }
+
+  /** Pill badge on the Y-axis (right side) */
+  function drawAxisBadge(price: number, label: string, bgColor: string, textColor = '#fff') {
+    const y = priceToY(price, vp, area);
+    if (y < area.y - 10 || y > area.y + area.h + 10) return;
+    ctx.save();
+    ctx.font = `bold 10px ${mono}`;
+    const tw = ctx.measureText(label).width;
+    const bw = tw + 14;
+    const bh = 18;
+    ctx.fillStyle = bgColor;
+    // slight rounding via rect (canvas doesn't have roundRect in all browsers)
+    ctx.fillRect(axisX + 1, y - bh / 2, bw, bh);
+    ctx.fillStyle = textColor;
+    ctx.textAlign = 'left';
+    ctx.fillText(label, axisX + 8, y + 4);
+    ctx.restore();
+  }
+
+  /** In-chart right-aligned floating label (inside price area) */
+  function drawInlineLabel(
+    price: number, text: string, color: string,
+    offsetY = -6, bgAlpha = 0.55,
+  ) {
+    const y = priceToY(price, vp, area);
+    if (y < area.y || y > area.y + area.h) return;
+    ctx.save();
+    ctx.font = `bold 11px ${mono}`;
+    const tw = ctx.measureText(text).width;
+    const pad = 6;
+    const bx = chartRight - tw - pad * 2 - 4;
+    const by = y + offsetY - 11;
+    ctx.globalAlpha = bgAlpha;
+    ctx.fillStyle = '#131722';
+    ctx.fillRect(bx - 2, by, tw + pad * 2 + 4, 16);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = color;
+    ctx.textAlign = 'right';
+    ctx.fillText(text, chartRight - 6, y + offsetY);
+    ctx.restore();
+  }
+
+  // ── 1. SR Levels — show top 6 as faint background zones ─────────────────
+  const topSR = [...overlay.srLevels]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 6);
+  topSR.forEach((lvl, i) => {
+    const isResist = lvl.kind === 'resistance';
+    const col = isResist ? '#f6465d' : '#0ecb81';
+    drawBand(lvl.zoneTop, lvl.zoneBottom, col, 0.07);
+    drawHLine(lvl.centerPrice, hexToRgba(col, 0.35), [6, 4], 1);
+    // Left-side label: "저항 R1 / 지지 S1" with full Korean label
+    const num = i + 1;
+    const tag = isResist ? `저항 R${num}` : `지지 S${num}`;
+    const y = priceToY(lvl.centerPrice, vp, area);
+    if (y >= area.y && y <= area.y + area.h) {
+      ctx.save();
+      ctx.font = `bold 10px ${mono}`;
+      ctx.textAlign = 'left';
+      // small pill background for readability
+      const tw = ctx.measureText(tag).width;
+      ctx.globalAlpha = 0.65;
+      ctx.fillStyle = '#131722';
+      ctx.fillRect(chartLeft + 2, y - 12, tw + 8, 14);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = hexToRgba(col, 0.9);
+      ctx.fillText(tag, chartLeft + 6, y - 2);
+      ctx.restore();
+    }
+  });
+
+  // ── 2. "No setup" panel — centered ──────────────────────────────────────
+  if (overlay.setups.length === 0) {
+    const boxW = 280;
+    const boxH = 44;
+    const cx = chartLeft + (chartRight - chartLeft) / 2;
+    const px = cx - boxW / 2;
+    const py = area.y + 12;
+    ctx.save();
+    ctx.globalAlpha = 0.88;
+    ctx.fillStyle = '#1e222d';
+    ctx.fillRect(px, py, boxW, boxH);
+    ctx.globalAlpha = 1;
+    ctx.textAlign = 'center';
+    ctx.font = `bold 12px ${mono}`;
+    ctx.fillStyle = '#f59e42';
+    ctx.fillText('⚠  L2L 분석', cx, py + 15);
+    ctx.font = `11px ${mono}`;
+    ctx.fillStyle = '#848e9c';
+    ctx.fillText('현재 차트에서 유효한 리테스트 셋업 없음', cx, py + 31);
+    ctx.restore();
+    return;
+  }
+
+  // ── 3. Per-setup overlays ────────────────────────────────────────────────
+  overlay.setups.forEach((setup) => {
+    const isLong     = setup.direction === 'long';
+    const entryColor = isLong ? '#0ecb81' : '#f6465d';
+    const tpColor    = '#38bdf8';
+    const slColor    = isLong ? '#f6465d' : '#f59e42';
+
+    const pctFn = (a: number, b: number) =>
+      ((Math.abs(a - b) / b) * 100).toFixed(2) + '%';
+
+    // ── Entry zone: colored filled band ────────────────────────────────
+    drawBand(setup.entryZoneHigh, setup.entryZoneLow, entryColor, 0.15);
+    // Zone border lines (dashed)
+    drawHLine(setup.entryZoneHigh, hexToRgba(entryColor, 0.5), [4, 3], 1);
+    drawHLine(setup.entryZoneLow,  hexToRgba(entryColor, 0.5), [4, 3], 1);
+    // "진입 구간" label at the center of the zone
+    const zoneMid = (setup.entryZoneHigh + setup.entryZoneLow) / 2;
+    if (inView(zoneMid)) {
+      const yz = priceToY(zoneMid, vp, area);
+      ctx.save();
+      ctx.font = `bold 11px ${mono}`;
+      ctx.textAlign = 'left';
+      ctx.fillStyle = hexToRgba(entryColor, 0.85);
+      ctx.fillText(isLong ? '▲ 진입 구간' : '▼ 진입 구간', chartLeft + 8, yz + 4);
+      ctx.restore();
+    }
+
+    // ── Ideal entry: solid 2px line + axis badge ────────────────────────
+    drawHLine(setup.idealEntry, entryColor, [], 2);
+    drawAxisBadge(
+      setup.idealEntry,
+      `진입  ${formatPrice(setup.idealEntry)}`,
+      entryColor,
+    );
+    drawInlineLabel(
+      setup.idealEntry,
+      `이상적 진입  ${formatPrice(setup.idealEntry)}`,
+      entryColor, -8,
+    );
+
+    // ── TP1: blue solid line + axis badge ──────────────────────────────
+    drawHLine(setup.tp1, tpColor, [], 2);
+    drawAxisBadge(
+      setup.tp1,
+      `목표  ${formatPrice(setup.tp1)}`,
+      '#1a4d6e',
+      tpColor,
+    );
+    drawInlineLabel(
+      setup.tp1,
+      `목표가 (TP1)  ${formatPrice(setup.tp1)}  +${pctFn(setup.tp1, setup.idealEntry)}`,
+      tpColor, -8,
+    );
+
+    // ── SL: colored solid line + axis badge ────────────────────────────
+    drawHLine(setup.hardStop, slColor, [], 2);
+    drawAxisBadge(
+      setup.hardStop,
+      `손절  ${formatPrice(setup.hardStop)}`,
+      isLong ? '#4d1a1a' : '#3d2a00',
+      slColor,
+    );
+    drawInlineLabel(
+      setup.hardStop,
+      `손절 (SL)  ${formatPrice(setup.hardStop)}  -${pctFn(setup.hardStop, setup.idealEntry)}`,
+      slColor, 16, 0.55,
+    );
+
+  });
+
+  // ── 4. Bottom legend strip ───────────────────────────────────────────────
+  const lgY = area.y + area.h - 20;
+  const legendItems = [
+    { color: '#0ecb81', dash: true,  label: '지지 (S1~S6) — 가격이 하락 후 반등하는 구간' },
+    { color: '#f6465d', dash: true,  label: '저항 (R1~R6) — 가격이 상승 후 되돌리는 구간' },
+    { color: '#0ecb81', dash: false, label: '진입 구간 / 이상적 진입가' },
+    { color: '#38bdf8', dash: false, label: '목표가 TP1 (다음 저항까지)' },
+    { color: '#f59e42', dash: false, label: '손절 SL' },
+  ];
+  ctx.save();
+  ctx.globalAlpha = 0.90;
+  ctx.fillStyle = '#1a1e2d';
+  ctx.fillRect(chartLeft, lgY - 2, chartRight - chartLeft, 22);
+  ctx.globalAlpha = 1;
+
+  // Title
+  ctx.font = `bold 10px ${mono}`;
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#f0b90b';
+  ctx.fillText('■ L2L 범례', chartLeft + 6, lgY + 13);
+  let lx = chartLeft + 76;
+
+  legendItems.forEach(item => {
+    // colored line swatch
+    ctx.strokeStyle = item.color;
+    ctx.lineWidth = item.dash ? 1 : 2;
+    ctx.setLineDash(item.dash ? [4, 3] : []);
+    ctx.beginPath();
+    ctx.moveTo(lx, lgY + 8);
+    ctx.lineTo(lx + 14, lgY + 8);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.font = `10px ${mono}`;
+    ctx.fillStyle = '#848e9c';
+    ctx.fillText(item.label, lx + 18, lgY + 13);
+    lx += ctx.measureText(item.label).width + 34;
+  });
+  ctx.restore();
 }

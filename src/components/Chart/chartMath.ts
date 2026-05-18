@@ -179,7 +179,23 @@ export function computeTimeTicks(
   const step = Math.max(1, Math.ceil(visibleCount / maxTicks));
   const ticks: number[] = [];
   const start = Math.max(0, Math.floor(startIdx));
-  const end = Math.min(candles.length - 1, Math.ceil(endIdx));
+  const end = Math.ceil(endIdx);
   for (let i = start; i <= end; i += step) ticks.push(i);
   return ticks;
+}
+
+const INTERVAL_MS: Record<string, number> = {
+  '1m': 60_000, '3m': 180_000, '5m': 300_000, '15m': 900_000,
+  '30m': 1_800_000, '1h': 3_600_000, '2h': 7_200_000, '4h': 14_400_000,
+  '6h': 21_600_000, '8h': 28_800_000, '12h': 43_200_000,
+  '1d': 86_400_000, '3d': 259_200_000, '1w': 604_800_000,
+};
+
+/** Returns the timestamp (ms) for a candle index, including future indices beyond the array. */
+export function candleTimeAt(candles: Candle[], idx: number, interval: string): number {
+  if (candles.length === 0) return 0;
+  if (idx < candles.length) return candles[Math.max(0, idx)].time;
+  const last = candles[candles.length - 1];
+  const ms = INTERVAL_MS[interval] ?? 3_600_000;
+  return last.time + (idx - (candles.length - 1)) * ms;
 }

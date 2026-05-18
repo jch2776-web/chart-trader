@@ -9,7 +9,7 @@
  *   unsubscribeBookTicker('SOLUSDT') // cleanup when symbol no longer needed
  */
 
-const WS_BASE = 'wss://fstream.binance.com/ws';
+const WS_BASE = 'wss://fstream.binance.com/market/ws';
 
 interface BidAsk {
   bid: number;

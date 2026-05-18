@@ -32,7 +32,7 @@ export function getNextAlignedCloseTime(nowMs: number, intervalMs: number): numb
 
 const TTL_BARS: Record<string, number> = {
   '15m': 12, '30m': 8, '1h': 6, '2h': 4,
-  '4h': 3,  '6h': 3,  '8h': 2, '12h': 2, '1d': 2,
+  '4h': 3,  '6h': 3,  '8h': 2, '12h': 2, '1d': 2, '1w': 2,
 };
 export function getTtlBars(interval: string): number {
   return TTL_BARS[interval] ?? 4;
@@ -40,7 +40,7 @@ export function getTtlBars(interval: string): number {
 
 const VOL_FACTOR: Record<string, number> = {
   '15m': 1.5, '30m': 1.4, '1h': 1.3, '2h': 1.3,
-  '4h': 1.5,  '6h': 1.4,  '1d': 1.3,
+  '4h': 1.5,  '6h': 1.4,  '1d': 1.3, '1w': 1.3,
 };
 export function getVolFactor(interval: string): number {
   return VOL_FACTOR[interval] ?? 1.3;
@@ -48,7 +48,7 @@ export function getVolFactor(interval: string): number {
 
 const MAX_DIST_PCT: Record<string, number> = {
   '15m': 0.8, '30m': 1.0, '1h': 1.2, '2h': 1.2,
-  '4h': 1.2,  '6h': 1.5,  '1d': 2.0,
+  '4h': 1.2,  '6h': 1.5,  '1d': 2.0, '1w': 3.0,
 };
 export function getMaxDistPct(interval: string): number {
   return MAX_DIST_PCT[interval] ?? 1.2;

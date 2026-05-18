@@ -617,10 +617,10 @@ export function useAltAutoTrade({
           // Gate 1: status routing
           //   TRIGGERED → price inside entry zone → executor sends LIMIT_IOC
           //   PENDING   → zone 미도달, setup alive → executor sends resting LIMIT_GTC
-          //   INVALID   → chasing / lateAbove 초과 / 구조 무효 → 진입 금지
+          //   INVALID   → chasing / chaseThreshold 초과 / 구조 무효 → 진입 금지
           if (c.status === 'INVALID') {
             // Defensive: pre-filtered above, but guard explicitly.
-            addLog(`⛔ [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — INVALID (lateAbove 초과 또는 구조 무효) → 추격 진입 금지`, 'warn');
+            addLog(`⛔ [${interval}] ${c.symbol} ${c.direction.toUpperCase()} — INVALID (chaseThreshold 초과 또는 구조 무효) → 추격 진입 금지`, 'warn');
             continue;
           }
           if (c.status === 'TRIGGERED') {

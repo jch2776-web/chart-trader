@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import type { Interval } from '../types/candle';
 import type { DrawingMode } from '../types/drawing';
 import { DRAWING_COLORS } from '../types/drawing';
@@ -71,9 +71,24 @@ interface Props {
   paperUnrealizedPnl?: number;
   // Binance API weight usage (0–2400)
   apiWeightUsed?: number;
+  // L2L overlay toggle
+  showL2L?: boolean;
+  onToggleL2L?: () => void;
+  // Leaderboard (admin-only toggle)
+  onOpenLeaderboard?: () => void;
+  leaderboardOpen?: boolean;
+  // Text/Label font size
+  textFontSize?: number;
+  onTextFontSizeChange?: (n: number) => void;
+  // Brush tool line width
+  brushLineWidth?: number;
+  onBrushLineWidthChange?: (n: number) => void;
+  // Drawing history
+  onUndo?: () => void;
+  onRedo?: () => void;
 }
 
-const INTERVALS: Interval[] = ['1m', '3m', '5m', '15m', '1h', '4h', '1d'];
+const INTERVALS: Interval[] = ['1m', '3m', '5m', '15m', '1h', '4h', '1d', '1w'];
 
 const FONT_MIN = 11;
 const FONT_MAX = 36;
@@ -94,6 +109,16 @@ export function Toolbar({
   liveBalance, liveMarginBalance, liveUnrealizedPnl,
   paperBalance, paperUnrealizedPnl,
   apiWeightUsed,
+  showL2L = false,
+  onToggleL2L,
+  onOpenLeaderboard,
+  leaderboardOpen = false,
+  textFontSize = 13,
+  onTextFontSizeChange,
+  brushLineWidth = 8,
+  onBrushLineWidthChange,
+  onUndo,
+  onRedo,
 }: Props) {
   const toggleMode = (m: DrawingMode) => {
     onDrawingModeChange(drawingMode === m ? 'none' : m);
@@ -160,10 +185,10 @@ export function Toolbar({
 
       {/* ── Top bar: board / community links ──────────────────────────────── */}
       <div style={styles.topBar}>
+        <div style={{ flex: 1 }} />
         <button style={styles.topBarBtn} onClick={onOpenBoard} title="도형 게시판">
           📋 도형게시판
         </button>
-        <div style={{ flex: 1 }} />
         {onOpenAltFaq && (
           <button style={styles.topBarBtn} onClick={onOpenAltFaq} title="ALT추천 스캐너 FAQ">
             📋 알트FAQ
@@ -182,6 +207,20 @@ export function Toolbar({
         {onOpenSecurityFaq && (
           <button style={styles.topBarBtn} onClick={onOpenSecurityFaq} title="보안 FAQ">
             🔒 보안FAQ
+          </button>
+        )}
+        {onOpenLeaderboard && (
+          <button
+            style={{
+              ...styles.topBarBtn,
+              ...(leaderboardOpen
+                ? { background: 'rgba(240,185,11,0.18)', color: '#f0b90b', borderColor: '#f0b90b' }
+                : {}),
+            }}
+            onClick={onOpenLeaderboard}
+            title={leaderboardOpen ? '리더보드 닫기' : '리더보드 열기'}
+          >
+            🏆 {leaderboardOpen ? '리더보드 ON' : '리더보드'}
           </button>
         )}
       </div>
@@ -222,69 +261,22 @@ export function Toolbar({
         </div>
       )}
 
-      {!isMultiMode && <div style={styles.divider} />}
-
-      {/* Drawing tools — hidden in multi-panel mode */}
-      {!isMultiMode && (
-        <div style={styles.drawingGroup}>
-          <button
-            style={{ ...styles.drawBtn, ...(drawingMode === 'none' ? styles.drawActive : {}) }}
-            onClick={() => onDrawingModeChange('none')}
-            title="포인터 (Esc)"
-          >
-            ↖
-          </button>
-          <button
-            style={{ ...styles.drawBtn, ...(drawingMode === 'trendline' ? styles.drawTrendlineActive : {}) }}
-            onClick={() => toggleMode('trendline')}
-            title="추세선 그리기"
-          >
-            ╱ 추세선
-          </button>
-          <button
-            style={{ ...styles.drawBtn, ...(drawingMode === 'box' ? styles.drawBoxActive : {}) }}
-            onClick={() => toggleMode('box')}
-            title="박스 그리기"
-          >
-            □ 박스
-          </button>
-          <button
-            style={{ ...styles.drawBtn, ...(drawingMode === 'hline' ? styles.drawHlineActive : {}) }}
-            onClick={() => toggleMode('hline')}
-            title="수평선 그리기"
-          >
-            — 수평선
-          </button>
-          <button
-            style={{ ...styles.drawBtn, ...(drawingMode === 'fib' ? styles.drawFibActive : {}) }}
-            onClick={() => toggleMode('fib')}
-            title="피보나치 되돌림 (두 점 클릭)"
-          >
-            ⟨⟩ 피보나치
-          </button>
-          <button
-            style={{ ...styles.drawBtn, ...(drawingMode === 'pricerange' ? styles.drawPriceRangeActive : {}) }}
-            onClick={() => toggleMode('pricerange')}
-            title="가격 범위 측정 (두 점 클릭)"
-          >
-            ↕ 가격범위
-          </button>
-          <button
-            style={{ ...styles.drawBtn, ...(drawingMode === 'daterange' ? styles.drawDateRangeActive : {}) }}
-            onClick={() => toggleMode('daterange')}
-            title="기간 범위 측정 (두 점 클릭)"
-          >
-            ↔ 기간범위
-          </button>
-        </div>
-      )}
-
       {/* Indicator toggles */}
       {!isMultiMode && (
         <>
           <div style={styles.divider} />
           <div style={styles.indicatorGroup}>
             <span style={styles.indicatorLabel}>지표</span>
+            <button
+              style={{ ...styles.indicatorBtn, ...(indicators.showMA !== false ? styles.indicatorMAActive : {}) }}
+              onClick={() => onToggleIndicator('showMA')}
+              title="이평선 표시/숨김 (MA7/25/99)"
+            >이평선</button>
+            <button
+              style={{ ...styles.indicatorBtn, ...(indicators.showBB !== false ? styles.indicatorBBActive : {}) }}
+              onClick={() => onToggleIndicator('showBB')}
+              title="볼린저밴드 표시/숨김 (BB20)"
+            >BB</button>
             <button
               style={{ ...styles.indicatorBtn, ...(indicators.coinDuckMABB ? styles.indicatorActive : {}) }}
               onClick={() => onToggleIndicator('coinDuckMABB')}
@@ -296,6 +288,14 @@ export function Toolbar({
               title="Divergence-Weighted Clouds (EMA9/26 구름)"
             >DW구름</button>
           </div>
+        </>
+      )}
+
+      {/* L2L toggle — analysis tool, lives in main toolbar */}
+      {!isMultiMode && onToggleL2L && (
+        <>
+          <div style={styles.divider} />
+          <DrawBtn active={showL2L ?? false} activeStyle={styles.drawL2LActive} onClick={() => onToggleL2L()} title="레벨투레벨 분석 (지지/저항 돌파-리테스트-회복 패턴)">⊞ L2L</DrawBtn>
         </>
       )}
 
@@ -670,6 +670,32 @@ export function Toolbar({
         onClear={onClearErrors ?? (() => {})}
       />
       </div>
+
+      {/* ── Drawing tools row — wraps naturally ────────────────────────────── */}
+      {!isMultiMode && (
+        <div style={styles.drawRow}>
+          {/* Undo / Redo */}
+          <DrawBtn active={false} activeStyle={{}} onClick={() => onUndo?.()} title="실행 취소 (Ctrl+Z)">↩ 취소</DrawBtn>
+          <DrawBtn active={false} activeStyle={{}} onClick={() => onRedo?.()} title="다시 실행 (Ctrl+Shift+Z / Ctrl+Y)">↪ 재실행</DrawBtn>
+          <div style={styles.divider} />
+          <DrawBtn active={drawingMode === 'none'} activeStyle={styles.drawActive} onClick={() => onDrawingModeChange('none')} title="포인터 (Esc)">↖</DrawBtn>
+          <DrawBtn active={drawingMode === 'trendline'} activeStyle={styles.drawTrendlineActive} onClick={() => toggleMode('trendline')} title="추세선">╱ 추세선</DrawBtn>
+          <DrawBtn active={drawingMode === 'box'} activeStyle={styles.drawBoxActive} onClick={() => toggleMode('box')} title="박스">□ 박스</DrawBtn>
+          <DrawBtn active={drawingMode === 'hline'} activeStyle={styles.drawHlineActive} onClick={() => toggleMode('hline')} title="수평선">— 수평선</DrawBtn>
+          <DrawBtn active={drawingMode === 'channel'} activeStyle={styles.drawTrendlineActive} onClick={() => toggleMode('channel')} title="평행채널 (3점)">⫿ 평행채널</DrawBtn>
+          <DrawBtn active={drawingMode === 'fib'} activeStyle={styles.drawFibActive} onClick={() => toggleMode('fib')} title="피보나치">⟨⟩ 피보나치</DrawBtn>
+          <DrawBtn active={drawingMode === 'pricerange'} activeStyle={styles.drawPriceRangeActive} onClick={() => toggleMode('pricerange')} title="가격범위">↕ 가격범위</DrawBtn>
+          <DrawBtn active={drawingMode === 'daterange'} activeStyle={styles.drawDateRangeActive} onClick={() => toggleMode('daterange')} title="기간범위">↔ 기간범위</DrawBtn>
+          <DrawBtn active={drawingMode === 'text'} activeStyle={styles.drawTextActive} onClick={() => toggleMode('text')} title="텍스트">T 텍스트</DrawBtn>
+          <DrawBtn active={drawingMode === 'label'} activeStyle={styles.drawLabelActive} onClick={() => toggleMode('label')} title="레이블 박스">▭ 레이블</DrawBtn>
+          <DrawBtn active={drawingMode === 'xabcd'} activeStyle={styles.drawTrendlineActive} onClick={() => toggleMode('xabcd')} title="XABCD 하모닉 패턴 (5점)">⛛ XABCD</DrawBtn>
+          <DrawBtn active={drawingMode === 'brush'} activeStyle={styles.drawBrushActive} onClick={() => toggleMode('brush')} title="브러쉬 (드래그로 자유롭게 그리기 / 마우스 우클릭으로 종료)">✏ 브러쉬</DrawBtn>
+          {drawingMode === 'brush' && (
+            <BrushWidthSelect value={brushLineWidth} onChange={n => onBrushLineWidthChange?.(n)} />
+          )}
+          <FontSizeSelect value={textFontSize ?? 13} onChange={n => onTextFontSizeChange?.(n)} />
+        </div>
+      )}
     </div>
   );
 }
@@ -684,6 +710,203 @@ function Stat({ label, value, valueColor }: { label: string; value: string; valu
         {value}
       </div>
     </div>
+  );
+}
+
+// ── Font-size custom dropdown (native select ignores dark bg on most browsers) ─
+const FONT_SIZE_OPTIONS = [10, 12, 14, 16, 18, 20, 24, 28, 32];
+
+function FontSizeSelect({ value, onChange }: { value: number; onChange: (n: number) => void }) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div style={{ position: 'relative', flexShrink: 0 }} title="텍스트/레이블 글씨 크기">
+      <button
+        style={{
+          background: '#131720',
+          border: '1px solid #2a2e39',
+          borderRadius: 4,
+          color: '#848e9c',
+          cursor: 'pointer',
+          fontSize: '0.82rem',
+          height: 26,
+          padding: '0 8px',
+          fontFamily: 'inherit',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 4,
+          whiteSpace: 'nowrap',
+          transition: 'border-color 0.15s',
+          minWidth: 56,
+          justifyContent: 'space-between',
+        }}
+        onClick={() => setOpen(o => !o)}
+      >
+        <span>{value}px</span>
+        <span style={{ fontSize: '0.6rem', opacity: 0.5 }}>{open ? '▲' : '▼'}</span>
+      </button>
+      {open && (
+        <>
+          {/* overlay to close on outside click */}
+          <div
+            style={{ position: 'fixed', inset: 0, zIndex: 999 }}
+            onClick={() => setOpen(false)}
+          />
+          <div style={{
+            position: 'absolute',
+            top: '100%',
+            left: 0,
+            zIndex: 1000,
+            marginTop: 2,
+            background: '#131720',
+            border: '1px solid #2a2e39',
+            borderRadius: 4,
+            boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
+            overflow: 'hidden',
+            minWidth: 56,
+          }}>
+            {FONT_SIZE_OPTIONS.map(s => (
+              <div
+                key={s}
+                style={{
+                  padding: '4px 10px',
+                  fontSize: '0.82rem',
+                  color: s === value ? '#f0b90b' : '#848e9c',
+                  background: s === value ? 'rgba(240,185,11,0.08)' : 'none',
+                  cursor: 'pointer',
+                  whiteSpace: 'nowrap',
+                  transition: 'background 0.1s',
+                }}
+                onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.06)'; }}
+                onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = s === value ? 'rgba(240,185,11,0.08)' : 'none'; }}
+                onClick={() => { onChange(s); setOpen(false); }}
+              >
+                {s}px
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Brush width custom dropdown ───────────────────────────────────────────────
+const BRUSH_WIDTH_OPTIONS = [2, 4, 6, 8, 12, 16, 20];
+
+function BrushWidthSelect({ value, onChange }: { value: number; onChange: (n: number) => void }) {
+  const [open, setOpen] = useState(false);
+  const preview: React.CSSProperties = {
+    display: 'inline-block',
+    width: 24,
+    height: value,
+    maxHeight: 14,
+    background: 'currentColor',
+    borderRadius: value / 2,
+    flexShrink: 0,
+    opacity: 0.7,
+  };
+  return (
+    <div style={{ position: 'relative', flexShrink: 0 }} title="브러쉬 두께">
+      <button
+        style={{
+          background: '#131720', border: '1px solid #2a2e39', borderRadius: 4,
+          color: '#848e9c', cursor: 'pointer', fontSize: '0.82rem',
+          height: 26, padding: '0 8px', fontFamily: 'inherit',
+          display: 'inline-flex', alignItems: 'center', gap: 6,
+          whiteSpace: 'nowrap', minWidth: 64, justifyContent: 'space-between',
+        }}
+        onClick={() => setOpen(o => !o)}
+      >
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+          <span style={preview} />
+          <span>{value}px</span>
+        </span>
+        <span style={{ fontSize: '0.6rem', opacity: 0.5 }}>{open ? '▲' : '▼'}</span>
+      </button>
+      {open && (
+        <>
+          <div style={{ position: 'fixed', inset: 0, zIndex: 999 }} onClick={() => setOpen(false)} />
+          <div style={{
+            position: 'absolute', top: '100%', left: 0, zIndex: 1000, marginTop: 2,
+            background: '#131720', border: '1px solid #2a2e39', borderRadius: 4,
+            boxShadow: '0 4px 12px rgba(0,0,0,0.5)', overflow: 'hidden', minWidth: 64,
+          }}>
+            {BRUSH_WIDTH_OPTIONS.map(s => (
+              <div
+                key={s}
+                style={{
+                  padding: '5px 10px', fontSize: '0.82rem',
+                  color: s === value ? '#f0b90b' : '#848e9c',
+                  background: s === value ? 'rgba(240,185,11,0.08)' : 'none',
+                  cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8,
+                }}
+                onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.06)'; }}
+                onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = s === value ? 'rgba(240,185,11,0.08)' : 'none'; }}
+                onClick={() => { onChange(s); setOpen(false); }}
+              >
+                <span style={{ display: 'inline-block', width: 24, height: Math.min(s, 12), background: 'currentColor', borderRadius: 6, flexShrink: 0, opacity: 0.8 }} />
+                {s}px
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Hover-aware drawing button ────────────────────────────────────────────────
+function DrawBtn({
+  active,
+  activeStyle,
+  onClick,
+  title,
+  children,
+}: {
+  active: boolean;
+  activeStyle: React.CSSProperties;
+  onClick: () => void;
+  title: string;
+  children: React.ReactNode;
+}) {
+  const [hov, setHov] = useState(false);
+  const base: React.CSSProperties = {
+    background: 'none',
+    border: '1px solid #2a2e39',
+    borderRadius: 4,
+    color: '#848e9c',
+    cursor: 'pointer',
+    fontSize: '0.85rem',
+    padding: '0 10px',
+    height: 26,
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 4,
+    fontFamily: 'inherit',
+    whiteSpace: 'nowrap',
+    flexShrink: 0,
+    boxSizing: 'border-box',
+    transition: 'all 0.15s ease',
+    userSelect: 'none',
+  };
+  const hovStyle: React.CSSProperties = hov && !active ? {
+    borderColor: '#4a5568',
+    color: '#c9d1dc',
+    background: 'rgba(255,255,255,0.06)',
+    boxShadow: '0 0 6px rgba(180,200,255,0.18)',
+    transform: 'translateY(-1px)',
+  } : {};
+  return (
+    <button
+      style={{ ...base, ...(active ? activeStyle : {}), ...hovStyle }}
+      onClick={onClick}
+      title={title}
+      onMouseEnter={() => setHov(true)}
+      onMouseLeave={() => setHov(false)}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -769,6 +992,15 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     flexShrink: 0,
   },
+  drawRow: {
+    display: 'flex',
+    flexWrap: 'wrap' as const,
+    gap: 4,
+    padding: '4px 12px',
+    borderTop: '1px solid #1a1e2b',
+    alignItems: 'center',
+    flexShrink: 0,
+  },
   drawBtn: {
     background: 'none',
     border: '1px solid #2a2e39',
@@ -821,6 +1053,41 @@ const styles: Record<string, React.CSSProperties> = {
     borderColor: '#a855f7',
     color: '#a855f7',
     background: 'rgba(168,85,247,0.1)',
+  },
+  drawL2LActive: {
+    borderColor: '#f59e42',
+    color: '#f59e42',
+    background: 'rgba(245,158,66,0.12)',
+  },
+  drawTextActive: {
+    borderColor: '#d1d4dc',
+    color: '#d1d4dc',
+    background: 'rgba(209,212,220,0.12)',
+  },
+  drawLabelActive: {
+    borderColor: '#e8b73a',
+    color: '#e8b73a',
+    background: 'rgba(232,183,58,0.12)',
+  },
+  drawBrushActive: {
+    borderColor: '#c084fc',
+    color: '#c084fc',
+    background: 'rgba(192,132,252,0.12)',
+  },
+  fontSizeSelect: {
+    background: '#131720',
+    border: '1px solid #2a2e39',
+    borderRadius: 4,
+    color: '#848e9c',
+    cursor: 'pointer',
+    fontSize: '0.82rem',
+    height: 26,
+    padding: '0 6px',
+    fontFamily: 'inherit',
+    flexShrink: 0,
+    outline: 'none',
+    width: 58,
+    appearance: 'none' as const,
   },
   // ── Color swatches ────────────────────────────────────────────────────────
   colorGroup: {
@@ -956,6 +1223,12 @@ const styles: Record<string, React.CSSProperties> = {
   },
   indicatorDWActive: {
     borderColor: '#22d3ee', color: '#22d3ee', background: 'rgba(34,211,238,0.1)',
+  },
+  indicatorMAActive: {
+    borderColor: '#c67ba5', color: '#c67ba5', background: 'rgba(198,123,165,0.1)',
+  },
+  indicatorBBActive: {
+    borderColor: '#38bdf8', color: '#38bdf8', background: 'rgba(56,189,248,0.1)',
   },
   // ── Mobile nav buttons ────────────────────────────────────────────────────
   mobileNavBtn: {

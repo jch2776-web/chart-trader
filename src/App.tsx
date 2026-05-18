@@ -64,6 +64,15 @@ import type { ScalpSettings } from './scalp/scalpSettings';
 import type { PlaceOrderOptions } from './hooks/useBinanceFutures';
 import { db, isFirebaseConfigured } from './lib/firebase';
 import { doc, onSnapshot, runTransaction } from 'firebase/firestore';
+import { fetchAndComputeRegimeSnapshot } from './advisor/marketRegimeEngine';
+import { computeStrategyAdvisor } from './advisor/strategyAdvisor';
+import type { StrategyAdvisorOutput } from './advisor/strategyAdvisor';
+import { MarketRegimeBanner } from './components/Advisor/MarketRegimeBanner';
+import { StrategyAdviceCards } from './components/Advisor/StrategyAdviceCards';
+import { LeaderboardModal } from './components/Leaderboard/LeaderboardModal';
+import { isAdmin } from './hooks/useAuth';
+import { checkMyLeaderboardAccess } from './lib/tradeSync';
+import { uploadTradeToFirestore, patchTradeDoc, getUploadedIds, markUploaded, registerUserInFirestore, publishLivePositions } from './lib/tradeSync';
 
 export interface BreakoutFlash {
   id: string;
@@ -152,6 +161,7 @@ interface LiveTrackedAltPosition {
   markPrice: number;
   leverage: number;
   positionSide: 'LONG' | 'SHORT' | 'BOTH';
+  marginType?: 'isolated' | 'cross';
   entryTime?: number;
   seenOpen: boolean;
 }
@@ -317,10 +327,68 @@ function AppInner() {
   const [ticker, setTicker] = useState('BTCUSDT');
   const [interval, setInterval] = useState<Interval>('15m');
   const [drawingMode, setDrawingMode] = useState<DrawingMode>('none');
+  const [showL2L, setShowL2L] = useState(false);
   const [selectedDrawingId, setSelectedDrawingId] = useState<string | null>(null);
+  const [chartReloadToken, setChartReloadToken] = useState(0);
+  const [chartViewportPreset, setChartViewportPreset] = useState<{
+    visibleBars?: number;
+    rightPad?: number;
+    minPrice?: number;
+    maxPrice?: number;
+  } | null>(null);
   const [logs, setLogs] = useState<ActivityLog[]>([]);
   const [flashes, setFlashes] = useState<BreakoutFlash[]>([]);
   const [showSoundSettings, setShowSoundSettings] = useState(false);
+
+  // ── Market Regime Advisor (1H 봉 마감 정시 갱신) ────────────────────────
+  // advisorScanRef: 스캔 결과를 effect 클로저에서 읽기 위한 ref — effect보다 먼저 선언해야 함
+  const advisorScanRef = useRef<{ cache: Record<string, ScanCandidate[]>; symbolCount: number }>({ cache: {}, symbolCount: 0 });
+  const [advisorOutput, setAdvisorOutput] = useState<StrategyAdvisorOutput | null>(null);
+  React.useEffect(() => {
+    let mounted = true;
+    let timerId: number;
+
+    async function runOnce() {
+      const ac = new AbortController();
+      try {
+        const { cache, symbolCount } = advisorScanRef.current;
+        const allCandidates = Object.values(cache).flat();
+        const uniqueLongSymbols = new Set(
+          allCandidates.filter(c => c.direction === 'long').map(c => c.symbol),
+        );
+        const breadth = symbolCount > 0 ? uniqueLongSymbols.size / symbolCount : null;
+        const snapshot = await fetchAndComputeRegimeSnapshot(
+          { manualEventRisk: false, breadth },
+          ac.signal,
+        );
+        if (!mounted) return;
+        const output = computeStrategyAdvisor(snapshot);
+        console.log('[Advisor] state=', snapshot.state, 'confidence=', snapshot.confidence);
+        setAdvisorOutput(output);
+      } catch (err) {
+        if (err instanceof Error && err.name === 'AbortError') return;
+        console.error('[Advisor] runOnce error:', err);
+      }
+    }
+
+    // 다음 정시(1H 봉 마감)에 맞춰 자기 스케줄링
+    function scheduleAtNextHour() {
+      const now = Date.now();
+      const nextHour = Math.floor(now / 3_600_000) * 3_600_000 + 3_600_000;
+      timerId = window.setTimeout(() => {
+        void runOnce();
+        scheduleAtNextHour();
+      }, nextHour - now);
+    }
+
+    void runOnce();      // 앱 로드 시 즉시 1회 실행
+    scheduleAtNextHour(); // 이후 매 정시마다 갱신
+
+    return () => {
+      mounted = false;
+      window.clearTimeout(timerId);
+    };
+  }, []);
 
   // Sound player — exposes playBuy / playSell called at trade execution points
   const soundPlayer = useSoundPlayer();
@@ -357,8 +425,25 @@ function AppInner() {
     try { localStorage.setItem(uk('drawing-color'), activeColor); } catch {}
   }, [activeColor]);
 
+  // ── Text/label font size (persisted) ─────────────────────────────────
+  const [textFontSize, setTextFontSize] = React.useState<number>(() => {
+    try { return Number(localStorage.getItem(uk('text-font-size'))) || 13; } catch { return 13; }
+  });
+  React.useEffect(() => {
+    try { localStorage.setItem(uk('text-font-size'), String(textFontSize)); } catch {}
+  }, [textFontSize]);
+
+  const [brushLineWidth, setBrushLineWidth] = React.useState<number>(() => {
+    try { return Number(localStorage.getItem(uk('brush-line-width'))) || 8; } catch { return 8; }
+  });
+  React.useEffect(() => {
+    try { localStorage.setItem(uk('brush-line-width'), String(brushLineWidth)); } catch {}
+  }, [brushLineWidth]);
+
   // ── Multi-panel mode ──────────────────────────────────────────────────
   const [isMultiMode, setIsMultiMode] = useState(false);
+  const [showLeaderboard, setShowLeaderboard] = useState(true);
+  const [hasLbAccess, setHasLbAccess]         = useState(isAdmin());
   const [showBoard, setShowBoard] = useState(false);
   const [showUserBoard, setShowUserBoard] = useState(false);
   const [showSecurityFaq, setShowSecurityFaq] = useState(false);
@@ -567,6 +652,11 @@ function AppInner() {
   const updateColorFnRef = useRef<((id: string, color: string) => void) | null>(null);
   // Ref to CandleChart's internal updateDrawingActive fn
   const updateActiveFnRef = useRef<((id: string, active: boolean) => void) | null>(null);
+  // Ref to CandleChart's internal updateDrawingText fn
+  const updateTextFnRef = useRef<((id: string, text: string, fontSize?: number) => void) | null>(null);
+  // Undo/redo
+  const undoFnRef = useRef<(() => void) | null>(null);
+  const redoFnRef = useRef<(() => void) | null>(null);
 
   const addLog = useCallback((type: ActivityLog['type'], message: string) => {
     const now = Date.now();
@@ -974,6 +1064,114 @@ function AppInner() {
   React.useEffect(() => {
     try { localStorage.setItem(uk('live-trade-history'), JSON.stringify(liveHistory)); } catch {}
   }, [liveHistory]);
+
+  // ── Firestore trade upload ────────────────────────────────────────────
+  const uploadInFlightRef = React.useRef<Set<string>>(new Set());
+  // tradeId -> { docId, snapshot of values at upload time }
+  const uploadedDocIdRef  = React.useRef<Record<string, {
+    docId: string;
+    pnl: number; entryPrice: number | null; exitPrice: number | null;
+    qty: number;  entryTime: number | null;
+  }>>({});
+
+  React.useEffect(() => {
+    if (!CURRENT_USER || !isFirebaseConfigured()) return;
+    const uploaded = getUploadedIds(CURRENT_USER);
+    const toUpload = liveHistory.filter(
+      e => !uploaded.has(e.id) && !uploadInFlightRef.current.has(e.id)
+        && e.pnl != null && e.exitTime > 0
+    );
+    for (const entry of toUpload) {
+      uploadInFlightRef.current.add(entry.id);
+      uploadTradeToFirestore(entry, CURRENT_USER)
+        .then(ref => {
+          markUploaded(CURRENT_USER!, entry.id);
+          if (ref) {
+            uploadedDocIdRef.current[entry.id] = {
+              docId:      ref.id,
+              pnl:        entry.pnl!,
+              entryPrice: entry.entryPrice ?? null,
+              exitPrice:  entry.exitPrice  ?? null,
+              qty:        entry.qty,
+              entryTime:  entry.entryTime  ?? null,
+            };
+          }
+        })
+        .catch(() => { uploadInFlightRef.current.delete(entry.id); });
+    }
+
+    // Patch fields that enrichment has updated since upload
+    for (const entry of liveHistory) {
+      const snap = uploadedDocIdRef.current[entry.id];
+      if (!snap) continue;
+      const patch: Record<string, unknown> = {};
+      if (entry.entryTime != null && entry.entryTime !== snap.entryTime)
+        patch.entryTime = entry.entryTime;
+      if (entry.pnl != null && entry.pnl !== snap.pnl)
+        patch.pnl = entry.pnl;
+      if (entry.entryPrice != null && entry.entryPrice !== snap.entryPrice)
+        patch.entryPrice = entry.entryPrice;
+      if (entry.exitPrice != null && entry.exitPrice !== snap.exitPrice)
+        patch.exitPrice = entry.exitPrice;
+      if (entry.qty !== snap.qty)
+        patch.qty = entry.qty;
+      if (Object.keys(patch).length > 0) {
+        // Update snapshot so we don't re-patch on the next render
+        uploadedDocIdRef.current[entry.id] = {
+          ...snap,
+          pnl:        entry.pnl        ?? snap.pnl,
+          entryPrice: entry.entryPrice ?? snap.entryPrice,
+          exitPrice:  entry.exitPrice  ?? snap.exitPrice,
+          qty:        entry.qty,
+          entryTime:  entry.entryTime  ?? snap.entryTime,
+        };
+        void patchTradeDoc(snap.docId, patch as Parameters<typeof patchTradeDoc>[1]);
+      }
+    }
+  }, [liveHistory]);
+
+  // ── Register user in Firestore + check leaderboard access ────────────
+  React.useEffect(() => {
+    if (!CURRENT_USER) return;
+    void registerUserInFirestore(CURRENT_USER);
+    if (!isAdmin()) {
+      void checkMyLeaderboardAccess(CURRENT_USER).then(ok => setHasLbAccess(ok));
+    }
+  }, []);
+
+  // ── Publish open positions to Firestore for leaderboard ───────────────
+  React.useEffect(() => {
+    if (!CURRENT_USER || !binanceApiKey || !binanceApiSecret) return;
+    const openPositions = futuresAllPositions
+      .filter(p => Math.abs(p.positionAmt) > 0)
+      .map(p => {
+        const direction = p.positionAmt > 0 ? 'long' : 'short';
+        const key = `${p.symbol}_${direction}`;
+        const altMeta = liveAltMetaMap[key];
+        const pending = pendingLiveTPSLMap[key];
+        const tp = altMeta?.plannedTP ?? pending?.tp ?? null;
+        const sl = altMeta?.slPrice ?? pending?.sl ?? null;
+        const validUntil = altMeta?.validUntilTime ?? null;
+        return {
+          symbol:           p.symbol,
+          positionSide:     (p.positionSide === 'BOTH' ? (p.positionAmt > 0 ? 'LONG' : 'SHORT') : p.positionSide) as 'LONG' | 'SHORT',
+          qty:              Math.abs(p.positionAmt),
+          entryPrice:       p.entryPrice,
+          markPrice:        p.markPrice,
+          unrealizedPnl:    p.unrealizedProfit,
+          leverage:         p.leverage,
+          liquidationPrice: p.liquidationPrice > 0 ? p.liquidationPrice : null,
+          marginType:       p.marginType ?? null,
+          entryTime:        p.entryTime ?? null,
+          isAltTrade:       key in liveAltMetaMap,
+          tp,
+          sl,
+          validUntil,
+        };
+      });
+    void publishLivePositions(CURRENT_USER, openPositions);
+  }, [futuresAllPositions, liveAltMetaMap, pendingLiveTPSLMap, binanceApiKey, binanceApiSecret]);
+
   const liveHistoryRef = useRef<LiveTradeHistoryEntry[]>(liveHistory);
   liveHistoryRef.current = liveHistory;
   const liveCloseSoundSeenRef = useRef<Set<string>>(new Set(liveHistory.map(row => row.id)));
@@ -1147,8 +1345,11 @@ function AppInner() {
 
   // ── Chart indicators ──────────────────────────────────────────────────
   const [indicators, setIndicators] = useState<IndicatorConfig>(() => {
-    try { return JSON.parse(localStorage.getItem(uk('indicators')) ?? '{}') as IndicatorConfig; }
-    catch { return { coinDuckMABB: false, dwCloud: false }; }
+    try {
+      const saved = JSON.parse(localStorage.getItem(uk('indicators')) ?? '{}') as IndicatorConfig;
+      return { ...saved, coinDuckMABB: saved.coinDuckMABB ?? false, dwCloud: saved.dwCloud ?? false, showMA: saved.showMA ?? true, showBB: saved.showBB ?? true };
+    }
+    catch { return { coinDuckMABB: false, dwCloud: false, showMA: true, showBB: true }; }
   });
   React.useEffect(() => {
     try { localStorage.setItem(uk('indicators'), JSON.stringify(indicators)); } catch {}
@@ -1265,7 +1466,7 @@ function AppInner() {
 
     if (pairs.length === 0) return;
 
-    const wsBase = 'wss://fstream.binance.com/ws';
+    const wsBase = 'wss://fstream.binance.com/market/ws';
     const sockets: WebSocket[] = [];
 
     for (const { symbol, interval } of pairs) {
@@ -1390,11 +1591,14 @@ function AppInner() {
   // the viewport never resets — causing a blank or misaligned chart.
   const handleIntervalChange = useCallback((iv: Interval) => {
     setCandles([]);
+    setChartViewportPreset(null);
     setInterval(iv);
   }, [setCandles]);
 
   // ── Ticker change ─────────────────────────────────────────────────────
   const { tickers, loading: tickersLoading } = useTickers();
+  // Sync advisor scan ref (latest values, no re-render in advisor effect)
+  advisorScanRef.current = { cache: altScanCandidatesCache, symbolCount: tickers.length };
 
   const strategyLab = useStrategyLab(uk('paper-lab'), tickers.map(t => t.symbol));
   const strategyLabRef = useRef(strategyLab);
@@ -1426,6 +1630,7 @@ function AppInner() {
   const handleTickerSelect = useCallback((symbol: string, force = false) => {
     if (!force && symbol === tickerRef.current) return;
     setCandles([]);
+    setChartViewportPreset(null);
     setTicker(symbol);
     setSelectedDrawingId(null);
     setDrawingMode('none');
@@ -1550,6 +1755,7 @@ function AppInner() {
       try {
         const imported = JSON.parse(e.target?.result as string) as Record<string, Drawing[]>;
         setDrawingsByTicker(prev => ({ ...prev, ...imported }));
+        if (imported[tickerRef.current]) setChartReloadToken(t => t + 1);
         addLog('info', `도형 임포트 완료 — ${Object.keys(imported).length}개 티커`);
       } catch {
         addLog('error', '임포트 실패: 올바른 JSON 파일이 아닙니다');
@@ -1563,6 +1769,7 @@ function AppInner() {
     try {
       const imported = JSON.parse(drawingsJson) as Record<string, Drawing[]>;
       setDrawingsByTicker(prev => ({ ...prev, ...imported }));
+      if (imported[tickerRef.current]) setChartReloadToken(t => t + 1);
       addLog('info', `게시판에서 도형 가져오기 완료 — ${Object.keys(imported).length}개 티커`);
     } catch {
       addLog('error', '게시판 도형 가져오기 실패');
@@ -2816,11 +3023,11 @@ function AppInner() {
         `[ALT실전/retest] ${params.symbol} ${params.direction.toUpperCase()} — ` +
         `zone=[${op.entryZoneLow.toFixed(4)}~${op.entryZoneHigh.toFixed(4)}] ` +
         `ideal=${op.idealEntry.toFixed(4)} current=${markNow > 0 ? markNow.toFixed(4) : 'N/A'} ` +
-        `lateAbove=${op.lateAbove.toFixed(4)} status=${params.candidateStatus}`,
+        `chaseThreshold=${op.chaseThreshold.toFixed(4)} status=${params.candidateStatus}`,
       );
-      // lateAbove guard
+      // chaseThreshold guard
       if (markNow > 0) {
-        const tooLate = isLong ? markNow > op.lateAbove : markNow < op.lateAbove;
+        const tooLate = isLong ? markNow > op.chaseThreshold : markNow < op.chaseThreshold;
         if (tooLate) {
           liveInFlightRef.current.delete(liveKey);
           const msg = `[ALT실전] ${params.symbol} 현재가(${markNow.toFixed(4)})가 진입 허용 범위 초과 → 진입 스킵`;
@@ -4356,6 +4563,7 @@ function AppInner() {
           markPrice: pos.markPrice,
           leverage: pos.leverage,
           positionSide: pos.positionSide,
+          marginType: pos.marginType,
           entryTime: pos.entryTime ?? meta.liveEntryTime ?? snapTracked?.entryTime ?? nextTracked[key]?.entryTime,
           seenOpen: true,
         };
@@ -4461,6 +4669,7 @@ function AppInner() {
         exitTime,
         closeReason,
         isAltTrade: true,
+        marginType: tracked.marginType,
         interval: meta.scanInterval,
         candidateScore: meta.candidateScore,
         plannedEntry: meta.plannedEntry,
@@ -4571,6 +4780,7 @@ function AppInner() {
         markPrice: pos.markPrice,
         leverage: pos.leverage,
         positionSide: pos.positionSide,
+        marginType: pos.marginType,
         entryTime: pos.entryTime ?? nextManual[key]?.entryTime,
         seenOpen: true,
       };
@@ -4611,6 +4821,7 @@ function AppInner() {
         exitTime,
         closeReason,
         isAltTrade: false,
+        marginType: tracked.marginType,
         entrySource: 'manual',
         plannedTP: scalpPlanned?.plannedTP ?? null,
         plannedSL: scalpPlanned?.plannedSL ?? null,
@@ -5031,6 +5242,7 @@ function AppInner() {
                 onUpdateMemo={(id, memo) => updateMemoFnRef.current?.(id, memo)}
                 onUpdateColor={(id, color) => updateColorFnRef.current?.(id, color)}
                 onUpdateActive={(id, active) => updateActiveFnRef.current?.(id, active)}
+                onUpdateText={(id, text, fontSize) => updateTextFnRef.current?.(id, text, fontSize)}
                 binanceApiKey={binanceApiKey}
                 binanceApiSecret={binanceApiSecret}
                 onSaveApiKeys={handleSaveApiKeys}
@@ -5038,7 +5250,7 @@ function AppInner() {
                 futuresLoading={futuresLoading}
                 futuresError={futuresError}
                 futuresPositions={isPaperMode
-                  ? paperTrading.toFuturesPositions({ ...markPricesMapRef.current, [ticker]: currentPrice ?? 0 })
+                  ? paperTrading.toFuturesPositions({ [ticker]: currentPrice ?? 0, ...markPricesMapRef.current })
                   : futuresPositions}
                 futuresOrders={isPaperMode ? paperOrdersAsFutures : futuresOrders}
                 width={window.innerWidth}
@@ -5082,6 +5294,8 @@ function AppInner() {
         onOpenBoard={() => setShowBoard(true)}
         onOpenUserBoard={() => setShowUserBoard(true)}
         onOpenSecurityFaq={() => setShowSecurityFaq(true)}
+        onOpenLeaderboard={hasLbAccess ? () => setShowLeaderboard(v => !v) : undefined}
+        leaderboardOpen={showLeaderboard}
         onOpenAltFaq={() => setShowAltFaq(true)}
         onOpenScalpFaq={() => setShowScalpFaq(true)}
         onOpenAltScanner={() => { setAltScannerSnapshotMeta(undefined); setShowAltScanner(true); }}
@@ -5127,12 +5341,24 @@ function AppInner() {
           return s + pnl;
         }, 0) : undefined}
         apiWeightUsed={apiWeightUsed}
+        showL2L={showL2L}
+        onToggleL2L={() => setShowL2L(v => !v)}
+        textFontSize={textFontSize}
+        onTextFontSizeChange={setTextFontSize}
+        brushLineWidth={brushLineWidth}
+        onBrushLineWidthChange={setBrushLineWidth}
+        onUndo={() => undoFnRef.current?.()}
+        onRedo={() => redoFnRef.current?.()}
       />
       {autoTradeLeaderNotice && (
         <div style={styles.autoTradeLockNotice}>
           {autoTradeLeaderNotice}
         </div>
       )}
+
+      {/* ── Market Regime Advisor ────────────────────────────────────── */}
+      {advisorOutput && <MarketRegimeBanner advisor={advisorOutput} />}
+      {advisorOutput && <StrategyAdviceCards advisor={advisorOutput} />}
 
       {showAutoTradeSettings && (
         <AutoTradeSettingsModal
@@ -5170,6 +5396,10 @@ function AppInner() {
           sessionStats={scalpAutoTrade.stats}
           activeOrderCount={scalpAutoTrade.activeOrders.length}
           onResetBreaker={scalpAutoTrade.resetBreaker}
+          advisorSignalHint={(() => {
+            const hint = advisorOutput?.strategies.find(s => s.strategyId === 'scalp')?.preferredSignalMode;
+            return hint === 'off' || hint === undefined ? undefined : hint;
+          })()}
         />
       )}
 
@@ -5198,6 +5428,14 @@ function AppInner() {
           onClose={() => setShowUserBoard(false)}
         />
       )}
+
+      {showLeaderboard && (
+        <LeaderboardModal
+          currentUser={CURRENT_USER ?? ''}
+          onClose={() => setShowLeaderboard(false)}
+        />
+      )}
+
 
       {showDisclaimer && (
         <DisclaimerModal onAgree={() => {
@@ -5336,7 +5574,7 @@ function AppInner() {
                 <div style={styles.loadingOverlay}>로딩 중...</div>
               )}
               <CandleChart
-                key={ticker}
+                key={`${ticker}:${chartReloadToken}`}
                 candles={candles}
                 interval={interval}
                 ticker={ticker}
@@ -5348,6 +5586,9 @@ function AppInner() {
                 onSetUpdateMemoFn={(fn) => { updateMemoFnRef.current = fn; }}
                 onSetUpdateColorFn={(fn) => { updateColorFnRef.current = fn; }}
                 onSetUpdateActiveFn={(fn) => { updateActiveFnRef.current = fn; }}
+                onSetUpdateTextFn={(fn) => { updateTextFnRef.current = fn; }}
+                onSetUndoFn={(fn) => { undoFnRef.current = fn; }}
+                onSetRedoFn={(fn) => { redoFnRef.current = fn; }}
                 activeColor={activeColor}
                 flashes={flashes}
                 initialDrawings={currentDrawings}
@@ -5358,6 +5599,10 @@ function AppInner() {
                 highlightedDrawingPrice={highlightedDrawingPrice}
                 conditionalFormPrices={conditionalFormPrices}
                 indicators={indicators}
+                showL2L={showL2L}
+                textFontSize={textFontSize}
+                brushLineWidth={brushLineWidth}
+                initialViewportConfig={chartViewportPreset ?? undefined}
               />
             </>
           )}
@@ -5384,6 +5629,7 @@ function AppInner() {
             onUpdateMemo={(id, memo) => updateMemoFnRef.current?.(id, memo)}
             onUpdateColor={(id, color) => updateColorFnRef.current?.(id, color)}
             onUpdateActive={(id, active) => updateActiveFnRef.current?.(id, active)}
+            onUpdateText={(id, text, fontSize) => updateTextFnRef.current?.(id, text, fontSize)}
             binanceApiKey={binanceApiKey}
             binanceApiSecret={binanceApiSecret}
             onSaveApiKeys={handleSaveApiKeys}
@@ -5391,7 +5637,7 @@ function AppInner() {
             futuresLoading={futuresLoading}
             futuresError={futuresError}
             futuresPositions={isPaperMode
-              ? paperTrading.toFuturesPositions({ ...markPricesMapRef.current, [ticker]: currentPrice ?? 0 })
+              ? paperTrading.toFuturesPositions({ [ticker]: currentPrice ?? 0, ...markPricesMapRef.current })
               : futuresPositions}
             futuresOrders={isPaperMode ? paperOrdersAsFutures : futuresOrders}
             width={rightWidth}
@@ -5426,7 +5672,7 @@ function AppInner() {
           clientSlMap={futuresClientSlMap}
           onRemoveClientSL={futuresRemoveClientSL}
           isPaperMode={isPaperMode}
-          paperPositions={isPaperMode ? paperTrading.toFuturesPositions({ ...markPricesMapRef.current, [ticker]: currentPrice ?? 0 }) : undefined}
+          paperPositions={isPaperMode ? paperTrading.toFuturesPositions({ [ticker]: currentPrice ?? 0, ...markPricesMapRef.current }) : undefined}
           paperRawPositions={isPaperMode ? paperTrading.positions : undefined}
           paperBalance={paperTrading.balance}
           paperInitialBalance={paperTrading.initialBalance}

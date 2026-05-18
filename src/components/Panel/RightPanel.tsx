@@ -27,6 +27,7 @@ interface Props {
   onUpdateMemo: (id: string, memo: string) => void;
   onUpdateColor: (id: string, color: string) => void;
   onUpdateActive: (id: string, active: boolean) => void;
+  onUpdateText?: (id: string, text: string, fontSize?: number) => void;
   // Binance API / account
   binanceApiKey: string;
   binanceApiSecret: string;
@@ -61,7 +62,7 @@ export function RightPanel({
   drawings, selectedDrawingId, onSelectDrawing, onDeleteDrawing,
   tradeSettings, onTradeSettingsChange, onActivate, logs,
   telegramSettings, onTelegramSettingsChange,
-  onExport, onImport, onUpdateMemo, onUpdateColor, onUpdateActive,
+  onExport, onImport, onUpdateMemo, onUpdateColor, onUpdateActive, onUpdateText,
   binanceApiKey, binanceApiSecret, onSaveApiKeys, onClearApiKeys,
   futuresLoading, futuresError, futuresPositions, futuresOrders,
   width, currentUser, onLogout,
@@ -127,15 +128,18 @@ export function RightPanel({
 
       <div style={styles.content}>
         {tab === 'drawings' && (
-          <DrawingList
-            drawings={drawings}
-            selectedId={selectedDrawingId}
-            onSelect={onSelectDrawing}
-            onDelete={onDeleteDrawing}
-            onUpdateMemo={onUpdateMemo}
-            onUpdateColor={onUpdateColor}
-            onUpdateActive={onUpdateActive}
-          />
+          <>
+            <DrawingList
+              drawings={drawings}
+              selectedId={selectedDrawingId}
+              onSelect={onSelectDrawing}
+              onDelete={onDeleteDrawing}
+              onUpdateMemo={onUpdateMemo}
+              onUpdateColor={onUpdateColor}
+              onUpdateActive={onUpdateActive}
+              onUpdateText={onUpdateText}
+            />
+          </>
         )}
         {tab === 'trade' && (
           <TradeSettingsPanel
@@ -291,13 +295,15 @@ const styles: Record<string, React.CSSProperties> = {
   },
   toolbar: {
     display: 'flex',
+    flexWrap: 'wrap',
     gap: 4,
     padding: '6px 8px',
     borderBottom: '1px solid #2a2e39',
     flexShrink: 0,
   },
   toolBtn: {
-    flex: 1,
+    flex: '1 1 88px',
+    minWidth: 88,
     background: '#0d1520',
     border: '1px solid #1a2030',
     borderRadius: 4,
@@ -307,6 +313,34 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '5px 6px',
     fontFamily: 'inherit',
     transition: 'all 0.1s',
+  },
+  presetCard: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 8,
+    padding: '10px 10px 8px',
+    borderBottom: '1px solid #2a2e39',
+    background: '#181c27',
+    flexShrink: 0,
+  },
+  presetTitle: {
+    color: '#848e9c',
+    fontSize: '0.72rem',
+    fontWeight: 700,
+    letterSpacing: '0.02em',
+  },
+  presetBtn: {
+    width: '100%',
+    background: 'linear-gradient(135deg, #1f4f78 0%, #12324d 100%)',
+    border: '1px solid rgba(56,189,248,0.35)',
+    borderRadius: 6,
+    color: '#e6f6ff',
+    cursor: 'pointer',
+    fontSize: '0.86rem',
+    fontWeight: 700,
+    padding: '8px 10px',
+    fontFamily: 'inherit',
+    textAlign: 'left',
   },
   content: {
     flex: 1,

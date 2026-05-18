@@ -14,7 +14,7 @@
 
 import type { ScalpOrderUpdate } from '../scalp/types';
 
-const WS_BASE      = 'wss://fstream.binance.com/ws';
+const WS_BASE      = 'wss://fstream.binance.com/private/ws';
 const RENEW_MS     = 30 * 60 * 1_000; // Binance requires keep-alive every ≤60 min
 const RECONNECT_MS = 5_000;
 const RECONNECT_MAX_MS = 180_000;

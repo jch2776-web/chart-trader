@@ -97,7 +97,7 @@ interface SurgeTicker extends TickerInfo {
 
 type Period = 1 | 3 | 5 | 15 | 30;
 
-const WS_URL = 'wss://fstream.binance.com/ws/!miniTicker@arr';
+const WS_URL = 'wss://fstream.binance.com/market/ws/!miniTicker@arr';
 
 // Snapshot entry: timestamp + prices for all symbols
 interface PriceSnap { time: number; prices: Record<string, number>; }

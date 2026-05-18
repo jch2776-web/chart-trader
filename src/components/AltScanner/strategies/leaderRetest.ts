@@ -277,7 +277,7 @@ async function scanSymbolRetest(
   // ── 4H uptrend filter (LONG only, v2) ──────────────────────────────────
   if (opts.require4hTrend && activeDirs.includes('long')) {
     // When scanning on 4H or 1D, reuse already-fetched candles; otherwise fetch separately
-    if (interval === '4h' || interval === '1d') {
+    if (interval === '4h' || interval === '1d' || interval === '1w') {
       candles4h = closed;
     } else {
       try {
@@ -332,7 +332,7 @@ async function scanSymbolRetest(
   // The trend filter above populates candles4h only when require4hTrend+LONG.
   // Fetch here as fallback so rs4h is always computed when possible.
   if (candles4h.length < RS_DEFAULT_PERIOD + 1 && symbol !== 'BTCUSDT') {
-    if (interval === '4h' || interval === '1d') {
+    if (interval === '4h' || interval === '1d' || interval === '1w') {
       candles4h = closed;
     } else {
       try {
@@ -344,7 +344,7 @@ async function scanSymbolRetest(
   // BTC 4H candles for rs4h
   let btcCandles4h: Candle[] = [];
   if (candles4h.length >= RS_DEFAULT_PERIOD + 1 && symbol !== 'BTCUSDT') {
-    if (interval === '4h' || interval === '1d') {
+    if (interval === '4h' || interval === '1d' || interval === '1w') {
       btcCandles4h = btcCandles;
     } else {
       try {
@@ -476,12 +476,12 @@ async function scanSymbolRetest(
   // ── Status determination using current close vs orderPlan entry zone ─────
   // currentClose is the state input; orderPlan defines the valid entry bounds.
   //   TRIGGERED  — currentClose is within the entry zone (ready to fill)
-  //   INVALID    — currentClose is beyond lateAbove (chasing — skip)
+  //   INVALID    — currentClose is beyond chaseThreshold (chasing — skip)
   //   PENDING    — currentClose is approaching but not yet in zone
   const inEntryZone = currentClose >= orderPlan.entryZoneLow && currentClose <= orderPlan.entryZoneHigh;
   const isTooLate   = isLong
-    ? currentClose > orderPlan.lateAbove
-    : currentClose < orderPlan.lateAbove;
+    ? currentClose > orderPlan.chaseThreshold
+    : currentClose < orderPlan.chaseThreshold;
   const status: CandidateStatus = isTooLate ? 'INVALID' : inEntryZone ? 'TRIGGERED' : 'PENDING';
   if (status === 'TRIGGERED') stats.statusTriggered++;
   else if (status === 'PENDING') stats.statusPending++;

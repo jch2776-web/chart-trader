@@ -12,7 +12,7 @@ export function useBinanceKlines(symbol: string, interval: Interval) {
     setError(null);
     setCandles([]); // Clear old candles immediately so chart resets
     try {
-      const parsed = await fetchBinanceKlinesCached(symbol, interval, 500);
+      const parsed = await fetchBinanceKlinesCached(symbol, interval, 2000);
       setCandles(parsed as Candle[]);
     } catch (e) {
       setError(String(e));

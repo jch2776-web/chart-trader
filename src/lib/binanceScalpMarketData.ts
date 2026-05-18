@@ -12,7 +12,7 @@
  * All state is module-level (not React) for zero-latency hot path access.
  */
 
-const WS_COMBINED_BASE = 'wss://fstream.binance.com/stream?streams=';
+const WS_COMBINED_BASE = 'wss://fstream.binance.com/market/stream?streams=';
 const STALE_MS       = 2_000;  // snapshot older than this = stale
 const TRADE_WINDOW_MS = 2_000; // rolling aggTrade window
 const MAX_TRADES     = 200;    // max aggTrade entries per symbol

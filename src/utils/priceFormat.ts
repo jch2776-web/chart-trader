@@ -13,6 +13,6 @@ export function formatVolume(vol: number): string {
 export function formatTime(ms: number, interval: string): string {
   const d = new Date(ms);
   const pad = (n: number) => String(n).padStart(2, '0');
-  if (interval === '1d') return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  if (interval === '1w' || interval === '1d') return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }

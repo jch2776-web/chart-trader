@@ -183,12 +183,15 @@ export function useChartInteraction({
     setCrosshair(p => ({ ...p, visible: false }));
   }, [setCrosshair]);
 
-  // ── Double-click: reset Y auto-fit ───────────────────────────────────
+  // ── Double-click: reset Y auto-fit + scroll to latest candles ────────
   const onDoubleClick = useCallback(() => {
     isYManualRef.current = false;
     setViewport(prev => {
-      const { minPrice, maxPrice } = fitY(candles, prev.startIdx, prev.endIdx);
-      return { ...prev, minPrice, maxPrice };
+      const range = prev.endIdx - prev.startIdx;
+      const newEnd = candles.length + 10;
+      const newStart = Math.max(0, newEnd - range);
+      const { minPrice, maxPrice } = fitY(candles, newStart, newEnd);
+      return { startIdx: newStart, endIdx: newEnd, minPrice, maxPrice };
     });
   }, [candles, setViewport, isYManualRef]);
 

@@ -268,12 +268,15 @@ interface Props {
   };
   activeOrderCount?: number;
   onResetBreaker?: () => void;
+  /** 어드바이저 권장 신호 모드 (읽기 전용 힌트) */
+  advisorSignalHint?: 'momentum' | 'revert' | 'both';
 }
 
 export function ScalpSettingsPanel({
   settings, mode, onSave, onModeChange, onClose,
   isActive, onToggleActive,
   streamConnected, lastMarketTickAt, sessionStats, activeOrderCount, onResetBreaker,
+  advisorSignalHint,
 }: Props) {
   const [draft, setDraft] = useState<ScalpSettings>({ ...settings });
   const isLive = mode === 'live';
@@ -507,6 +510,35 @@ export function ScalpSettingsPanel({
               ]}
               onChange={v => set('signalMode', v)}
             />
+            {advisorSignalHint && advisorSignalHint !== draft.signalMode && (
+              <div style={{
+                background: 'rgba(240,185,11,0.08)',
+                border: '1px solid rgba(240,185,11,0.30)',
+                borderRadius: 5,
+                color: '#f0b90b',
+                fontSize: '0.75rem',
+                marginTop: 4,
+                padding: '5px 10px',
+              }}>
+                어드바이저 권장: <strong>{
+                  advisorSignalHint === 'momentum' ? 'Momentum만' :
+                  advisorSignalHint === 'revert'   ? 'Revert (역추세)만' : '둘 다 (both)'
+                }</strong> — 현재 레짐 기준 힌트 (수동 변경 가능)
+              </div>
+            )}
+            {advisorSignalHint && advisorSignalHint === draft.signalMode && (
+              <div style={{
+                background: 'rgba(14,203,129,0.06)',
+                border: '1px solid rgba(14,203,129,0.20)',
+                borderRadius: 5,
+                color: '#0ecb81',
+                fontSize: '0.75rem',
+                marginTop: 4,
+                padding: '5px 10px',
+              }}>
+                어드바이저 권장 모드와 일치
+              </div>
+            )}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
               <NumField label="최소 호가 불균형" hint="|매수-매도| / 합계" value={draft.minImbalance} min={0.05} max={0.9} step={0.05} onChange={v => set('minImbalance', v)} />
               <NumField label="최소 체결 압력" hint="2초 롤링 비율 불균형" value={draft.minTradePressure} min={0.05} max={0.9} step={0.05} onChange={v => set('minTradePressure', v)} />

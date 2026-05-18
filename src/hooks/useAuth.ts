@@ -25,6 +25,11 @@ function readUsers(): Record<string, string> {
   catch { return {}; }
 }
 
+/** Returns all usernames registered in this browser's localStorage. */
+export function getAllLocalUsers(): string[] {
+  return Object.keys(readUsers());
+}
+
 /** Returns the currently logged-in username, or null if not logged in. */
 export function getCurrentUser(): string | null {
   try { return localStorage.getItem(CURRENT_USER_KEY); } catch { return null; }
@@ -69,4 +74,27 @@ export function register(username: string, password: string): string | null {
 export function logout(): void {
   try { localStorage.removeItem(CURRENT_USER_KEY); } catch {}
   window.location.reload();
+}
+
+// ── Leaderboard access ────────────────────────────────────────────────────────
+const LB_ACCESS_KEY = 'lb_access';
+
+/** Returns true if the current user is the root admin. */
+export function isAdmin(): boolean {
+  return getCurrentUser() === ROOT_USER;
+}
+
+/** Returns true if the current user can view the leaderboard. */
+export function hasLeaderboardAccess(): boolean {
+  if (isAdmin()) return true;
+  try { return localStorage.getItem(LB_ACCESS_KEY) === '1'; } catch { return false; }
+}
+
+/** Persist leaderboard access grant for this browser. */
+export function grantLeaderboardAccess(): void {
+  try { localStorage.setItem(LB_ACCESS_KEY, '1'); } catch {}
+}
+
+export function revokeLeaderboardAccess(): void {
+  try { localStorage.removeItem(LB_ACCESS_KEY); } catch {}
 }

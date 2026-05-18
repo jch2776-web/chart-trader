@@ -44,8 +44,19 @@ const STOP_WICK_BUFFER_ATR = 0.10;
  */
 const STOP_MIN_FROM_LEVEL  = 0.30;
 
+/**
+ * ATR distance beyond the flip level used for the failed-auction exit (FAEL).
+ * Intentionally wider than ENTRY_TOLERANCE_ATR so a bar that closes just below
+ * the entry zone does NOT immediately trigger FAEL — only a genuine re-breach
+ * of the level by this margin fires the exit.
+ *
+ * LONG  → FAEL = level − FAEL_TOLERANCE_ATR × ATR
+ * SHORT → FAEL = level + FAEL_TOLERANCE_ATR × ATR
+ */
+const FAEL_TOLERANCE_ATR   = 0.60;
+
 /** Exit a position if it hasn't hit TP1 after this many bars. */
-export const TIME_STOP_BARS = 5;
+export const TIME_STOP_BARS = 8;
 
 /** Fallback TP1 in ATR when no SR structure is found above/below entry. */
 const TP_FALLBACK_ATR       = 2.0;
@@ -61,12 +72,12 @@ export interface OrderPlan {
   /** Ideal fill price — the flip level itself. */
   idealEntry: number;
   /**
-   * Late-entry threshold.
-   *   LONG  → if currentPrice > lateAbove, skip (chasing the bounce).
-   *   SHORT → if currentPrice < lateAbove, skip (chasing the drop).
+   * Chasing threshold.
+   *   LONG  → skip entry if currentPrice > chaseThreshold (chasing the bounce).
+   *   SHORT → skip entry if currentPrice < chaseThreshold (chasing the drop).
    * Always set; check `direction` to interpret correctly.
    */
-  lateAbove: number;
+  chaseThreshold: number;
   /** Cancel the limit order if not filled within this many bars. */
   cancelAfterBars: number;
 
@@ -142,7 +153,7 @@ export function buildLeaderRetestOrderPlan(
       ? Math.min(avwap, level + atr * LATE_THRESHOLD_ATR)
       : level + atr * ENTRY_TOLERANCE_ATR;
     const idealEntry    = level;
-    const lateAbove     = level + atr * LATE_THRESHOLD_ATR;
+    const chaseThreshold = level + atr * LATE_THRESHOLD_ATR;
 
     // ── Hard stop: wick low of retest-reclaim window minus buffer ─────────
     const retestWickLow = retestSlice.length > 0
@@ -154,12 +165,12 @@ export function buildLeaderRetestOrderPlan(
     );
 
     // ── Failed auction: close back below flip level (with tolerance) ──────
-    const failedAuctionExitLevel = level - atr * ENTRY_TOLERANCE_ATR;
+    const failedAuctionExitLevel = level - atr * FAEL_TOLERANCE_ATR;
 
     // ── TP1: nearest resistance clearly above the flip level ─────────────
     // Anchored to `level` (= idealEntry), not to current close price.
     const nearestRes = srLevels
-      .filter(z => z.kind === 'resistance' && z.centerPrice > level + atr * 0.10)
+      .filter(z => z.kind === 'resistance' && z.centerPrice > level + atr * 1.0)
       .sort((a, b) => a.centerPrice - b.centerPrice)[0];
     const tp1 = nearestRes ? nearestRes.centerPrice : level + atr * TP_FALLBACK_ATR;
 
@@ -167,7 +178,7 @@ export function buildLeaderRetestOrderPlan(
       entryZoneLow,
       entryZoneHigh,
       idealEntry,
-      lateAbove,
+      chaseThreshold,
       cancelAfterBars: CANCEL_AFTER_BARS,
       hardStop,
       failedAuctionExitLevel,
@@ -186,9 +197,9 @@ export function buildLeaderRetestOrderPlan(
       ? Math.max(avwap, level - atr * LATE_THRESHOLD_ATR)
       : level - atr * ENTRY_TOLERANCE_ATR;
     const idealEntry    = level;
-    // For SHORT, lateAbove stores the lower late threshold:
-    // if currentPrice <= lateAbove, the short entry has already moved too far below level
-    const lateAbove     = level - atr * LATE_THRESHOLD_ATR;
+    // For SHORT, chaseThreshold is a lower bound:
+    // skip entry if currentPrice < chaseThreshold (already moved too far below level)
+    const chaseThreshold = level - atr * LATE_THRESHOLD_ATR;
 
     // ── Hard stop: wick high of retest-reclaim window plus buffer ─────────
     const retestWickHigh = retestSlice.length > 0
@@ -200,12 +211,12 @@ export function buildLeaderRetestOrderPlan(
     );
 
     // ── Failed auction: close back above flip level (with tolerance) ──────
-    const failedAuctionExitLevel = level + atr * ENTRY_TOLERANCE_ATR;
+    const failedAuctionExitLevel = level + atr * FAEL_TOLERANCE_ATR;
 
     // ── TP1: nearest support clearly below the flip level ────────────────
     // Anchored to `level` (= idealEntry), not to current close price.
     const nearestSup = srLevels
-      .filter(z => z.kind === 'support' && z.centerPrice < level - atr * 0.10)
+      .filter(z => z.kind === 'support' && z.centerPrice < level - atr * 1.0)
       .sort((a, b) => b.centerPrice - a.centerPrice)[0];
     const tp1 = nearestSup ? nearestSup.centerPrice : level - atr * TP_FALLBACK_ATR;
 
@@ -213,7 +224,7 @@ export function buildLeaderRetestOrderPlan(
       entryZoneLow,
       entryZoneHigh,
       idealEntry,
-      lateAbove,
+      chaseThreshold,
       cancelAfterBars: CANCEL_AFTER_BARS,
       hardStop,
       failedAuctionExitLevel,

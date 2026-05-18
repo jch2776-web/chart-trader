@@ -11,7 +11,8 @@ interface Props {
 
 export function TickerHeader({ ticker, stats, currentPrice, priceChangePct }: Props) {
   const base = ticker.replace('USDT', '');
-  const price = stats?.lastPrice ?? currentPrice ?? 0;
+  // currentPrice (live WS candle close) takes priority over REST stats to stay in sync
+  const price = currentPrice ?? stats?.lastPrice ?? 0;
   const pct   = stats?.priceChangePercent ?? priceChangePct ?? 0;
   const chg   = stats?.priceChange ?? 0;
   const isUp  = pct >= 0;

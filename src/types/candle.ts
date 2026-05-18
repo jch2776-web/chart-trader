@@ -12,4 +12,4 @@ export interface Candle {
   takerBuyQuoteVolume: number;   // [10] taker buy quote asset volume
 }
 
-export type Interval = '1m' | '3m' | '5m' | '15m' | '1h' | '4h' | '1d';
+export type Interval = '1m' | '3m' | '5m' | '15m' | '1h' | '4h' | '1d' | '1w';
